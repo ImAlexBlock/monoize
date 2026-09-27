@@ -247,7 +247,9 @@ query parameters as `GET /api/dashboard/request-logs` (`limit` 1..200, `offset`,
 returns the same response shape (`data`, `total`, `total_charge_nano_usd`, `limit`,
 `offset`) over request-log rows with `rl.user_id = {org_id}`. Non-admin callers get
 masked error detail under the same `mask_sensitive_info` setting as the personal log
-list. A non-member caller receives `404 not_found` for both endpoints.
+list. The response MUST omit `upstream_response_model` for non-admin callers, regardless
+of `mask_sensitive_info`, under `request-logs.spec.md` RL-API16. A non-member caller
+receives `404 not_found` for both endpoints.
 
 ORG-24a. Personal dashboards exclude org usage. `GET /api/dashboard/analytics`,
 `GET /api/dashboard/request-logs`, and the personal key list exclude every row and key

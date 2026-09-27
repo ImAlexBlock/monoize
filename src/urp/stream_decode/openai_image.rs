@@ -1,6 +1,7 @@
 use crate::error::{AppError, AppResult};
 use crate::handlers::usage::{
-    mark_stream_ttfb_if_needed, record_stream_done_sentinel, record_stream_terminal_event,
+    mark_stream_ttfb_if_needed, record_observed_upstream_response_model,
+    record_stream_done_sentinel, record_stream_terminal_event,
 };
 use crate::handlers::{StreamRuntimeMetrics, UrpRequest as HandlerUrpRequest};
 use crate::urp::{
@@ -53,7 +54,13 @@ pub(crate) async fn stream_image_to_urp_events(
         }
 
         match ev.event.as_str() {
-            "image_generation.partial_image" | "response.image_generation.partial_image" => {}
+            "image_generation.partial_image" | "response.image_generation.partial_image" => {
+                if let Ok(data) = serde_json::from_str::<Value>(&ev.data)
+                    && let Some(model) = data.get("model").and_then(Value::as_str)
+                {
+                    record_observed_upstream_response_model(&runtime_metrics, model, false).await;
+                }
+            }
             "image_generation.completed" | "response.image_generation.completed" => {
                 let data_val: Value = serde_json::from_str(&ev.data).map_err(|err| {
                     AppError::new(
@@ -62,6 +69,9 @@ pub(crate) async fn stream_image_to_urp_events(
                         err.to_string(),
                     )
                 })?;
+                if let Some(model) = data_val.get("model").and_then(Value::as_str) {
+                    record_observed_upstream_response_model(&runtime_metrics, model, true).await;
+                }
                 if let Some(node) = image_node_from_payload(&data_val) {
                     if !started_response {
                         tx.send(UrpStreamEvent::ResponseStart {

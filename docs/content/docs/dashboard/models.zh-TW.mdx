@@ -17,6 +17,10 @@ Channel 的模型條目可以用 `redirect` 指定真實的上游模型名稱。
 
 範例：客戶端呼叫 `my-fast-model`。一個 Provider 將其重新導向到 `gpt-4o-mini`，另一個 Provider 將其重新導向到 `claude-3-5-haiku-20241022`。計費和日誌始終顯示邏輯名稱。
 
+使用 `admin` 或 `super_admin` 帳戶時，請求日誌還會在邏輯模型徽章旁顯示不同的上游回應模型。
+將游標移到模型徽章或 Channel 上，查看**實際模型**。此值不會改變計費。
+請參閱[請求日誌](/zh-TW/docs/request-logs)。
+
 ## 模型中繼資料與定價
 
 **模型資料庫**頁面儲存模型中繼資料和 Billing Profile 費率記錄。Monoize 從 [Models.dev](https://models.dev) 匯入中繼資料和價格建議。

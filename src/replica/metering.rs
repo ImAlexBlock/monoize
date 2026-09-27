@@ -130,8 +130,13 @@ pub fn validate_delta(delta: &BalanceDelta) -> Result<(), &'static str> {
     if !valid_delta_kind(&delta.kind) {
         return Err("kind must be request_charge or api_key_charge");
     }
-    if delta.amount_nano_usd.trim().parse::<i128>().is_err() {
-        return Err("amount_nano_usd must be decimal i128 text");
+    let amount = delta
+        .amount_nano_usd
+        .trim()
+        .parse::<i128>()
+        .map_err(|_| "amount_nano_usd must be decimal i128 text")?;
+    if amount < 0 {
+        return Err("amount_nano_usd must be nonnegative");
     }
     if delta.created_at.is_empty() {
         return Err("created_at must be RFC 3339 text");
@@ -197,11 +202,12 @@ impl PendingDeductions {
     }
 
     pub fn subtract(&self, subject: &str, amount: i128) {
-        if let Some(mut entry) = self.map.get_mut(subject) {
-            *entry -= amount;
-            if *entry == 0 {
-                drop(entry);
-                self.map.remove(subject);
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
+            self.map.entry(subject.to_string())
+        {
+            *entry.get_mut() -= amount;
+            if *entry.get() == 0 {
+                entry.remove();
             }
         }
     }
@@ -434,7 +440,7 @@ impl DeltaSpool {
         }
     }
 
-    pub fn reconstruct_pending_amounts(&self) -> Vec<(String, i128)> {
+    pub fn reconstruct_pending_amounts(&self) -> Result<Vec<(String, i128)>, String> {
         let mut names = self.list_json_files();
         names.sort_by(|left, right| left.0.cmp(&right.0));
         let mut amounts = Vec::new();
@@ -443,10 +449,15 @@ impl DeltaSpool {
             match std::fs::read(&path) {
                 Ok(bytes) => match serde_json::from_slice::<BalanceDelta>(&bytes) {
                     Ok(delta) => {
-                        let Some(subject) = delta_subject(&delta) else {
+                        let Ok(amount) = delta.amount_nano_usd.trim().parse::<i128>() else {
                             continue;
                         };
-                        let Ok(amount) = delta.amount_nano_usd.trim().parse::<i128>() else {
+                        if amount < 0 {
+                            return Err(format!(
+                                "invalid delta spool file {name}: amount_nano_usd must be nonnegative"
+                            ));
+                        }
+                        let Some(subject) = delta_subject(&delta) else {
                             continue;
                         };
                         amounts.push((subject, amount));
@@ -468,7 +479,7 @@ impl DeltaSpool {
                 }
             }
         }
-        amounts
+        Ok(amounts)
     }
 
     pub fn pending_files(&self) -> usize {
@@ -487,6 +498,7 @@ impl DeltaSpool {
     }
 
     pub async fn enqueue(&self, delta: &BalanceDelta) -> Result<(), String> {
+        validate_delta(delta).map_err(str::to_string)?;
         let payload = serde_json::to_vec(delta).map_err(|error| error.to_string())?;
         let _io_guard = self.capacity.lock().await;
         let current = self.capacity.accounted_bytes();
@@ -764,7 +776,7 @@ impl ReplicaMetering {
         )
         .map_err(|error| error.to_string())?;
         let pending = PendingDeductions::default();
-        for (subject, amount) in delta_spool.reconstruct_pending_amounts() {
+        for (subject, amount) in delta_spool.reconstruct_pending_amounts()? {
             pending.add(&subject, amount);
         }
         Ok(Self {
@@ -1386,6 +1398,10 @@ async fn apply_metering_batch_result(
     db: &DbPool,
     batch: &MeteringBatch,
 ) -> Result<MeteringAck, AdmissionRuntimeError> {
+    for delta in &batch.balance_deltas {
+        validate_delta(delta)
+            .map_err(|message| AdmissionRuntimeError::Storage(message.to_string()))?;
+    }
     let terminals = batch
         .plan_terminals
         .iter()

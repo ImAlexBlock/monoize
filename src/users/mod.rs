@@ -681,6 +681,7 @@ pub struct InsertRequestLog {
     pub model: String,
     pub provider_id: Option<String>,
     pub upstream_model: Option<String>,
+    pub upstream_response_model: Option<String>,
     pub channel_id: Option<String>,
     pub names: RequestLogNameSnapshots,
     pub is_stream: bool,
@@ -800,6 +801,8 @@ pub struct RequestLogRow {
     pub is_stream: bool,
     pub model: String,
     pub upstream_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_response_model: Option<String>,
     pub effective_provider_type: Option<String>,
     pub request_kind: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -843,6 +846,9 @@ impl RequestLogRow {
             }
         }
     }
+    pub fn hide_upstream_response_model(&mut self) {
+        self.upstream_response_model = None;
+    }
 }
 
 impl InsertRequestLog {
@@ -855,6 +861,7 @@ impl InsertRequestLog {
             is_stream: self.is_stream,
             model: self.model.clone(),
             upstream_model: self.upstream_model.clone(),
+            upstream_response_model: self.upstream_response_model.clone(),
             effective_provider_type: self.effective_provider_type.clone(),
             request_kind: self.request_kind.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
@@ -1238,6 +1245,7 @@ mod tests {
             model: "gpt-5-mini".to_string(),
             provider_id: None,
             upstream_model: None,
+upstream_response_model: None,
             channel_id: None,
             names: super::RequestLogNameSnapshots::default(),
             is_stream: false,

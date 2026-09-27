@@ -17,6 +17,7 @@ fn live_usage_log(
         model: "gpt-5-mini".to_string(),
         provider_id: None,
         upstream_model: None,
+        upstream_response_model: None,
         channel_id: None,
         names: monoize::users::RequestLogNameSnapshots::default(),
         is_stream: false,

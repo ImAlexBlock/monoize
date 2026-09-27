@@ -199,7 +199,7 @@ pub(crate) fn last_used_bulk_update(
 // RequestLogBatcher: buffers InsertRequestLog entries, flushes as batch INSERT
 // ---------------------------------------------------------------------------
 
-const REQUEST_LOG_INSERT_COLUMNS: usize = 38;
+const REQUEST_LOG_INSERT_COLUMNS: usize = 39;
 pub(crate) const REQUEST_LOG_INSERT_CHUNK_ENTRIES: usize = 20;
 pub(crate) const REQUEST_LOG_MIN_ENTRY_BYTES: u64 = 4_096;
 const REQUEST_LOG_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(10);
@@ -212,7 +212,7 @@ const REQUEST_LOG_RESERVATION_CONSUMED: u8 = 4;
 const REQUEST_LOG_RESERVATION_CANCELING: u8 = 5;
 const REQUEST_LOG_UNARMED_MARKER: &[u8] = b"monoize-request-log-reservation\n";
 const REQUEST_LOG_INSERT_PREFIX: &str = r#"INSERT INTO request_logs
-       (id, request_id, user_id, api_key_id, model, provider_id, upstream_model, channel_id, is_stream,
+       (id, request_id, user_id, api_key_id, model, provider_id, upstream_model, upstream_response_model, channel_id, is_stream,
         input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, tool_prompt_tokens, reasoning_tokens,
         accepted_prediction_tokens, rejected_prediction_tokens,
         provider_multiplier, charge_nano_usd, status, usage_breakdown_json,
@@ -247,6 +247,8 @@ pub struct SpoolRequestLog {
     pub model: String,
     pub provider_id: Option<String>,
     pub upstream_model: Option<String>,
+    #[serde(default)]
+    pub upstream_response_model: Option<String>,
     pub channel_id: Option<String>,
     pub is_stream: bool,
     pub input_tokens: Option<u64>,
@@ -290,6 +292,7 @@ impl SpoolRequestLog {
             model: log.model.clone(),
             provider_id: log.provider_id.clone(),
             upstream_model: log.upstream_model.clone(),
+            upstream_response_model: log.upstream_response_model.clone(),
             channel_id: log.channel_id.clone(),
             is_stream: log.is_stream,
             input_tokens: log.input_tokens,
@@ -338,6 +341,7 @@ impl SpoolRequestLog {
             model: self.model.clone(),
             provider_id: self.provider_id.clone(),
             upstream_model: self.upstream_model.clone(),
+            upstream_response_model: self.upstream_response_model.clone(),
             channel_id: self.channel_id.clone(),
             names: crate::users::RequestLogNameSnapshots::default(),
             is_stream: self.is_stream,
@@ -401,6 +405,7 @@ fn request_log_insert_values(log: &SpoolRequestLog) -> Vec<sea_orm::Value> {
         log.model.clone().into(),
         log.provider_id.clone().into(),
         log.upstream_model.clone().into(),
+        log.upstream_response_model.clone().into(),
         log.channel_id.clone().into(),
         SeaValue::Int(Some(if log.is_stream { 1 } else { 0 })),
         request_log_u64_value("input_tokens", log.input_tokens, log.request_id.as_deref()),
@@ -2203,6 +2208,7 @@ mod tests {
             model: "model-1".to_string(),
             provider_id: Some("provider-1".to_string()),
             upstream_model: Some("upstream-1".to_string()),
+            upstream_response_model: None,
             channel_id: Some("channel-1".to_string()),
             is_stream: true,
             input_tokens: Some(1),
@@ -2245,6 +2251,7 @@ mod tests {
             model: "model-1".to_string(),
             provider_id: Some("provider-1".to_string()),
             upstream_model: Some("upstream-1".to_string()),
+            upstream_response_model: None,
             channel_id: Some("channel-1".to_string()),
             names: RequestLogNameSnapshots::default(),
             is_stream: true,
@@ -2415,7 +2422,7 @@ mod tests {
             .map(|chunk| request_log_insert_chunk(chunk.iter()).1.len())
             .collect::<Vec<_>>();
 
-        assert_eq!(bind_counts, vec![760, 760, 38]);
+        assert_eq!(bind_counts, vec![780, 780, 39]);
         assert!(bind_counts.into_iter().all(|count| count <= 999));
     }
 
@@ -3000,8 +3007,13 @@ mod tests {
 
     #[test]
     fn spool_request_log_round_trips_usage_into_insert_log() {
-        let spool = spool_request_log("round-trip");
+        let mut spool = spool_request_log("round-trip");
+        spool.upstream_response_model = Some("actual-model".to_string());
         let insert = spool.to_insert_log();
+        assert_eq!(
+            insert.upstream_response_model.as_deref(),
+            Some("actual-model")
+        );
         assert_eq!(insert.request_id.as_deref(), Some("request-round-trip"));
         assert_eq!(insert.input_tokens, Some(1));
         assert_eq!(insert.output_tokens, Some(2));
@@ -3009,6 +3021,17 @@ mod tests {
         assert_eq!(insert.ttfb_ms, Some(11));
         assert_eq!(insert.charge_nano_usd, Some(9));
         assert_eq!(insert.status, "success");
+    }
+
+    #[test]
+    fn legacy_spool_without_upstream_response_model_decodes_as_absent() {
+        let mut encoded = serde_json::to_value(spool_request_log("legacy-model")).unwrap();
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("upstream_response_model");
+        let decoded: SpoolRequestLog = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.to_insert_log().upstream_response_model, None);
     }
 
     struct RecordingSink(std::sync::Mutex<Vec<SpoolRequestLog>>);

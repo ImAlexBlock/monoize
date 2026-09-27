@@ -1150,6 +1150,14 @@ async fn execute_stream_collected_image_typed(
                             req.reasoning.as_ref().and_then(|r| r.effort.clone()),
                             tried_providers,
                             task_state.client_gone(),
+                            runtime_metrics
+                                .lock()
+                                .await
+                                .response_model
+                                .as_deref()
+                                .and_then(|observed| {
+                                    mismatched_upstream_response_model(&req_attempt.model, observed)
+                                }),
                         );
                         return Ok((resp, logical_model.clone()));
                     }

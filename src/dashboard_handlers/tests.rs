@@ -1323,6 +1323,7 @@ fn request_log_timing_serializes_compatibility_aliases() {
         is_stream: true,
         model: "gpt-5".to_string(),
         upstream_model: Some("gpt-5-upstream".to_string()),
+        upstream_response_model: None,
         effective_provider_type: Some("responses".to_string()),
         request_kind: None,
         reasoning_effort: None,
@@ -1449,8 +1450,8 @@ async fn sqlite_migration_creates_request_log_retention_indexes() {
         .try_get("", "column_count")
         .expect("request-log column count decodes");
     // 42 columns from the RL-S3b rebuild, plus session_affinity_value (RL-S4),
-    // minus the five visible-TPS columns dropped per RL-S12.
-    assert_eq!(request_log_columns, 38);
+    // minus the five visible-TPS columns (RL-S12), plus upstream_response_model (RL-S14).
+    assert_eq!(request_log_columns, 39);
 
     let request_log_foreign_keys = db
         .read()

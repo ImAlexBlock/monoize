@@ -17,9 +17,10 @@ use monoize::db_cache::{LastUsedBatcher, RequestLogBatcher};
 use monoize::node_config::NodeRole;
 use monoize::replica::metering::{
     BalanceDelta, DeltaSpool, HEARTBEAT_EVICT_INTERVALS, MeteringAck, MeteringBatch,
-    MeteringSpoolCapacity, REPLICA_IDENTITY_FILE_NAME, ReplicaHeartbeat, ReplicaHeartbeatRecord,
-    ReplicaHeartbeatSource, ReplicaMetering, ShipTick, apply_metering_batch,
-    drain_delta_spool_to_local_db, evict_expired_heartbeats, resolve_replica_identity,
+    MeteringSpoolCapacity, PendingDeductions, REPLICA_IDENTITY_FILE_NAME, ReplicaHeartbeat,
+    ReplicaHeartbeatRecord, ReplicaHeartbeatSource, ReplicaMetering, ShipTick,
+    apply_metering_batch, drain_delta_spool_to_local_db, evict_expired_heartbeats,
+    resolve_replica_identity,
 };
 use monoize::store_billing::admission_runtime::{TerminalApplyInput, terminal_digest};
 use monoize::store_billing::admission_token::{
@@ -95,6 +96,36 @@ fn plan_terminal_wire_fields_default_for_backward_compatibility() {
     }))
     .unwrap();
     assert!(ack.plan_terminal_acks.is_empty());
+}
+
+#[test]
+fn pending_ack_preserves_a_concurrent_new_deduction() {
+    let pending = PendingDeductions::default();
+    let barrier = std::sync::Barrier::new(2);
+    pending.add("user", 1);
+    let first_mismatch = std::thread::scope(|scope| {
+        let producer = scope.spawn(|| {
+            for _ in 0..50_000 {
+                barrier.wait();
+                pending.add("user", 1);
+                barrier.wait();
+            }
+        });
+        let mut first_mismatch = None;
+        for round in 0..50_000 {
+            barrier.wait();
+            pending.subtract("user", 1);
+            barrier.wait();
+            let observed = pending.outstanding("user");
+            if observed != 1 && first_mismatch.is_none() {
+                first_mismatch = Some((round, observed));
+            }
+        }
+        producer.join().unwrap();
+        first_mismatch
+    });
+    assert_eq!(first_mismatch, None, "acknowledgement lost a new deduction");
+    assert_eq!(pending.outstanding("user"), 1);
 }
 
 #[tokio::test]
@@ -560,6 +591,218 @@ async fn boot() -> (TempDir, monoize::app::AppState) {
     (temp, state)
 }
 
+async fn balance_delta_fixture() -> (TempDir, monoize::app::AppState, String, String) {
+    let (temp, state) = boot().await;
+    let user = state
+        .user_store
+        .create_user("negative_delta", "pw", monoize::users::UserRole::User, None)
+        .await
+        .unwrap();
+    let (key, _) = state
+        .user_store
+        .create_api_key(&user.id, "negative-delta-key", None)
+        .await
+        .unwrap();
+    {
+        let write = state.db_pool.write().await;
+        write
+            .execute(state.db_pool.stmt(
+                "UPDATE users SET balance_nano_usd = '100' WHERE id = $1",
+                vec![user.id.clone().into()],
+            ))
+            .await
+            .unwrap();
+        write
+            .execute(state.db_pool.stmt(
+                "UPDATE api_keys SET sub_account_enabled = 1, sub_account_balance_nano = '50' WHERE id = $1",
+                vec![key.id.clone().into()],
+            ))
+            .await
+            .unwrap();
+    }
+    (temp, state, user.id, key.id)
+}
+
+async fn assert_negative_delta_left_balances_unchanged(
+    state: &monoize::app::AppState,
+    user_id: &str,
+    api_key_id: &str,
+) {
+    let user = state
+        .user_store
+        .get_user_balance_uncached(user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(user.balance_nano_usd, 100);
+    let key = state
+        .user_store
+        .get_api_key_by_id(api_key_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(key.sub_account_balance_nano, "50");
+    assert!(
+        state
+            .user_store
+            .list_billing_ledger(user_id, 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn metering_ingest_rejects_negative_charge_without_partial_apply() {
+    let (_temp, mut state, user_id, api_key_id) = balance_delta_fixture().await;
+    let mut node = (*state.node).clone();
+    node.replica_token = Some("tok".to_string());
+    state.node = Arc::new(node);
+    state.metering_token_digest = Some(monoize::replica::metering::sha256_hex_lower("tok"));
+    let app = monoize::app::build_app(state.clone());
+    for (kind, key_id) in [
+        ("request_charge", None),
+        ("api_key_charge", Some(api_key_id.as_str())),
+    ] {
+        for amount in [-1, i128::MIN] {
+            let batch = MeteringBatch {
+                balance_deltas: vec![
+                    delta("request_charge", &user_id, None, 1),
+                    delta(kind, &user_id, key_id, amount),
+                ],
+                ..Default::default()
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(monoize::replica::metering::METERING_INGEST_PATH)
+                        .header("authorization", "Bearer tok")
+                        .header("x-monoize-replica-id", TEST_REPLICA_ID)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&batch).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["error"]["code"], "metering_batch_invalid");
+            assert_negative_delta_left_balances_unchanged(&state, &user_id, &api_key_id).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn shared_metering_apply_rejects_negative_charge_without_partial_apply() {
+    let (_temp, state, user_id, api_key_id) = balance_delta_fixture().await;
+    for (kind, key_id) in [
+        ("request_charge", None),
+        ("api_key_charge", Some(api_key_id.as_str())),
+    ] {
+        for amount in [-1, i128::MIN] {
+            let batch = MeteringBatch {
+                balance_deltas: vec![
+                    delta("request_charge", &user_id, None, 1),
+                    delta(kind, &user_id, key_id, amount),
+                ],
+                ..Default::default()
+            };
+            assert!(apply_metering_batch(&state.db_pool, &batch).await.is_err());
+            assert_negative_delta_left_balances_unchanged(&state, &user_id, &api_key_id).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn delta_enqueue_rejects_negative_charge_before_spool_or_pending_mutation() {
+    let temp = TempDir::new().unwrap();
+    let metering = ReplicaMetering::new(
+        temp.path().join("metering"),
+        1024 * 1024,
+        "http://127.0.0.1:9",
+        "token",
+        10,
+        TEST_REPLICA_ID.to_string(),
+    )
+    .unwrap();
+    for (kind, key_id, subject) in [
+        ("request_charge", None, "user"),
+        ("api_key_charge", Some("key"), "key"),
+    ] {
+        assert!(
+            metering
+                .enqueue_balance_delta(kind, "user", key_id, -1, &serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            metering
+                .delta_spool()
+                .enqueue(&delta(kind, "user", key_id, -1))
+                .await
+                .is_err()
+        );
+        assert_eq!(metering.pending().outstanding(subject), 0);
+        assert_eq!(metering.delta_spool().pending_files(), 0);
+        assert_eq!(metering.spool_capacity().accounted_bytes(), 0);
+    }
+}
+
+#[tokio::test]
+async fn persisted_negative_charge_blocks_replica_startup_and_promotion_drain() {
+    let (temp, state, user_id, api_key_id) = balance_delta_fixture().await;
+    let spool_dir = temp.path().join("negative-delta-spool");
+    std::fs::create_dir(&spool_dir).unwrap();
+    let spool_path = spool_dir.join("00000000000000000001-negative.json");
+    let negative = delta("request_charge", &user_id, None, -1);
+    std::fs::write(&spool_path, serde_json::to_vec(&negative).unwrap()).unwrap();
+    assert!(
+        ReplicaMetering::new(
+            spool_dir.clone(),
+            1024 * 1024,
+            "http://127.0.0.1:9",
+            "token",
+            10,
+            TEST_REPLICA_ID.to_string(),
+        )
+        .is_err()
+    );
+    assert!(spool_path.exists());
+    let spool = DeltaSpool::new(spool_dir, 1024 * 1024).unwrap();
+    assert!(
+        drain_delta_spool_to_local_db(&state.db_pool, &spool)
+            .await
+            .is_err()
+    );
+    assert!(spool_path.exists());
+    assert_negative_delta_left_balances_unchanged(&state, &user_id, &api_key_id).await;
+}
+
+#[tokio::test]
+async fn persisted_negative_charge_with_invalid_subject_blocks_startup() {
+    for kind in ["invalid_charge", "api_key_charge"] {
+        let temp = TempDir::new().unwrap();
+        let spool_path = temp.path().join("00000000000000000001-negative.json");
+        let negative = delta(kind, "user", None, -1);
+        std::fs::write(&spool_path, serde_json::to_vec(&negative).unwrap()).unwrap();
+        assert!(
+            ReplicaMetering::new(
+                temp.path().to_path_buf(),
+                1024 * 1024,
+                "http://127.0.0.1:9",
+                "token",
+                10,
+                TEST_REPLICA_ID.to_string(),
+            )
+            .is_err()
+        );
+        assert!(spool_path.exists());
+    }
+}
+
 #[tokio::test]
 async fn ingest_applies_balance_delta_idempotently() {
     let (_temp, state) = boot().await;
@@ -854,6 +1097,7 @@ fn dummy_request_log() -> monoize::users::InsertRequestLog {
         model: "m".to_string(),
         provider_id: None,
         upstream_model: None,
+        upstream_response_model: None,
         channel_id: None,
         names: monoize::users::RequestLogNameSnapshots::default(),
         is_stream: false,

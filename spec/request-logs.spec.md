@@ -34,6 +34,7 @@ A request log row has:
 - `model: string` (logical model requested by the client)
 - `provider_id: string?`
 - `upstream_model: string?`
+- `upstream_response_model: string?` (model name declared by the selected upstream response when it differs from the model sent upstream; null when the response declares no model or the names match under RL1l)
 - `channel_id: string?` (the channel that ultimately served the request)
 - `is_stream: boolean`
 - `input_tokens: integer?`
@@ -154,6 +155,21 @@ post-drain steps have a remaining budget.
 RL1h. A downstream client disconnect MUST NOT cancel in-flight upstream work. After admission, Monoize MUST keep the forwarding task alive independently of the downstream HTTP connection: it MUST continue dispatching or consuming the upstream request until one of the L2/L2.1 terminal conditions in `user-billing-and-model-metadata.spec.md` holds. Encoded bytes that can no longer be delivered MAY be discarded. If that upstream attempt completes as a billable success, billing MUST execute normally on the accumulated or terminal upstream usage and the request log MUST finalize as `status = "client_gone"` with `error_code = "client_gone"`, `error_message = "client disconnected"`, and `error_http_status = 499`. If the upstream attempt fails as an API error, the request log MUST finalize as `status = "error"` with that upstream error (not as a local 500). `"client_gone"` is a billable terminal status and MUST NOT be treated as a server fault.
 
 RL1i. When a provider attempt is selected (upstream call succeeds or streaming begins), the provider metadata (`provider_id`, `channel_id`, `upstream_model`, `provider_multiplier`) MUST be captured in memory and included in the terminal INSERT. No intermediate database write is performed.
+
+RL1l. A terminal `success` or `client_gone` row MUST record `upstream_response_model` only when the selected upstream response declares a model that differs from the model sent on that attempt.
+
+1. The sent model is the final outbound `model` after request routing and request-phase transforms.
+2. Observation MUST read the upstream response and MUST NOT read the downstream response model.
+3. Trim the observed model. Ignore an empty result.
+4. Keep at most the first 200 Unicode scalar values.
+5. Compare the bounded value with the sent model using ASCII case-insensitive equality. A match MUST store null.
+6. A mismatch MUST store the bounded observed value.
+7. A terminal upstream declaration replaces an earlier declaration. Otherwise the first declaration is kept.
+8. This value MUST NOT change billing, the stored logical `model`, the stored `upstream_model`, or the downstream response model.
+
+RL1l-1. Pending rows and terminal `error` rows MUST store `upstream_response_model` as null.
+
+RL1l-2. Non-stream observation MUST read the selected upstream JSON before downstream transforms or model rewriting. Chat Completions, Responses, Messages, embeddings, compact, and image responses use the top-level `model` string. Gemini uses `modelVersion`, falling back to a top-level `model` string. Stream observation uses the corresponding upstream event fields: Responses `response.model`, Chat Completions `model`, Messages `message.model`, Gemini `modelVersion` or `model`, and image events `model`. Responses and image terminal events and Chat Completions or Gemini events with a non-empty terminal finish reason are terminal declarations under RL1l-7. A collected or synthetic stream MUST follow the same observation and sent-model comparison rules. An absent declaration MUST NOT fall back to an internally synthesized response model.
 
 RL1j. For every dashboard-managed API-key request that will generate a terminal request log, Monoize MUST reserve durable request-log spool admission after authentication succeeds and before it dispatches an HTTP request upstream, opens an upstream WebSocket, or commits any upstream request headers. If admission is unavailable, Monoize MUST emit an `ERROR` log with message `request-log spool admission failed`, stage `reserve`, the canonical `request_id`, and the concrete admission error. Monoize MUST then return HTTP `503` with code `request_log_spool_unavailable` and MUST NOT dispatch or partially dispatch the request upstream.
 
@@ -348,11 +364,14 @@ RL-API14. Error-detail disclosure is role-dependent (`upstream-error-sanitizatio
 - When the caller's role is `admin` or `super_admin`, `GET /api/dashboard/request-logs` and `GET /api/dashboard/request-logs/stream` MUST return `error.message` and every `tried_providers[].error` exactly as stored (full raw detail, bounded only by write-time truncation).
 - For any other caller, both endpoints MUST replace `error.message` with `MASK(stored text)` and each `tried_providers[].error` with `MASK(stored text)` before serialization, where `MASK` is defined by `upstream-error-sanitization.spec.md` SAN-D1. The stored row MUST NOT be modified.
 
+
+RL-API16. `GET /api/dashboard/request-logs`, `GET /api/dashboard/request-logs/stream`, and `GET /api/dashboard/orgs/{org_id}/request-logs` MUST include `upstream_response_model` when its stored value is non-null and the caller has role `admin` or `super_admin`. A null value MUST be omitted. For every other caller, these endpoints MUST omit that field before serialization. The stored row MUST NOT be modified. This omission does not depend on sensitive-information masking. Existing endpoint authorization rules remain unchanged.
+
 ### 3.2 Admin-visible vs user-visible fields
 
-The API returns the same enriched schema for all users. The frontend controls column visibility:
+The API returns the same enriched schema for all users, except `upstream_response_model` under RL-API16. The frontend controls column visibility:
 
-- **Admin-only columns:** `username`, `channel` (display text uses `provider_name` when available, otherwise falls back to `provider_id`; tooltip shows channel name and upstream model context)
+- **Admin-only columns:** `username`, `channel` (display text uses `provider_name` when available, otherwise falls back to `provider_id`; tooltip shows channel name and upstream model context). `upstream_response_model` is also admin-only under RL-API16 and FL9c.
 - **All users see:** `created_at`, `request_id`, `model` (with ModelBadge), `api_key_name`, `duration_ms`/`ttfb_ms`/`is_stream` (merged badge group), `input_tokens`, `output_tokens`, `charge_nano_usd`, `status`, `request_ip`, and error tooltip details (`error_code`, `error_message`, `error_http_status`) when `status = "error"`.
 - For non-admin callers, the `error_message` and `tried_providers[].error` values inside the returned rows are the read-time-masked forms defined by RL-API14; admin callers receive the stored full detail. The frontend renders whichever text the API returned and performs no additional masking.
 
@@ -385,7 +404,7 @@ RL-S3. `request_logs.user_id` MUST store the exact authenticated user identifier
 
 RL-S3a. A terminal row from the durable request-log spool MUST remain insertable when its `user_id` no longer exists in `users`, including when the user was deleted after request admission and when a later process recovers an older spool file. A missing current user MUST NOT make request-log batch flush retry permanently.
 
-RL-S3b. Migration `m20260809_000031_request_logs_without_user_fk` requires its input `request_logs` table to contain `id`, `user_id`, `model`, `is_stream`, `status`, and `created_at`. Every other canonical column in section 1.1 MAY be absent. The input MAY also contain non-canonical legacy columns. The output table on SQLite and PostgreSQL MUST contain exactly 42 columns — the canonical columns in section 1.1 except `session_affinity_value` (added later per RL-S4), plus the five visible-TPS columns (`first_visible_output_ms`, `last_visible_output_ms`, `visible_generation_ms`, `visible_output_tokens`, `tps_mode`) that a later migration removes per RL-S12 — and MUST contain no foreign key from `user_id` to `users`.
+RL-S3b. Migration `m20260809_000031_request_logs_without_user_fk` requires its input `request_logs` table to contain `id`, `user_id`, `model`, `is_stream`, `status`, and `created_at`. Every other canonical column in section 1.1 MAY be absent. The input MAY also contain non-canonical legacy columns. The output table on SQLite and PostgreSQL MUST contain exactly 42 columns — the canonical columns in section 1.1 except `session_affinity_value` (added later per RL-S4) and `upstream_response_model` (added later per RL-S14), plus the five visible-TPS columns (`first_visible_output_ms`, `last_visible_output_ms`, `visible_generation_ms`, `visible_output_tokens`, `tps_mode`) that a later migration removes per RL-S12 — and MUST contain no foreign key from `user_id` to `users`.
 
 RL-S3b-1. For each canonical source column that exists, migration `m20260809_000031_request_logs_without_user_fk` MUST copy its value without conversion except for the three token fallback rules in RL-S3b-2. For each absent nullable canonical source column, the migration MUST create that column with the backend type defined by RL-S2f and store null for every existing row.
 
@@ -425,6 +444,8 @@ RL-S11. Expired-row cleanup defined in RL-S9 MUST also execute periodically in a
 RL-S12. Migration `m20260824_000040_drop_request_log_visible_tps` MUST drop columns `first_visible_output_ms`, `last_visible_output_ms`, `visible_generation_ms`, `visible_output_tokens`, and `tps_mode` from `request_logs` on SQLite and PostgreSQL. Each drop MUST be a no-op when that column is already absent, so running the up migration twice succeeds and leaves the same schema. The migration MUST NOT modify any other column, row, or index. The down migration MUST be a no-op because dropped visible-TPS values cannot be reconstructed.
 
 RL-S13. Migration `m20260914_000077_request_log_usage_breakdown_slim` MUST rewrite every `request_logs` row whose `usage_breakdown_json` parses as JSON and contains a top-level `raw_usage_extra` member, replacing the column value with the same JSON object minus that member. A row whose column is NULL, does not parse as JSON, or lacks the member MUST remain byte-identical. The migration MUST be idempotent: a second run changes no row. The migration MUST NOT modify any other column, row, or index and MUST NOT rebuild the table. Because SQLite returns freed pages to the file free list rather than to the filesystem, database file compaction after this migration is a deployment-time `VACUUM` outside the migration itself.
+
+RL-S14. Migration `m20260924_000125_request_log_upstream_response_model` MUST add nullable `TEXT` column `upstream_response_model` on SQLite and PostgreSQL without rebuilding `request_logs` or changing its indexes. Existing rows MUST read null. A durable spool entry created before this field existed MUST decode the absent field as null.
 
 ## 5. Frontend display
 
@@ -501,6 +522,13 @@ FL9. The merged `model/[channel]` cell MUST use a non-wrapping column layout ins
 - When `affinity_hit` is true for an admin viewer, the second line MUST include a localized sticky-session badge immediately after the Channel display value. The badge MUST NOT appear when `affinity_hit` is false or null.
 - Retry-chain hops MUST NOT create a third visible line. Their full path remains available through FL9b and their count remains visible through FL4.
 - On hover, focus, or activate, the tooltip MUST show the content defined by FL9b. Activation MUST work on touch devices; activating outside the tooltip or pressing Escape MUST close it.
+
+FL9c. Actual upstream response model, admin only:
+
+- When the viewer is not an admin, the model cell, model tooltip, and channel tooltip MUST NOT render `upstream_response_model`.
+- When the viewer is an admin and `upstream_response_model` is non-empty, the first line of the merged model cell MUST show that value after the ModelBadge on the same non-wrapping line.
+- The admin model tooltip and the admin channel tooltip MUST each show the same value with a localized label.
+- The value MUST NOT add a third visible line and MUST NOT change the 44-pixel row height.
 
 FL9a. Compact retry-chain hops:
 

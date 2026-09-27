@@ -2157,7 +2157,8 @@
       "keysSummary": "{{count}} keys",
       "itemsSummary": "{{count}} items",
       "framesTruncated": "Frame list truncated: {{frames}} frames / {{bytes}} bytes omitted"
-    }
+    },
+    "upstreamResponseModel": "Actual Model"
   },
   "billingPlans": {
     "title": "Billing Plans",

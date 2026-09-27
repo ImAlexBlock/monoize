@@ -287,6 +287,11 @@ pub async fn compact_response(
                             None,
                             tried_providers,
                             false,
+                            upstream_response_model_from_json(
+                                &attempt.upstream_model,
+                                attempt.provider_type,
+                                &value,
+                            ),
                         );
                         if let Some(session) = capture.session.as_ref() {
                             session.persist_with_result(usage.as_ref(), false).await;

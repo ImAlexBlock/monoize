@@ -70,6 +70,12 @@ export function RequestLogModelTooltipDetails({
 					<span className='font-mono'>{log.upstream_model}</span>
 				</div>
 			)}
+			{isAdmin && log.upstream_response_model && (
+				<div className='flex items-center justify-between gap-3'>
+					<span>{t('requestLogs.upstreamResponseModel')}</span>
+					<span className='font-mono'>{log.upstream_response_model}</span>
+				</div>
+			)}
 			{isAdmin && log.provider.id && (
 				<div className='flex items-center justify-between gap-3'>
 					<span>{t('requestLogs.modelProvider')}</span>
@@ -86,6 +92,70 @@ export function RequestLogModelTooltipDetails({
 				<div className='flex items-center justify-between gap-3'>
 					<span>{t('requestLogs.reasoningEffort')}</span>
 					<span className='font-mono'>{log.reasoning_effort}</span>
+				</div>
+			)}
+		</div>
+	)
+}
+
+export function RequestLogChannelTooltipDetails({
+	log,
+	isAdmin,
+	affinityTargetNames,
+	t
+}: RequestLogModelTooltipDetailsProps & {
+	affinityTargetNames: LogRowCellsProps['affinityTargetNames']
+}) {
+	if (!isAdmin) return null
+
+	const providerDisplay = log.provider.name?.trim() || log.provider.id || null
+	const channelDisplay = log.channel.name?.trim() || log.channel.id || null
+	const attemptRows = triedProvidersOf(log).length > 0 ? retryAttemptRows(log) : []
+	const affinityTargetDisplay = readableAffinityTarget(log, affinityTargetNames)
+
+	return (
+		<div className='max-w-[480px] space-y-1 text-xs'>
+			{attemptRows.length > 0 && (
+				<RetryAttemptList rows={attemptRows} t={t} />
+			)}
+			{providerDisplay && (
+				<div>
+					{t('requestLogs.modelProvider')}: {providerDisplay}
+				</div>
+			)}
+			{channelDisplay && (
+				<div className='flex items-center gap-1'>
+					<span>
+						{t('requestLogs.channel')}: {channelDisplay}
+					</span>
+					{log.affinity?.hit === true && (
+						<Badge
+							variant='secondary'
+							className='h-4 rounded-md px-1 text-[10px] font-normal'
+						>
+							{t('requestLogs.affinityHit')}
+						</Badge>
+					)}
+				</div>
+			)}
+			{affinityTargetDisplay && (
+				<div>
+					{t('requestLogs.affinityTarget')}: {affinityTargetDisplay}
+				</div>
+			)}
+			{log.session_affinity_value && (
+				<div>
+					{t('requestLogs.sessionAffinity')}: {log.session_affinity_value}
+				</div>
+			)}
+			{log.upstream_model && log.upstream_model !== log.model && (
+				<div>
+					{t('requestLogs.upstreamModel')}: {log.upstream_model}
+				</div>
+			)}
+			{log.upstream_response_model && (
+				<div>
+					{t('requestLogs.upstreamResponseModel')}: {log.upstream_response_model}
 				</div>
 			)}
 		</div>
@@ -159,12 +229,10 @@ export function LogRowCells({
 	const ttfb = formatDuration(ttfbMs)
 	const computedTps = computeTps(log)
 	const channelDisplay = log.channel.name?.trim() || log.channel.id || null
-	const providerDisplay = log.provider.name?.trim() || log.provider.id || null
 	const affinityHit = log.affinity?.hit === true
 	const triedProviders = triedProvidersOf(log)
 	const hasTriedProviders = triedProviders.length > 0
 	const attemptRows = hasTriedProviders ? retryAttemptRows(log) : []
-	const affinityTargetDisplay = readableAffinityTarget(log, affinityTargetNames)
 	const costDisplay = formatCost(log.billing.charge_nano_usd)
 	const usageSnapshot = asObject(log.usage)
 	const usageInput = asObject(usageSnapshot?.input)
@@ -512,7 +580,7 @@ export function LogRowCells({
 
 	return (
 		<>
-			<td className='whitespace-nowrap py-1 pl-2 pr-2 align-middle font-mono text-muted-foreground'>
+			<td className='whitespace-nowrap py-0 pl-2 pr-2 align-middle font-mono text-muted-foreground'>
 				<span className='inline-flex w-full flex-col leading-4'>
 					<span className='h-4 whitespace-nowrap'>{formatTime(log.created_at)}</span>
 					<span className='flex h-6 w-full items-center gap-1'>
@@ -580,7 +648,7 @@ export function LogRowCells({
 				</span>
 			</td>
 
-			<td className='px-2 py-1 align-middle whitespace-nowrap'>
+			<td className='px-2 py-0 align-middle whitespace-nowrap'>
 				<span className='inline-flex h-9 flex-col items-start justify-center leading-4'>
 					<TooltipProvider delayDuration={200}>
 						<Tooltip onOpenChange={modelTooltipOpenChange}>
@@ -593,6 +661,11 @@ export function LogRowCells({
 										truncateModelText={false}
 										className='h-5 min-w-max px-1.5 text-[10px]'
 									/>
+									{isAdmin && log.upstream_response_model ? (
+										<span className='font-mono text-[10px] text-warning-foreground'>
+											↳ {log.upstream_response_model}
+										</span>
+									) : null}
 								</span>
 							</TooltipTrigger>
 							<TooltipContent>
@@ -617,46 +690,12 @@ export function LogRowCells({
 									</span>
 								</TooltipTrigger>
 								<TooltipContent>
-									<div className='max-w-[480px] space-y-1 text-xs'>
-										{attemptRows.length > 0 && (
-											<RetryAttemptList rows={attemptRows} t={t} />
-										)}
-										{providerDisplay && (
-											<div>
-												{t('requestLogs.modelProvider')}: {providerDisplay}
-											</div>
-										)}
-										{channelDisplay && (
-											<div className='flex items-center gap-1'>
-												<span>
-													{t('requestLogs.channel')}: {channelDisplay}
-												</span>
-												{log.affinity?.hit === true && (
-													<Badge
-														variant='secondary'
-														className='h-4 rounded-md px-1 text-[10px] font-normal'
-													>
-														{t('requestLogs.affinityHit')}
-													</Badge>
-												)}
-											</div>
-										)}
-										{affinityTargetDisplay && (
-											<div>
-												{t('requestLogs.affinityTarget')}: {affinityTargetDisplay}
-											</div>
-										)}
-										{log.session_affinity_value && (
-											<div>
-												{t('requestLogs.sessionAffinity')}: {log.session_affinity_value}
-											</div>
-										)}
-										{log.upstream_model && log.upstream_model !== log.model && (
-											<div>
-												{t('requestLogs.upstreamModel')}: {log.upstream_model}
-											</div>
-										)}
-									</div>
+									<RequestLogChannelTooltipDetails
+										log={log}
+										isAdmin={isAdmin}
+										affinityTargetNames={affinityTargetNames}
+										t={t}
+									/>
 								</TooltipContent>
 							</Tooltip>
 						</TooltipProvider>

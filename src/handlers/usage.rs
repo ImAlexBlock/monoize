@@ -82,6 +82,28 @@ pub(crate) async fn record_stream_response_service_tier(
     runtime_metrics.lock().await.response_service_tier = Some(service_tier.to_string());
 }
 
+pub(crate) async fn record_observed_upstream_response_model(
+    runtime_metrics: &Option<Arc<Mutex<StreamRuntimeMetrics>>>,
+    model: &str,
+    terminal: bool,
+) {
+    let model = model.trim();
+    if model.is_empty() {
+        return;
+    }
+    let Some(runtime_metrics) = runtime_metrics.as_ref() else {
+        return;
+    };
+    let mut metrics = runtime_metrics.lock().await;
+    if metrics.response_model_terminal && !terminal {
+        return;
+    }
+    if terminal || metrics.response_model.is_none() {
+        metrics.response_model = Some(model.to_string());
+        metrics.response_model_terminal = terminal;
+    }
+}
+
 pub(crate) async fn record_cumulative_stream_usage_snapshot(
     runtime_metrics: &Option<Arc<Mutex<StreamRuntimeMetrics>>>,
     usage: Option<urp::Usage>,
@@ -747,6 +769,152 @@ pub(super) fn parse_usage_from_embeddings_object(obj: &Value) -> Option<urp::Usa
         output_details: None,
         extra_body,
     })
+}
+
+#[cfg(test)]
+mod upstream_response_model_stream_tests {
+    use super::*;
+    use crate::config::ProviderType;
+    use crate::handlers::UrpRequest;
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    async fn observe_models(
+        provider_type: ProviderType,
+        events: Vec<Value>,
+    ) -> (Option<String>, bool) {
+        let body = events
+            .into_iter()
+            .map(|event| {
+                let event_name = event
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("message");
+                format!("event: {event_name}\ndata: {event}\n\n")
+            })
+            .collect::<String>();
+        let response =
+            reqwest::Response::from(axum::http::Response::new(reqwest::Body::from(body)));
+        let metrics = Arc::new(Mutex::new(StreamRuntimeMetrics::default()));
+        let request = UrpRequest {
+            model: "sent-model".to_string(),
+            max_multiplier: None,
+            server_tool_usage_classes: Vec::new(),
+            affinity_explicit: None,
+            affinity_prefix_hash: String::new(),
+            estimated_input_tokens: 0,
+            has_tools: false,
+        };
+        let (tx, _rx) = mpsc::channel(64);
+        crate::urp::stream_decode::stream_upstream_to_urp_events(
+            &request,
+            None,
+            provider_type,
+            response,
+            tx,
+            None,
+            Some(Arc::clone(&metrics)),
+            1_000,
+        )
+        .await
+        .expect("decode upstream stream");
+        let metrics = metrics.lock().await;
+        (
+            metrics.response_model.clone(),
+            metrics.response_model_terminal,
+        )
+    }
+
+    #[tokio::test]
+    async fn responses_terminal_model_replaces_initial_model() {
+        let observed = observe_models(
+            ProviderType::Responses,
+            vec![
+                json!({"type": "response.created", "response": {"id": "r1", "model": "initial-model", "output": []}}),
+                json!({"type": "response.in_progress", "response": {"id": "r1", "model": "intermediate-model", "output": []}}),
+                json!({"type": "response.completed", "response": {"id": "r1", "model": " terminal-model ", "status": "completed", "output": []}}),
+            ],
+        )
+        .await;
+        assert_eq!(observed, (Some("terminal-model".to_string()), true));
+    }
+
+    #[tokio::test]
+    async fn responses_keeps_first_declaration_when_terminal_model_is_absent() {
+        let observed = observe_models(
+            ProviderType::Responses,
+            vec![
+                json!({"type": "response.created", "response": {"id": "r1", "model": "initial-model", "output": []}}),
+                json!({"type": "response.in_progress", "response": {"id": "r1", "model": "intermediate-model", "output": []}}),
+                json!({"type": "response.completed", "response": {"id": "r1", "status": "completed", "output": []}}),
+            ],
+        )
+        .await;
+        assert_eq!(observed, (Some("initial-model".to_string()), false));
+    }
+
+    #[tokio::test]
+    async fn chat_terminal_model_replaces_initial_model() {
+        let observed = observe_models(
+            ProviderType::ChatCompletion,
+            vec![
+                json!({"model": "initial-model", "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": null}]}),
+                json!({"model": "terminal-model", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+                json!({"model": "usage-model", "choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+            ],
+        )
+        .await;
+        assert_eq!(observed, (Some("terminal-model".to_string()), true));
+    }
+
+    #[tokio::test]
+    async fn gemini_terminal_model_version_replaces_initial_model() {
+        let observed = observe_models(
+            ProviderType::Gemini,
+            vec![
+                json!({"modelVersion": "initial-model", "candidates": [{"content": {"parts": [{"text": "Hello"}]}}]}),
+                json!({"modelVersion": "terminal-model", "candidates": [{"finishReason": "STOP"}]}),
+            ],
+        )
+        .await;
+        assert_eq!(observed, (Some("terminal-model".to_string()), true));
+    }
+
+    #[tokio::test]
+    async fn image_terminal_model_replaces_partial_model() {
+        assert_eq!(
+            observe_models(
+                ProviderType::OpenaiImage,
+                vec![
+                    json!({"type": "image_generation.partial_image", "model": "initial-model"}),
+                    json!({"type": "image_generation.completed", "model": "actual-image-model", "b64_json": "aGVsbG8=", "output_format": "png"}),
+                ],
+            ).await,
+            (Some("actual-image-model".to_string()), true)
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_stream_model_is_not_inferred_from_sent_model() {
+        for (provider, events) in [
+            (
+                ProviderType::Responses,
+                vec![
+                    json!({"type": "response.completed", "response": {"id": "r1", "status": "completed", "output": []}}),
+                ],
+            ),
+            (
+                ProviderType::ChatCompletion,
+                vec![json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})],
+            ),
+            (
+                ProviderType::Gemini,
+                vec![json!({"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]})],
+            ),
+        ] {
+            assert_eq!(observe_models(provider, events).await, (None, false));
+        }
+    }
 }
 
 #[cfg(test)]

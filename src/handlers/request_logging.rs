@@ -1,3 +1,35 @@
+const UPSTREAM_RESPONSE_MODEL_MAX_CHARS: usize = 200;
+
+pub(super) fn mismatched_upstream_response_model(sent: &str, observed: &str) -> Option<String> {
+    let observed = observed.trim();
+    if observed.is_empty() {
+        return None;
+    }
+    let bounded: String = observed
+        .chars()
+        .take(UPSTREAM_RESPONSE_MODEL_MAX_CHARS)
+        .collect();
+    let sent = sent.trim();
+    if !sent.is_empty() && sent.eq_ignore_ascii_case(&bounded) {
+        return None;
+    }
+    Some(bounded)
+}
+
+pub(super) fn upstream_response_model_from_json(
+    sent: &str,
+    provider_type: ProviderType,
+    response: &Value,
+) -> Option<String> {
+    let observed = if provider_type == ProviderType::Gemini {
+        response.get("modelVersion").and_then(Value::as_str)
+    } else {
+        None
+    }
+    .or_else(|| response.get("model").and_then(Value::as_str))?;
+    mismatched_upstream_response_model(sent, observed)
+}
+
 use super::*;
 use chrono::{Duration as ChronoDuration, Utc};
 
@@ -260,6 +292,7 @@ fn broadcast_pending_snapshot(
         model: model.to_string(),
         provider_id: provider_id.map(ToOwned::to_owned),
         upstream_model: upstream_model.map(ToOwned::to_owned),
+        upstream_response_model: None,
         channel_id: channel_id.map(ToOwned::to_owned),
         names: crate::users::RequestLogNameSnapshots {
             username: auth.username.clone(),
@@ -494,6 +527,7 @@ pub(super) fn spawn_request_log(
     reasoning_effort: Option<String>,
     tried_providers: Vec<TriedProvider>,
     client_gone: bool,
+    upstream_response_model: Option<String>,
 ) {
     let Some(user_id) = auth.user_id.clone() else {
         return;
@@ -565,6 +599,7 @@ pub(super) fn spawn_request_log(
         model,
         provider_id: Some(provider_id),
         upstream_model: Some(upstream_model),
+        upstream_response_model,
         channel_id: Some(channel_id),
         names,
         is_stream,
@@ -690,6 +725,7 @@ pub(super) fn spawn_request_log_error(
         model,
         provider_id: Some(provider_id),
         upstream_model: Some(upstream_model),
+        upstream_response_model: None,
         channel_id: Some(channel_id),
         names,
         is_stream,
@@ -787,6 +823,7 @@ pub(super) fn spawn_request_log_stream_terminal_error(
         model,
         provider_id: Some(provider_id),
         upstream_model: Some(upstream_model),
+        upstream_response_model: None,
         channel_id: Some(channel_id),
         names,
         is_stream: true,
@@ -881,6 +918,7 @@ pub(super) fn spawn_request_log_error_no_attempt(
         model,
         provider_id: None,
         upstream_model: None,
+        upstream_response_model: None,
         channel_id: None,
         names,
         is_stream,
@@ -1088,6 +1126,7 @@ mod admission_tests {
             model: "model-1".to_string(),
             provider_id: Some("provider-1".to_string()),
             upstream_model: Some("upstream-1".to_string()),
+            upstream_response_model: None,
             channel_id: Some("channel-1".to_string()),
             names: crate::users::RequestLogNameSnapshots::default(),
             is_stream: false,

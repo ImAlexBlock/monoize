@@ -202,11 +202,14 @@ pub async fn list_my_request_logs(
     }
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e))?;
 
-    // RL-API14 / SAN-14: only admins may read the stored full error detail.
-    // SAN-CFG5 item 5: skipped entirely when masking is disabled.
-    if !is_admin && state.monoize_runtime.read().await.mask_sensitive_info {
+    // RL-API16 hides the response model independently of configurable error masking.
+    if !is_admin {
+        let mask_errors = state.monoize_runtime.read().await.mask_sensitive_info;
         for log in &mut logs {
-            log.mask_error_detail_for_non_admin();
+            log.hide_upstream_response_model();
+            if mask_errors {
+                log.mask_error_detail_for_non_admin();
+            }
         }
     }
 
@@ -772,6 +775,9 @@ pub async fn stream_request_logs(
             .into_iter()
             .map(|log| {
                 let mut row = log.to_request_log_row();
+                if !is_admin {
+                    row.hide_upstream_response_model();
+                }
                 if mask_batch {
                     row.mask_error_detail_for_non_admin();
                 }
@@ -820,6 +826,9 @@ pub async fn stream_request_logs(
                             .into_iter()
                             .map(|log| {
                                 let mut row = log.to_request_log_row();
+                                if !is_admin {
+                                    row.hide_upstream_response_model();
+                                }
                                 if mask_batch {
                                     row.mask_error_detail_for_non_admin();
                                 }

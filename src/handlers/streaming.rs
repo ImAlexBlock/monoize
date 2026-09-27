@@ -496,6 +496,11 @@ pub(super) async fn forward_stream_typed(
                 .await;
                 match call {
                     Ok(value) => {
+                        let upstream_response_model = upstream_response_model_from_json(
+                            &nonstream_req.model,
+                            attempt.provider_type,
+                            &value,
+                        );
                         if let Some(session) = capture.session.as_ref() {
                             session
                                 .push_attempt(crate::request_capture::build_attempt_dump(
@@ -765,6 +770,7 @@ pub(super) async fn forward_stream_typed(
                                                     || downstream_gone_for_log.load(
                                                         std::sync::atomic::Ordering::Acquire,
                                                     ),
+                                                upstream_response_model,
                                             );
                                             true
                                         }
@@ -993,6 +999,8 @@ pub(super) async fn forward_stream_typed(
                         usage: None,
                         response_id: None,
                         response_service_tier: None,
+                        response_model: None,
+                        response_model_terminal: false,
                         terminal: StreamTerminalDiagnostics::default(),
                         estimated_output_tokens: 0,
                         visible_output_bytes: 0,
@@ -1003,6 +1011,7 @@ pub(super) async fn forward_stream_typed(
                     let auth_for_log = auth.clone();
                     let attempt_for_log = attempt.clone();
                     let model_for_log = logical_model.clone();
+                    let sent_model_for_log = req_attempt.model.clone();
                     let model_for_encode = logical_model.clone();
                     let model_for_transform = logical_model.clone();
                     let request_id_for_log = request_id.clone();
@@ -1180,6 +1189,7 @@ pub(super) async fn forward_stream_typed(
                             terminal_diagnostics,
                             response_id,
                             response_service_tier,
+                            response_model,
                         ) = {
                             let guard = runtime_metrics.lock().await;
                             let actual_upstream_usage = guard.usage.clone();
@@ -1224,6 +1234,7 @@ pub(super) async fn forward_stream_typed(
                                 guard.terminal.clone(),
                                 guard.response_id.clone(),
                                 guard.response_service_tier.clone(),
+                                guard.response_model.clone(),
                             )
                         };
 
@@ -1509,6 +1520,9 @@ pub(super) async fn forward_stream_typed(
                                 || downstream_gone_for_log.load(
                                     std::sync::atomic::Ordering::Acquire,
                                 ),
+                            response_model.as_deref().and_then(|observed| {
+                                mismatched_upstream_response_model(&sent_model_for_log, observed)
+                            }),
                         );
 
                         if let Some(session) = capture_session.as_ref() {

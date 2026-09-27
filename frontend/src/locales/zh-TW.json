@@ -2154,7 +2154,8 @@
       "keysSummary": "{{count}} 個鍵",
       "itemsSummary": "{{count}} 項",
       "framesTruncated": "幀列表已截斷：省略 {{frames}} 幀 / {{bytes}} 位元組"
-    }
+    },
+    "upstreamResponseModel": "實際模型"
   },
   "billingPlans": {
     "title": "訂閱方案",

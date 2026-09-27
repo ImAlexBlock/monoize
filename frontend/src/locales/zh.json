@@ -2157,7 +2157,8 @@
       "keysSummary": "{{count}} 个键",
       "itemsSummary": "{{count}} 项",
       "framesTruncated": "帧列表已截断：省略 {{frames}} 帧 / {{bytes}} 字节"
-    }
+    },
+    "upstreamResponseModel": "实际模型"
   },
   "billingPlans": {
     "title": "订阅套餐",

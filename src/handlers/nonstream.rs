@@ -467,7 +467,9 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                         )
                         .await
                         {
-                            Ok(resp) => Ok((None, Some(resp))),
+                            Ok((resp, observed_response_model)) => {
+                                Ok((None, Some((resp, observed_response_model))))
+                            }
                             Err(CollectedUpstreamError::Internal(err)) => {
                                 return Err(finish_nonstream_error(
                                     state,
@@ -564,7 +566,9 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                             let status = resp.status();
                             match resp.text().await {
                                 Ok(text) => serde_json::from_str::<Value>(&text)
-                                    .map(|value| (Some(value), None))
+                                    .map(|value| {
+                                        (Some(value), None::<(urp::UrpResponse, Option<String>)>)
+                                    })
                                     .map_err(|err| {
                                         upstream::UpstreamCallError::new(
                                             upstream::UpstreamErrorKind::Http,
@@ -597,7 +601,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                         &extra_headers,
                     )
                     .await
-                    .map(|value| (Some(value), None))
+                    .map(|value| (Some(value), None::<(urp::UrpResponse, Option<String>)>))
                 };
                 match call_value {
                     Ok((value, collected_resp)) => {
@@ -632,8 +636,20 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                             started_at,
                         )
                         .await;
+                        let upstream_response_model = match collected_resp.as_ref() {
+                            Some((_, observed)) => observed.as_deref().and_then(|observed| {
+                                mismatched_upstream_response_model(&req_attempt.model, observed)
+                            }),
+                            None => value.as_ref().and_then(|value| {
+                                upstream_response_model_from_json(
+                                    &req_attempt.model,
+                                    attempt.provider_type,
+                                    value,
+                                )
+                            }),
+                        };
                         let mut resp = match collected_resp {
-                            Some(resp) => resp,
+                            Some((resp, _)) => resp,
                             None => match value.as_ref() {
                                 Some(value) => match decode_response_from_provider(
                                     attempt.provider_type,
@@ -908,6 +924,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                             req.reasoning.as_ref().and_then(|r| r.effort.clone()),
                             tried_providers,
                             client_gone_flag(task_state),
+                            upstream_response_model,
                         );
                         if let Some(session) = capture.session.as_ref() {
                             session
@@ -1038,7 +1055,7 @@ async fn collect_streamed_upstream_response(
     started_at: std::time::Instant,
     logical_model: &str,
     stream_idle_timeout_ms: u64,
-) -> Result<urp::UrpResponse, CollectedUpstreamError> {
+) -> Result<(urp::UrpResponse, Option<String>), CollectedUpstreamError> {
     let legacy = typed_request_to_legacy(req_attempt, max_multiplier)
         .map_err(CollectedUpstreamError::Internal)?;
     let pending_request_envelope_extra =
@@ -1126,13 +1143,16 @@ async fn collect_streamed_upstream_response(
     if let Some(err) = stream_error {
         return Err(CollectedUpstreamError::Upstream(err));
     }
-    final_response.ok_or_else(|| {
-        CollectedUpstreamError::Upstream(AppError::new(
-            StatusCode::BAD_GATEWAY,
-            "upstream_stream_error",
-            "stream completed without terminal response",
-        ))
-    })
+    let observed_response_model = runtime_metrics.lock().await.response_model.clone();
+    final_response
+        .map(|response| (response, observed_response_model))
+        .ok_or_else(|| {
+            CollectedUpstreamError::Upstream(AppError::new(
+                StatusCode::BAD_GATEWAY,
+                "upstream_stream_error",
+                "stream completed without terminal response",
+            ))
+        })
 }
 
 #[allow(dead_code)]

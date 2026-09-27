@@ -17,6 +17,10 @@ A Channel model entry can set `redirect` to the real upstream model name.
 
 Example: clients call `my-fast-model`. One Provider redirects it to `gpt-4o-mini`. Another Provider redirects it to `claude-3-5-haiku-20241022`. Billing and logs always show the logical name.
 
+For `admin` and `super_admin` accounts, request logs also show a differing upstream response model beside the logical model badge.
+Hover the model badge or Channel to inspect **Actual Model**. This value does not change billing.
+See [Request Logs](/en/docs/request-logs#actual-upstream-model).
+
 ## Model metadata and pricing
 
 The **Models** page is a single master-detail workbench. The toolbar selects the Billing Profile, searches models, and opens the sync, match-rule, and profile-management actions. The master list shows one row per model with a compressed price summary. Select a row to edit its prices in the right panel.

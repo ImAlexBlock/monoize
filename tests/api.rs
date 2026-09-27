@@ -18,6 +18,9 @@ mod routing_models;
 #[path = "api/billing_request_logs.rs"]
 mod billing_request_logs;
 
+#[path = "api/upstream_response_model.rs"]
+mod upstream_response_model;
+
 #[path = "api/billing_rates_dashboard.rs"]
 mod billing_rates_dashboard;
 

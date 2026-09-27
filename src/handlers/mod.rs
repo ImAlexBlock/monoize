@@ -1121,6 +1121,11 @@ pub async fn create_embeddings(
                             }
                         };
 
+                        let upstream_response_model = upstream_response_model_from_json(
+                            &attempt.upstream_model,
+                            attempt.provider_type,
+                            &value,
+                        );
                         if let Some(obj) = value.as_object_mut() {
                             obj.insert("model".to_string(), Value::String(logical_model.clone()));
                         }
@@ -1143,6 +1148,7 @@ pub async fn create_embeddings(
                             None,
                             tried_providers,
                             false,
+                            upstream_response_model,
                         );
 
                         return Ok(Json(value).into_response());
@@ -1560,6 +1566,8 @@ pub(crate) struct StreamRuntimeMetrics {
     usage: Option<urp::Usage>,
     response_id: Option<String>,
     response_service_tier: Option<String>,
+    response_model: Option<String>,
+    response_model_terminal: bool,
     terminal: StreamTerminalDiagnostics,
     pub(crate) estimated_output_tokens: u64,
     // Feeds the usage-less billing estimate only; TPS is derived at display

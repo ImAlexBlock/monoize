@@ -124,12 +124,16 @@ M2. A balance delta record is `{delta_id, kind, user_id, api_key_id?, amount_nan
 - `delta_id` is one UUID v4 generated at enqueue time;
 - `kind` is `request_charge` or `api_key_charge` (sub-account);
 - `user_id` identifies the owning user; `api_key_id` is present iff `kind = api_key_charge`;
-- `amount_nano_usd` is the charge magnitude as decimal signed-128 text;
+- `amount_nano_usd` is a nonnegative charge magnitude representable as decimal signed-128 text;
 - `created_at` is RFC 3339.
+
+M2a. A negative `amount_nano_usd` MUST be rejected before durable enqueue, pending-counter mutation, or database mutation. HTTP ingest MUST return `422 metering_batch_invalid` and apply no entry from the batch. The shared apply routine, including PRP9 promotion drain, MUST enforce the same amount domain before opening its transaction. Replica startup MUST reject a persisted negative delta before reconstructing pending counters and MUST preserve its spool file. A rejected promotion drain MUST preserve every submitted spool file. A negative resulting balance under I5 remains valid; a negative charge magnitude does not.
 
 M3. Before the charge path reports success on a replica, the delta MUST be durably published as one JSON file in `MONOIZE_REPLICA_METERING_SPOOL_DIR` using temporary-file write followed by same-directory atomic rename. If publication fails or the combined spool size would exceed `MONOIZE_REPLICA_METERING_SPOOL_MAX_BYTES`, enqueue MUST fail and terminal billing finalization MUST treat the request as a billing failure consistent with MB-C6. A successful enqueue MUST also atomically add `amount_nano_usd` to the in-memory pending-deduction counter keyed by `user_id` (kind `request_charge`) or `api_key_id` (kind `api_key_charge`).
 
 M3a. Replica startup MUST create `MONOIZE_REPLICA_METERING_SPOOL_DIR` if it is absent and MUST write then delete one probe file in that directory. A create, write, or permission failure MUST stop startup with error `metering_spool_unwritable`. A bind-mounted spool directory MUST be writable by the process user; a root-owned mount that the non-root process cannot write MUST fail this probe rather than accept traffic.
+
+M3b. Subtracting an acknowledged deduction and removing its zero-valued pending entry MUST be one atomic transition for that subject. An enqueue concurrent with acknowledgement MUST retain its added amount. For an initial pending amount of `a`, a concurrent `add(b)` and `subtract(a)` MUST leave pending amount `b` when both transitions finish, where `a` and `b` are nonnegative and `a + b` is representable as `i128`.
 
 ### 6.2 Ship loop
 

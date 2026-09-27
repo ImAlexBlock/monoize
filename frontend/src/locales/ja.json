@@ -2153,7 +2153,8 @@
       "keysSummary": "{{count}} キー",
       "itemsSummary": "{{count}} 項目",
       "framesTruncated": "フレーム一覧は切り詰められました：{{frames}} フレーム / {{bytes}} バイト省略"
-    }
+    },
+    "upstreamResponseModel": "実際のモデル"
   },
   "billingPlans": {
     "title": "課金プラン",

@@ -1844,9 +1844,13 @@ pub async fn org_request_logs(
         )
         .await
         .map_err(storage)?;
-    if !is_admin && state.monoize_runtime.read().await.mask_sensitive_info {
+    if !is_admin {
+        let mask_errors = state.monoize_runtime.read().await.mask_sensitive_info;
         for log in &mut logs {
-            log.mask_error_detail_for_non_admin();
+            log.hide_upstream_response_model();
+            if mask_errors {
+                log.mask_error_detail_for_non_admin();
+            }
         }
     }
     Ok(Json(json!({
