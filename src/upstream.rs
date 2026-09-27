@@ -282,12 +282,40 @@ pub async fn call_upstream_raw_with_timeout_and_headers(
     timeout_ms: u64,
     extra_headers: &[(String, String)],
 ) -> Result<reqwest::Response, UpstreamCallError> {
-    let req =
-        prepare_upstream_request(client, provider, auth_value, path, body, extra_headers).await?;
-    send_upstream_request(req.timeout(std::time::Duration::from_millis(timeout_ms))).await
+    send_json_with_breakpoint_fallback(provider, body, |body| async move {
+        let req =
+            prepare_upstream_request(client, provider, auth_value, path, &body, extra_headers)
+                .await?;
+        send_upstream_request(req.timeout(std::time::Duration::from_millis(timeout_ms))).await
+    })
+    .await
 }
 
 pub async fn call_upstream_stream_with_timeout_and_headers(
+    client: &reqwest::Client,
+    provider: &ProviderConfig,
+    auth_value: &str,
+    path: &str,
+    body: &Value,
+    timeout_ms: u64,
+    extra_headers: &[(String, String)],
+) -> Result<reqwest::Response, UpstreamCallError> {
+    send_json_with_breakpoint_fallback(provider, body, |body| async move {
+        send_upstream_stream_request(
+            client,
+            provider,
+            auth_value,
+            path,
+            &body,
+            timeout_ms,
+            extra_headers,
+        )
+        .await
+    })
+    .await
+}
+
+async fn send_upstream_stream_request(
     client: &reqwest::Client,
     provider: &ProviderConfig,
     auth_value: &str,
@@ -326,6 +354,121 @@ pub async fn call_upstream_stream_with_timeout_and_headers(
             .with_source(UpstreamErrorSource::EmptyBody)
         });
     Err(error)
+}
+
+const PROMPT_CACHE_BREAKPOINT_KEY: &str = "prompt_cache_breakpoint";
+const BREAKPOINT_UNSUPPORTED_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// ACOTU-22: (base_url, model) pairs whose upstream rejected explicit cache
+/// breakpoints, mapped to the instant the record expires.
+fn breakpoint_unsupported_pairs()
+-> &'static std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>> {
+    static PAIRS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    PAIRS.get_or_init(Default::default)
+}
+
+fn breakpoint_pair(provider: &ProviderConfig, body: &Value) -> (String, String) {
+    (
+        provider.base_url.clone().unwrap_or_default(),
+        body.get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+fn breakpoint_pair_is_unsupported(pair: &(String, String)) -> bool {
+    let mut pairs = breakpoint_unsupported_pairs()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match pairs.get(pair) {
+        Some(expires_at) if *expires_at > std::time::Instant::now() => true,
+        Some(_) => {
+            pairs.remove(pair);
+            false
+        }
+        None => false,
+    }
+}
+
+fn record_breakpoint_unsupported(pair: (String, String)) {
+    let now = std::time::Instant::now();
+    let mut pairs = breakpoint_unsupported_pairs()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pairs.retain(|_, expires_at| *expires_at > now);
+    pairs.insert(pair, now + BREAKPOINT_UNSUPPORTED_TTL);
+}
+
+/// ACOTU-19.
+fn is_explicit_breakpoint_rejection(err: &UpstreamCallError) -> bool {
+    err.status == Some(StatusCode::BAD_REQUEST)
+        && (err.param.as_deref() == Some(PROMPT_CACHE_BREAKPOINT_KEY)
+            || (err.source == UpstreamErrorSource::StructuredBody
+                && err.message.contains(PROMPT_CACHE_BREAKPOINT_KEY)))
+}
+
+/// ACOTU-20: returns the stripped body, or `None` when no key was present.
+fn strip_prompt_cache_breakpoints(body: &Value) -> Option<Value> {
+    fn strip_items(items: Option<&mut Value>, nested: &[&str]) -> usize {
+        let Some(Value::Array(items)) = items else {
+            return 0;
+        };
+        let mut removed = 0;
+        for item in items {
+            let Value::Object(object) = item else {
+                continue;
+            };
+            removed += usize::from(object.remove(PROMPT_CACHE_BREAKPOINT_KEY).is_some());
+            for key in nested {
+                removed += strip_items(object.get_mut(*key), &[]);
+            }
+        }
+        removed
+    }
+    let mut stripped = body.clone();
+    let Value::Object(root) = &mut stripped else {
+        return None;
+    };
+    let removed = strip_items(root.get_mut("input"), &["content", "output"])
+        + strip_items(root.get_mut("messages"), &["content"]);
+    (removed > 0).then_some(stripped)
+}
+
+/// ACOTU-21..23: sends `body`, and when the upstream rejects explicit cache
+/// breakpoints, resends it once without them. The resend happens before any
+/// response byte is returned, so it is invisible to routing and to the client.
+async fn send_json_with_breakpoint_fallback<F, Fut>(
+    provider: &ProviderConfig,
+    body: &Value,
+    send: F,
+) -> Result<reqwest::Response, UpstreamCallError>
+where
+    F: Fn(Value) -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, UpstreamCallError>>,
+{
+    let pair = breakpoint_pair(provider, body);
+    if breakpoint_pair_is_unsupported(&pair) {
+        let body = strip_prompt_cache_breakpoints(body).unwrap_or_else(|| body.clone());
+        return send(body).await;
+    }
+    match send(body.clone()).await {
+        Err(err) if is_explicit_breakpoint_rejection(&err) => {
+            let Some(stripped) = strip_prompt_cache_breakpoints(body) else {
+                return Err(err);
+            };
+            tracing::warn!(
+                base_url = %pair.0,
+                model = %pair.1,
+                "upstream rejected prompt_cache_breakpoint; resending without it"
+            );
+            record_breakpoint_unsupported(pair);
+            send(stripped).await
+        }
+        result => result,
+    }
 }
 
 async fn prepare_upstream_request(
@@ -738,5 +881,169 @@ mod tests {
             resolve_and_classify("host.invalid", 443).is_ok(),
             "DNS failure must not be reported as a policy rejection"
         );
+    }
+
+    /// Upstream that rejects any body containing `prompt_cache_breakpoint`
+    /// the way the sub.joinreso.com relay does, and records every body it sees.
+    async fn breakpoint_rejecting_upstream() -> (
+        ProviderConfig,
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::{Json, Router, routing::post};
+        crate::monoize_routing::test_set_allow_private_upstream(true);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let recorder = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let recorder = recorder.clone();
+                async move {
+                    // `always-reject` models the case where stripping cannot help.
+                    let rejected = body["model"] == "always-reject"
+                        || body
+                            .to_string()
+                            .contains(&format!("\"{PROMPT_CACHE_BREAKPOINT_KEY}\":"));
+                    recorder.lock().unwrap().push(body);
+                    if rejected {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"error": {
+                                "message": "prompt_cache_breakpoint is not supported on this model",
+                                "type": "invalid_request_error",
+                                "param": "prompt_cache_breakpoint",
+                                "code": "invalid_parameter"
+                            }})),
+                        )
+                    } else {
+                        (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+                    }
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = serde_json::from_value(serde_json::json!({
+            "id": "breakpoint-test",
+            "type": "responses",
+            "base_url": format!("http://{address}"),
+            "auth": { "type": "bearer", "value": "test-key" }
+        }))
+        .unwrap();
+        (provider, seen, server)
+    }
+
+    fn body_with_breakpoint(model: &str) -> Value {
+        serde_json::json!({
+            "model": model,
+            "input": [
+                {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": [
+                    {"type": "input_text", "text": "keep prompt_cache_breakpoint text",
+                     "prompt_cache_breakpoint": {"mode": "explicit"}}
+                ]}
+            ]
+        })
+    }
+
+    #[test]
+    fn stripping_removes_only_breakpoint_keys() {
+        let stripped = strip_prompt_cache_breakpoints(&body_with_breakpoint("gpt-6")).unwrap();
+        let block = &stripped["input"][1]["output"][0];
+        assert!(block.get(PROMPT_CACHE_BREAKPOINT_KEY).is_none());
+        assert_eq!(block["text"], "keep prompt_cache_breakpoint text");
+        assert_eq!(block["type"], "input_text");
+        assert_eq!(
+            stripped["input"][0],
+            body_with_breakpoint("gpt-6")["input"][0]
+        );
+
+        let chat = serde_json::json!({"messages": [
+            {"role": "tool", "prompt_cache_breakpoint": {}, "content": [
+                {"type": "text", "text": "x", "prompt_cache_breakpoint": {}}
+            ]}
+        ]});
+        let stripped = strip_prompt_cache_breakpoints(&chat).unwrap();
+        assert_eq!(
+            stripped,
+            serde_json::json!({"messages": [
+                {"role": "tool", "content": [{"type": "text", "text": "x"}]}
+            ]})
+        );
+
+        assert!(strip_prompt_cache_breakpoints(&serde_json::json!({"input": []})).is_none());
+    }
+
+    #[tokio::test]
+    async fn rejected_breakpoint_is_stripped_resent_and_remembered() {
+        let (provider, seen, server) = breakpoint_rejecting_upstream().await;
+        let model = "gpt-6-fallback-memo";
+        for stream in [false, true] {
+            let body = body_with_breakpoint(model);
+            let response = if stream {
+                call_upstream_stream_with_timeout_and_headers(
+                    &timeout_test_client(),
+                    &provider,
+                    "test-key",
+                    "/v1/responses",
+                    &body,
+                    5_000,
+                    &[],
+                )
+                .await
+            } else {
+                call_upstream_raw_with_timeout_and_headers(
+                    &timeout_test_client(),
+                    &provider,
+                    "test-key",
+                    "/v1/responses",
+                    &body,
+                    5_000,
+                    &[],
+                )
+                .await
+            };
+            assert_eq!(response.expect("stripped resend succeeds").status(), 200);
+        }
+        let seen = seen.lock().unwrap();
+        // First call: rejected send + stripped resend. Second call: the pair is
+        // remembered, so exactly one pre-stripped send.
+        assert_eq!(seen.len(), 3);
+        let has_key = |body: &Value| body.to_string().contains("\"prompt_cache_breakpoint\":");
+        assert!(has_key(&seen[0]));
+        assert!(!has_key(&seen[1]));
+        assert!(!has_key(&seen[2]));
+        assert_eq!(
+            seen[1]["input"][1]["output"][0]["text"],
+            "keep prompt_cache_breakpoint text"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unrelated_400_is_returned_without_resend() {
+        let (provider, seen, server) = breakpoint_rejecting_upstream().await;
+        let body = serde_json::json!({"model": "always-reject", "input": [
+            {"type": "message", "role": "user", "content": "prompt_cache_breakpoint"}
+        ]});
+        let error = call_upstream_raw_with_timeout_and_headers(
+            &timeout_test_client(),
+            &provider,
+            "test-key",
+            "/v1/responses",
+            &body,
+            5_000,
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, Some(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "no key to strip means no resend"
+        );
+        server.abort();
     }
 }

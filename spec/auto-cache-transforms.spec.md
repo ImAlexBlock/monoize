@@ -237,6 +237,20 @@ ACOTU-17. The transform MUST NOT modify any node content, `req.model`, `req.tool
 
 ACOTU-18. The transform is idempotent.
 
+### 7.4 Upstream rejection fallback
+
+DEF-10 selects models by identifier only. A relay can serve a DEF-10 model identifier from a backend that rejects the field. This section keeps such a request usable.
+
+ACOTU-19. An **explicit-breakpoint rejection** is a non-2xx upstream response with HTTP status `400` whose structured error `param` equals `"prompt_cache_breakpoint"`, or whose structured error `message` contains the substring `"prompt_cache_breakpoint"`.
+
+ACOTU-20. **Breakpoint stripping** removes the object key `"prompt_cache_breakpoint"` from exactly these locations of a JSON request body: each element of the top-level `input` array; each element of an `input[i].content` or `input[i].output` array; each element of the top-level `messages` array; each element of a `messages[i].content` array. No other key is removed and no other value changes. A string value that contains the substring is not changed.
+
+ACOTU-21. When one upstream JSON POST receives an explicit-breakpoint rejection and breakpoint stripping removes at least one key from the sent body, the upstream client MUST send the stripped body once more to the same URL, with the same headers and the same timeout value, before any byte reaches the downstream client. The resend result replaces the rejection. The resend MUST NOT count as a separate routing attempt, a same-channel retry, or a channel health failure. When stripping removes no key, the rejection is returned unchanged and no resend occurs.
+
+ACOTU-22. After ACOTU-21 sends a stripped body, the pair (upstream `base_url`, body `model` string; an absent `model` is the empty string) MUST be recorded as breakpoint-unsupported in process memory for 3600 seconds. While a pair is recorded, the upstream client MUST apply breakpoint stripping to the body before the first send, and ACOTU-21 does not apply to that send. The record is not persisted and is not shared between processes.
+
+ACOTU-23. ACOTU-21 and ACOTU-22 apply to every JSON POST sent through the shared upstream client, streaming and non-streaming, independent of which transform or client produced the key.
+
 ## 7A. `cache_prefix_stabilize`
 
 ### 7A.1 Motivation

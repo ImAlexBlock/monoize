@@ -9,6 +9,18 @@ This transform inserts explicit OpenAI prompt-cache breakpoints on eligible tool
 
 Requests without eligible tool-result blocks pass through unchanged.
 
+## Unsupported upstreams
+
+Some relays serve a GPT model name from a backend that rejects the breakpoint field. Such an upstream returns HTTP 400 with `prompt_cache_breakpoint is not supported on this model`.
+
+Monoize handles this rejection automatically:
+
+1. Monoize removes every `prompt_cache_breakpoint` key from the request body.
+2. Monoize sends the request again to the same upstream once. The client does not see the first failure.
+3. Monoize remembers the upstream base URL and model for one hour. During that hour, Monoize removes the key before the first send.
+
+The memory is local to each process. A restart clears it. For a permanent fix, disable this transform on the affected Provider.
+
 ## Reference
 
 | Property | Value |
