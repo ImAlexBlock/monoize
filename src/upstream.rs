@@ -301,7 +301,8 @@ pub async fn call_upstream_stream_with_timeout_and_headers(
     extra_headers: &[(String, String)],
 ) -> Result<reqwest::Response, UpstreamCallError> {
     send_json_with_breakpoint_fallback(provider, body, |body| async move {
-        send_upstream_stream_request(
+        let inspect = strip_prompt_cache_breakpoints(&body).is_some();
+        let resp = send_upstream_stream_request(
             client,
             provider,
             auth_value,
@@ -310,9 +311,128 @@ pub async fn call_upstream_stream_with_timeout_and_headers(
             timeout_ms,
             extra_headers,
         )
-        .await
+        .await?;
+        if inspect {
+            prefetch_stream_for_breakpoint_rejection(resp).await
+        } else {
+            Ok(resp)
+        }
     })
     .await
+}
+
+const STREAM_PREFETCH_MAX_BYTES: usize = 65_536;
+const STREAM_PREFETCH_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+enum PrefetchVerdict {
+    Undecided,
+    Proceed,
+    Rejected(UpstreamCallError),
+}
+
+/// ACOTU-24 case analysis over the complete SSE events in `buffer`.
+fn classify_stream_prefix(buffer: &[u8]) -> PrefetchVerdict {
+    let text = String::from_utf8_lossy(buffer).replace("\r\n", "\n");
+    let Some(complete) = text.rfind("\n\n") else {
+        return PrefetchVerdict::Undecided;
+    };
+    for block in text[..complete].split("\n\n") {
+        let mut event_name = None;
+        let mut data = String::new();
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("event:") {
+                event_name = Some(value.trim().to_string());
+            } else if let Some(value) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(value.strip_prefix(' ').unwrap_or(value));
+            }
+        }
+        if event_name.is_none() && data.is_empty() {
+            continue;
+        }
+        let parsed: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+        let data_type = parsed.get("type").and_then(Value::as_str);
+        let is_error_event = matches!(event_name.as_deref(), Some("error" | "response.failed"))
+            || matches!(data_type, Some("error" | "response.failed"))
+            || parsed.get("error").is_some_and(Value::is_object);
+        if !is_error_event {
+            return PrefetchVerdict::Proceed;
+        }
+        let error = parsed
+            .get("error")
+            .filter(|value| value.is_object())
+            .or_else(|| parsed.get("response").and_then(|r| r.get("error")))
+            .unwrap_or(&parsed);
+        let param = error.get("param").and_then(Value::as_str);
+        let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+        if param == Some(PROMPT_CACHE_BREAKPOINT_KEY)
+            || message.contains(PROMPT_CACHE_BREAKPOINT_KEY)
+        {
+            let info = UpstreamErrorInfo {
+                code: error.get("code").and_then(json_scalar_string),
+                error_type: error.get("type").and_then(json_scalar_string),
+                param: param.map(str::to_string),
+                message: Some(message.to_string()),
+            };
+            return PrefetchVerdict::Rejected(
+                UpstreamCallError::new(
+                    UpstreamErrorKind::Http,
+                    Some(StatusCode::BAD_REQUEST),
+                    message.to_string(),
+                )
+                .with_error_info(info)
+                .with_source(UpstreamErrorSource::StructuredBody),
+            );
+        }
+        return PrefetchVerdict::Proceed;
+    }
+    PrefetchVerdict::Undecided
+}
+
+/// ACOTU-24: some relays answer 200 and put the breakpoint rejection in the
+/// first SSE event. Buffer just enough of the stream to see the first event;
+/// a rejection becomes an HTTP-400-shaped error so the caller's fallback can
+/// resend, and anything else is replayed byte-for-byte ahead of the rest.
+async fn prefetch_stream_for_breakpoint_rejection(
+    resp: reqwest::Response,
+) -> Result<reqwest::Response, UpstreamCallError> {
+    use futures_util::StreamExt;
+    let status = resp.status();
+    let version = resp.version();
+    let headers = resp.headers().clone();
+    let mut upstream = resp.bytes_stream();
+    let mut buffer = Vec::new();
+    let deadline = tokio::time::Instant::now() + STREAM_PREFETCH_MAX_WAIT;
+    let mut pending_error = None;
+    while buffer.len() < STREAM_PREFETCH_MAX_BYTES {
+        match classify_stream_prefix(&buffer) {
+            PrefetchVerdict::Rejected(err) => return Err(err),
+            PrefetchVerdict::Proceed => break,
+            PrefetchVerdict::Undecided => {}
+        }
+        match tokio::time::timeout_at(deadline, upstream.next()).await {
+            Ok(Some(Ok(chunk))) => buffer.extend_from_slice(&chunk),
+            Ok(Some(Err(err))) => {
+                pending_error = Some(err);
+                break;
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    if let PrefetchVerdict::Rejected(err) = classify_stream_prefix(&buffer) {
+        return Err(err);
+    }
+    let head = futures_util::stream::once(async move {
+        Ok::<bytes::Bytes, reqwest::Error>(bytes::Bytes::from(buffer))
+    });
+    let tail = futures_util::stream::iter(pending_error.map(Err)).chain(upstream);
+    let mut replay = axum::http::Response::new(reqwest::Body::wrap_stream(head.chain(tail)));
+    *replay.status_mut() = status;
+    *replay.version_mut() = version;
+    *replay.headers_mut() = headers;
+    Ok(reqwest::Response::from(replay))
 }
 
 async fn send_upstream_stream_request(
@@ -1045,5 +1165,114 @@ mod tests {
             "no key to strip means no resend"
         );
         server.abort();
+    }
+
+    /// Relay that answers 200 and reports the breakpoint rejection as the
+    /// first SSE event, and a normal stream once the key is gone.
+    async fn sse_rejecting_upstream() -> (
+        ProviderConfig,
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::{Json, Router, routing::post};
+        crate::monoize_routing::test_set_allow_private_upstream(true);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let recorder = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let recorder = recorder.clone();
+                async move {
+                    let has_key = body
+                        .to_string()
+                        .contains(&format!("\"{PROMPT_CACHE_BREAKPOINT_KEY}\":"));
+                    recorder.lock().unwrap().push(body);
+                    if has_key {
+                        "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"code\":\"invalid_parameter\",\"message\":\"prompt_cache_breakpoint is not supported on this model\",\"param\":\"prompt_cache_breakpoint\"}}\n\n"
+                    } else {
+                        "event: response.created\ndata: {\"type\":\"response.created\"}\n\ndata: [DONE]\n\n"
+                    }
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = serde_json::from_value(serde_json::json!({
+            "id": "sse-breakpoint-test",
+            "type": "responses",
+            "base_url": format!("http://{address}"),
+            "auth": { "type": "bearer", "value": "test-key" }
+        }))
+        .unwrap();
+        (provider, seen, server)
+    }
+
+    #[tokio::test]
+    async fn in_stream_breakpoint_rejection_is_stripped_and_resent() {
+        let (provider, seen, server) = sse_rejecting_upstream().await;
+        let response = call_upstream_stream_with_timeout_and_headers(
+            &timeout_test_client(),
+            &provider,
+            "test-key",
+            "/v1/responses",
+            &body_with_breakpoint("gpt-6-sse-memo"),
+            5_000,
+            &[],
+        )
+        .await
+        .expect("stripped resend succeeds");
+        let body = response.text().await.unwrap();
+        assert!(body.starts_with("event: response.created\n"), "{body}");
+        assert!(!body.contains("not supported"));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(!seen[1].to_string().contains("\"prompt_cache_breakpoint\":"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prefetched_stream_replays_every_byte() {
+        let (provider, server) = timeout_test_upstream(StatusCode::OK, false).await;
+        let response = call_upstream_stream_with_timeout_and_headers(
+            &timeout_test_client(),
+            &provider,
+            "test-key",
+            "/v1/responses",
+            &body_with_breakpoint("gpt-6-replay"),
+            5_000,
+            &[],
+        )
+        .await
+        .expect("successful stream");
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "data: [DONE]\n\n");
+        server.abort();
+    }
+
+    #[test]
+    fn stream_prefix_classification() {
+        assert!(matches!(
+            classify_stream_prefix(
+                b"event: response.created\ndata: {\"type\":\"response.created\"}"
+            ),
+            PrefetchVerdict::Undecided
+        ));
+        assert!(matches!(
+            classify_stream_prefix(
+                b": ping\n\nevent: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+            ),
+            PrefetchVerdict::Proceed
+        ));
+        assert!(matches!(
+            classify_stream_prefix(b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"prompt_cache_breakpoint is not supported on this model\"}}}\r\n\r\n"),
+            PrefetchVerdict::Rejected(_)
+        ));
+        assert!(matches!(
+            classify_stream_prefix(
+                b"event: error\ndata: {\"error\":{\"message\":\"rate limited\"}}\n\n"
+            ),
+            PrefetchVerdict::Proceed
+        ));
     }
 }

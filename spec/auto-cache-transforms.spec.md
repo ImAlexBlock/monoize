@@ -251,6 +251,14 @@ ACOTU-22. After ACOTU-21 sends a stripped body, the pair (upstream `base_url`, b
 
 ACOTU-23. ACOTU-21 and ACOTU-22 apply to every JSON POST sent through the shared upstream client, streaming and non-streaming, independent of which transform or client produced the key.
 
+ACOTU-24. A streaming upstream can answer HTTP `200` and report the rejection in the event stream instead. For a streaming JSON POST whose sent body contains at least one key that breakpoint stripping would remove, the upstream client MUST read the successful response body until one of these conditions holds, before it returns the response to the caller:
+
+1. The buffered bytes contain a complete SSE event (terminated by an empty line) whose `event` field is not `error` and not `response.failed`, and whose `data` JSON has no top-level `error` object and a `type` other than `error` and `response.failed`;
+2. The buffered bytes contain a complete SSE event that is an **in-stream breakpoint rejection**: its `event` field or `data.type` is `error` or `response.failed`, and the error object (`data.error`, else `data.response.error`, else `data`) has `param` equal to `"prompt_cache_breakpoint"` or a `message` containing `"prompt_cache_breakpoint"`;
+3. The body ends, 65536 bytes are buffered, or 30 seconds pass since the response headers arrived.
+
+In case 2 the upstream client MUST discard the buffered response and continue exactly as ACOTU-21 and ACOTU-22 specify for an HTTP rejection. In cases 1 and 3 the upstream client MUST return a response whose body yields the buffered bytes first, unchanged and in order, followed by the remaining upstream body. A request body without a strippable key MUST NOT be buffered.
+
 ## 7A. `cache_prefix_stabilize`
 
 ### 7A.1 Motivation

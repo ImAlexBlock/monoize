@@ -19,6 +19,8 @@ Monoize handles this rejection automatically:
 2. Monoize sends the request again to the same upstream once. The client does not see the first failure.
 3. Monoize remembers the upstream base URL and model for one hour. During that hour, Monoize removes the key before the first send.
 
+Some upstreams return HTTP 200 and send the rejection as the first stream event. Monoize reads the first event before it forwards the stream, and handles this case the same way.
+
 The memory is local to each process. A restart clears it. For a permanent fix, disable this transform on the affected Provider.
 
 ## Reference
