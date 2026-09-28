@@ -54,6 +54,7 @@ MT25c. Deleting typed provenance MUST make an existing private reference invalid
 ## Responses and streams
 
 MT26. Checked response encoders MUST reject media without a legal target response representation. Existing native image-generation items remain supported.
+MT26b. A Responses output image that carries native `image_generation_call` provenance MUST have a Base64 source with media type `image/png`, `image/jpeg`, or `image/webp`. Any other source, including a URL, MUST fail with `unsupported_media` in non-stream, live-stream, and synthetic-stream output. The same rule applies to a live `partial_image` delta. MT26a does not apply to such an image.
 MT26a. Monoize Responses output supports ordinary image content as `{ "type": "output_image", "url": <URL> }`. URL sources retain their URL. Base64 sources use a data URL containing the source MIME. The same representation MUST be used in non-stream, live-stream, and synthetic-stream output. Ordinary images MUST NOT be relabeled as `image_generation_call`. File-ID image sources remain unsupported in output.
 MT27. Messages responses MUST NOT emit top-level input-only image, document, file, or audio blocks.
 MT28. Chat responses MUST NOT emit media arrays as message.content. Native Chat audio envelopes remain supported.

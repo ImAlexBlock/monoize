@@ -1091,6 +1091,50 @@ fn responses_ordinary_image_output_preserves_current_source_without_generation_l
     assert!(!wire.to_string().contains("image_generation_call"));
 }
 
+#[test]
+fn image_generation_call_without_supported_base64_bytes_is_rejected() {
+    let mut decoded = decode::decode_response(&response(vec![json!({"type":"image_generation_call","id":"ig_1","status":"completed","result":"YQ==","output_format":"png"})])).unwrap();
+    assert!(encode::encode_response_checked(&decoded, "feature-model").is_ok());
+    let Node::Image { source, .. } = decoded.output.iter_mut().find(|node| matches!(node, Node::Image { .. })).unwrap() else { unreachable!() };
+    *source = ImageSource::Url { url: "https://example.com/generated.png".into(), detail: None };
+    assert!(encode::encode_response_checked(&decoded, "feature-model").is_err());
+    assert_eq!(encode::encode_response(&decoded, "feature-model")["error"]["code"], "unsupported_media");
+}
+
+#[tokio::test]
+async fn responses_encoder_emits_one_terminal_when_the_decoder_repeats_it() {
+    let done = UrpStreamEvent::ResponseDone {
+        outcome: None,
+        finish_reason: Some(FinishReason::Stop),
+        usage: None,
+        output: Vec::new(),
+        extra_body: Default::default(),
+    };
+    let late_error = UrpStreamEvent::Error {
+        code: Some("late".into()),
+        message: "late".into(),
+        extra_body: Default::default(),
+    };
+    let (wire, frames) = encode_events(vec![done.clone(), done, late_error]).await;
+    let terminals = frames
+        .iter()
+        .filter(|frame| matches!(frame["type"].as_str(), Some("response.completed" | "response.failed")))
+        .count();
+    assert_eq!(terminals, 1, "{wire}");
+    assert_eq!(wire.matches("[DONE]").count(), 1, "{wire}");
+}
+
+#[test]
+fn input_text_history_never_carries_output_only_members() {
+    let body = json!({"model":"feature-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"q","annotations":[{"type":"url_citation","url":"https://example.com"}],"logprobs":[{"token":"q","logprob":-0.1}]}]}]});
+    let request = decode::decode_request(&body).unwrap();
+    let encoded = encode::encode_request(&request, "feature-model");
+    let part = &encoded["input"][0]["content"][0];
+    assert_eq!(part["type"], "input_text");
+    assert!(part.get("annotations").is_none(), "{encoded}");
+    assert!(part.get("logprobs").is_none(), "{encoded}");
+}
+
 async fn assert_responses_media_stream_errors(response: &UrpResponse, events: Vec<UrpStreamEvent>) {
     for synthetic in [false, true] {
         let (out_tx, mut out_rx) = mpsc::channel(4096);

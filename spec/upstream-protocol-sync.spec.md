@@ -13,3 +13,5 @@ UPS-10. The existing downstream WebSocket-to-HTTP bridge remains the transport f
 
 UPS-11. Chat request history with non-empty native `reasoning.text` details MUST treat scalar reasoning fields as derived aliases. Summary-only details MUST NOT suppress distinct raw reasoning text.
 UPS-12. Responses assistant history MUST preserve non-empty typed citations and valid token scores. Empty or absent citations and token scores MUST be omitted from request content. Native extras MUST NOT restore deleted typed values.
+UPS-12a. UPS-12 applies only to `output_text` request content. An `input_text` or `text` request content part MUST NOT carry `annotations` or `logprobs`, whatever their value, because the Responses input-text schema has no such members.
+UPS-13. Streaming usage received after a terminal Messages `stop_reason` follows `unified_responses_proxy.spec.md` PM6c and PM6c.1: the wait for late usage is bounded, and a stall or transport error after the terminal delta completes the turn instead of failing it.

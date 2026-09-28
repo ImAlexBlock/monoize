@@ -236,6 +236,13 @@ pub(crate) fn validate_response_nodes(nodes: &[Node]) -> Result<(), String> {
             Node::Image { source: ImageSource::Base64 { media_type, .. }, extra_body, .. }
                 if extra_body.contains_key(RESPONSES_IMAGE_GENERATION_CALL_EXTRA_KEY)
                     && matches!(media_type.as_str(), "image/png" | "image/jpeg" | "image/webp") => {}
+            Node::Image { extra_body, .. }
+                if extra_body.contains_key(RESPONSES_IMAGE_GENERATION_CALL_EXTRA_KEY) => {
+                // MT26: a native image_generation_call has no URL or non-png/jpeg/webp form.
+                // Without this branch the ordinary-image arm below accepts it and the encoder
+                // emits a null output item (stream) or drops it (non-stream).
+                return Err("Responses image_generation_call requires supported Base64 image bytes".into());
+            }
             Node::Image { source: ImageSource::Url { .. } | ImageSource::Base64 { .. }, .. } => {}
             Node::Image { .. } | Node::File { .. } | Node::Audio { .. } => {
                 return Err("Responses output cannot represent file-ID images, file, or audio media".into());

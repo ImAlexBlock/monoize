@@ -55,6 +55,18 @@ fn prepare_responses_media_event(event: &mut UrpStreamEvent) -> Result<(), Strin
         } if matches!(&*source, urp::ImageSource::FileId { .. }) => {
             Err("Responses output images require a URL or Base64 image bytes".into())
         }
+        UrpStreamEvent::NodeDelta {
+            delta: urp::NodeDelta::Image { source },
+            extra_body,
+            ..
+        } if image_generation_call_downstream_event(extra_body).is_some()
+            && !matches!(&*source, urp::ImageSource::Base64 { media_type, .. }
+                if matches!(media_type.as_str(), "image/png" | "image/jpeg" | "image/webp")) =>
+        {
+            // MT26: a partial_image event must carry Base64 png/jpeg/webp bytes; a URL source
+            // would emit a partial_image frame without `partial_image_b64`.
+            Err("Responses image_generation_call requires supported Base64 image bytes".into())
+        }
         UrpStreamEvent::NodeDone { node, .. } => {
             urp::encode::openai_responses::prepare_response_nodes(std::slice::from_mut(node))
         }
@@ -288,7 +300,10 @@ pub(crate) async fn encode_urp_stream_as_responses(
 
     let mut signature_projection = urp::tool_signature::SignatureProjection::default();
     while let Some(mut event) = signature_projection.recv(&mut rx).await {
-        if error_terminal_sent {
+        // Exactly one terminal (DC/SE4): once any terminal frame and `[DONE]` are on the
+        // wire, later decoder events (a second ResponseDone, a late Error) must not
+        // produce another terminal after the sentinel.
+        if error_terminal_sent || terminal_sent {
             continue;
         }
 

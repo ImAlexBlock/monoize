@@ -18,6 +18,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
+/// Upper bound on how long the decoder waits for late usage corrections after a
+/// terminal `message_delta.stop_reason` (PM6c). The effective wait is
+/// `min(idle_timeout, MESSAGES_POST_TERMINAL_GRACE_MS)`.
+const MESSAGES_POST_TERMINAL_GRACE_MS: u64 = 2_000;
+
 #[derive(Debug, Default)]
 struct AnthropicMessagesStreamState {
     node_order: Vec<u32>,
@@ -653,19 +658,37 @@ pub(crate) async fn stream_messages_to_urp_events(
     let mut response_started = false;
 
     let idle_timeout = std::time::Duration::from_millis(idle_timeout_ms.max(1));
+    let post_terminal_grace = idle_timeout.min(std::time::Duration::from_millis(
+        MESSAGES_POST_TERMINAL_GRACE_MS,
+    ));
     let mut stream = upstream_resp.bytes_stream().eventsource();
-    while let Some(ev) = tokio::time::timeout(idle_timeout, stream.next())
-        .await
-        .map_err(|_| {
-            AppError::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream_idle_timeout",
-                format!("upstream stream idle for {idle_timeout_ms}ms without data"),
-            )
-        })?
-    {
+    loop {
+        // PM6c: after a terminal stop_reason the content is final. Late usage
+        // corrections are read only within a bounded grace window, so an upstream
+        // that stalls or drops the connection after the terminal delta completes
+        // the turn instead of failing it with an idle timeout or transport error.
+        let wait = if state.saw_terminal_delta {
+            post_terminal_grace
+        } else {
+            idle_timeout
+        };
+        let next = match tokio::time::timeout(wait, stream.next()).await {
+            Ok(next) => next,
+            Err(_) if state.saw_terminal_delta => break,
+            Err(_) => {
+                return Err(AppError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_idle_timeout",
+                    format!("upstream stream idle for {idle_timeout_ms}ms without data"),
+                ));
+            }
+        };
+        let Some(ev) = next else {
+            break;
+        };
         let ev = match ev {
             Ok(event) => event,
+            Err(_) if state.saw_terminal_delta => break,
             Err(error) => {
                 emit_messages_terminal_protocol_error(
                     &tx,
@@ -690,6 +713,7 @@ pub(crate) async fn stream_messages_to_urp_events(
 
         let data_val: Value = match serde_json::from_str(&ev.data) {
             Ok(value) => value,
+            Err(_) if state.saw_terminal_delta => continue,
             Err(error) => {
                 emit_messages_terminal_protocol_error(
                     &tx,
@@ -1904,5 +1928,60 @@ mod local_stream_compat_tests {
             .await
             .unwrap();
         assert_eq!(usage.output_tokens, 9);
+    }
+
+    async fn decode_terminal_then(tail: impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Sync + 'static, idle_timeout_ms: u64) -> (AppResult<()>, Vec<UrpStreamEvent>) {
+        let head = [
+            json!({"type":"message_start", "message":{"id":"msg_stall", "model":"model", "content":[], "usage":{"input_tokens":3,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),
+        ]
+        .iter()
+        .map(|event| Ok::<_, std::io::Error>(bytes::Bytes::from(format!("data: {event}\n\n"))))
+        .collect::<Vec<_>>();
+        let body = reqwest::Body::wrap_stream(futures_util::stream::iter(head).chain(tail));
+        let response = reqwest::Response::from(axum::http::Response::new(body));
+        let (tx, mut rx) = mpsc::channel(64);
+        let request = HandlerUrpRequest {
+            audio_output_format: None,
+            messages_custom_tool_names: Default::default(),
+            model: "sent-model".to_string(),
+            max_multiplier: None,
+            server_tool_usage_classes: Vec::new(),
+            affinity_explicit: None,
+            affinity_prefix_hash: String::new(),
+            estimated_input_tokens: 0,
+            has_tools: false,
+        };
+        let result = stream_messages_to_urp_events(&request, response, tx, None, None, idle_timeout_ms).await;
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        (result, events)
+    }
+
+    #[tokio::test]
+    async fn messages_upstream_stall_after_stop_reason_completes_the_turn() {
+        let started = std::time::Instant::now();
+        let (result, events) = decode_terminal_then(futures_util::stream::pending(), 60_000).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(!events.iter().any(|event| matches!(event, UrpStreamEvent::Error { .. })));
+        assert_eq!(events.iter().filter(|event| matches!(event, UrpStreamEvent::ResponseDone { .. })).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn messages_transport_error_after_stop_reason_completes_the_turn() {
+        let (result, events) = decode_terminal_then(
+            futures_util::stream::iter(vec![Err(std::io::Error::other("reset"))]),
+            60_000,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!events.iter().any(|event| matches!(event, UrpStreamEvent::Error { .. })));
+        assert_eq!(events.iter().filter(|event| matches!(event, UrpStreamEvent::ResponseDone { .. })).count(), 1);
     }
 }

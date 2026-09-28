@@ -139,7 +139,14 @@ fn sanitize_request_input_item(item: &mut Value) {
                         continue;
                     };
                     let part_type = part_obj.get("type").and_then(Value::as_str);
-                    if matches!(part_type, Some("input_text" | "output_text" | "text")) {
+                    if matches!(part_type, Some("input_text" | "text")) {
+                        // The Responses input-text schema has no annotation or token-score
+                        // members; a replayed copy makes the upstream reject the request.
+                        part_obj.remove("annotations");
+                        part_obj.remove("logprobs");
+                    } else if part_type == Some("output_text") {
+                        // UPS-12: assistant history keeps non-empty typed citations and
+                        // token scores, and omits only empty or absent values.
                         for key in ["annotations", "logprobs"] {
                             if part_obj.get(key).is_some_and(|value| value.is_null() || value.as_array().is_some_and(Vec::is_empty)) {
                                 part_obj.remove(key);
