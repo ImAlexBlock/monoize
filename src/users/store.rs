@@ -3296,7 +3296,7 @@ impl UserStore {
         ] {
             if let Some(patch) = patch {
                 let normalized = normalize_spend_limit(patch.as_deref())?;
-                set_clauses.push(format!("{column} = ${idx}"));
+                set_clauses.push(format!("{column} = ${idx}", column = self.db.accounting_column(column)));
                 values.push(normalized.into());
                 idx += 1;
             }
@@ -3495,7 +3495,7 @@ impl UserStore {
         self.delete_api_keys_transactional(ids).await
     }
 
-    fn user_balance_from_row(row: &QueryResult) -> Result<UserBalance, String> {
+    fn user_balance_from_row(&self, row: &QueryResult) -> Result<UserBalance, String> {
         let balance_raw: String = row
             .try_get("", "balance_nano_usd")
             .map_err(|e| e.to_string())?;
@@ -3519,7 +3519,7 @@ impl UserStore {
             ))
             .await
             .map_err(|e| e.to_string())?;
-        row.map(|row| Self::user_balance_from_row(&row)).transpose()
+        row.map(|row| self.user_balance_from_row(&row)).transpose()
     }
 
     pub async fn get_user_balance(&self, user_id: &str) -> Result<Option<UserBalance>, String> {

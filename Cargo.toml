@@ -69,6 +69,7 @@ rustls = { version = "0.23.45", default-features = false, features = ["ring", "s
 clap = { version = "=4.5.60", features = ["derive"] }
 md-5 = "0.10.6"
 rust_xlsxwriter = "0.99"
+num-bigint = "0.4.6"
 
 [dev-dependencies]
 http-body-util = "0.1.3"

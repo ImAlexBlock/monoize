@@ -64,6 +64,7 @@ pub struct DbPool {
     write_lock: Arc<Mutex<()>>,
     backend: DbBackend,
     sqlite_filesystem_id: Option<Arc<str>>,
+    accounting: Arc<crate::accounting::state::AccountingCore>,
 }
 
 fn positive_env_u64(name: &str, default: u64) -> u64 {
@@ -114,6 +115,7 @@ impl DbPool {
                 write_lock: Arc::new(Mutex::new(())),
                 backend: DbBackend::Sqlite,
                 sqlite_filesystem_id: Some(format!("memory:{}", uuid::Uuid::new_v4()).into()),
+                accounting: Arc::new(crate::accounting::state::AccountingCore::legacy()),
             });
         }
 
@@ -137,6 +139,7 @@ impl DbPool {
             write_lock: Arc::new(Mutex::new(())),
             backend: DbBackend::Sqlite,
             sqlite_filesystem_id: Some(sqlite_filesystem_id.into()),
+            accounting: Arc::new(crate::accounting::state::AccountingCore::legacy()),
         })
     }
 
@@ -177,12 +180,32 @@ impl DbPool {
             write_lock: Arc::new(Mutex::new(())),
             backend: DbBackend::Postgres,
             sqlite_filesystem_id: None,
+            accounting: Arc::new(crate::accounting::state::AccountingCore::legacy()),
         })
     }
 
     /// Get the read connection (for SELECT queries).
     pub fn read(&self) -> &DatabaseConnection {
         &self.read
+    }
+
+    pub(crate) fn accounting_core(&self) -> Arc<crate::accounting::state::AccountingCore> {
+        self.accounting.clone()
+    }
+
+    /// Render one accounting column name for the current schema layout. An
+    /// activation writer holding the core lock keeps callers on the legacy
+    /// layout; monetary operations cannot run inside activation anyway.
+    pub fn accounting_column<'a>(&self, legacy_name: &'a str) -> &'a str {
+        let layout = self
+            .accounting
+            .layout()
+            .unwrap_or(crate::accounting::schema::SchemaLayout::LegacyUsd);
+        crate::accounting::schema::column(layout, legacy_name)
+    }
+
+    pub fn accounting(&self) -> crate::accounting::state::AccountingState {
+        crate::accounting::state::AccountingState::for_pool(self.clone())
     }
 
     /// Acquire the write connection. For SQLite, this serializes all writes

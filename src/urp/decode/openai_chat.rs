@@ -1089,6 +1089,12 @@ fn extract_reasoning(obj: &Map<String, Value>) -> Option<ReasoningConfig> {
     })
 }
 
+#[cfg(test)]
+#[cfg(test)]
+pub(crate) fn parse_chat_reasoning_fields_probe(msg_obj: &Map<String, Value>, parts: &mut Vec<Part>) {
+    parse_chat_reasoning_fields(msg_obj, parts, true)
+}
+
 fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Part>, request_history: bool) {
     if let Some(details) = msg_obj.get("reasoning_details").and_then(|v| v.as_array()) {
         for detail in details {
@@ -1140,10 +1146,6 @@ fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Par
         }
     }
 
-    if request_history && parts.iter().any(|part| matches!(part, Part::Reasoning { content: Some(content), .. } if !content.is_empty())) {
-        return;
-    }
-
     for (key, surface, summary_is_alias) in [
         ("reasoning", CHAT_REASONING_SURFACE_REASONING, true),
         (
@@ -1159,6 +1161,16 @@ fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Par
         else {
             continue;
         };
+        // UPS-11 applies to request history only: with non-empty native
+        // reasoning.text details, scalar reasoning fields are derived aliases and
+        // must not replay as separate nodes. Summary-only details must not
+        // suppress distinct raw text, and response decoding must stay lossless.
+        if request_history
+            && parts.iter().any(|part| matches!(part, Part::Reasoning { content: Some(existing), extra_body, .. }
+                if !existing.is_empty() && extra_body.contains_key(CHAT_REASONING_DETAIL_EXTRA_KEY)))
+        {
+            continue;
+        }
         if parts.iter().any(|part| matches!(part, Part::Reasoning { content: existing, summary, .. }
             if existing.as_deref() == Some(content) || (summary_is_alias && summary.as_deref() == Some(content)))) {
             continue;

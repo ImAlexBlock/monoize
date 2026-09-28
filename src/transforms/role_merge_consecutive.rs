@@ -89,34 +89,61 @@ impl Transform for RoleMergeConsecutiveTransform {
 fn merge_same_role_nodes(nodes: &[Node]) -> Vec<Node> {
     let mut merged: Vec<Node> = Vec::new();
     for node in nodes {
-        if let (
-            Some(Node::Text {
-                role: last_role,
+        let can_merge = match (merged.last(), node) {
+            (
+                Some(Node::Text {
+                    role: last_role,
+                    phase: last_phase,
+                    ..
+                }),
+                Node::Text {
+                    role, phase, ..
+                },
+            ) => {
+                last_role == role
+                    && last_phase == phase
+                    // Merging across a signature, logprobs, or citation annotation would
+                    // let replay metadata restore values the annotation boundary guards.
+                    && !is_annotated(node)
+                    && !is_annotated(merged.last().expect("matched on Some"))
+            }
+            _ => false,
+        };
+        if can_merge
+            && let Some(Node::Text {
                 content: last_content,
-                phase: last_phase,
                 extra_body: last_extra,
                 ..
-            }),
-            Node::Text {
-                role,
+            }) = merged.last_mut()
+        {
+            if let Node::Text {
                 content,
-                phase,
                 extra_body,
                 ..
-            },
-        ) = (merged.last_mut(), node)
-            && last_role == role
-            && last_phase == phase
-        {
-            last_content.push_str(content);
-            for (k, v) in extra_body {
-                last_extra.entry(k.clone()).or_insert_with(|| v.clone());
+            } = node
+            {
+                last_content.push_str(content);
+                for (k, v) in extra_body {
+                    last_extra.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                continue;
             }
-            continue;
         }
         merged.push(node.clone());
     }
     merged
+}
+
+fn is_annotated(node: &Node) -> bool {
+    match node {
+        Node::Text {
+            signature,
+            logprobs,
+            citations,
+            ..
+        } => signature.is_some() || logprobs.is_some() || !citations.is_empty(),
+        _ => false,
+    }
 }
 
 inventory::submit!(TransformEntry {

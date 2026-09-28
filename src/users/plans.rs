@@ -160,11 +160,11 @@ fn is_plan_name_unique_violation(error: &str) -> bool {
         && (lower.contains("name") || lower.contains("uq_billing_plans_name_lower"))
 }
 
-fn plan_lock_sql(is_postgres: bool) -> &'static str {
-    if is_postgres {
-        "SELECT id, name, grant_amount_nano_usd, schedule, group_ids, enabled, created_at, updated_at FROM billing_plans WHERE id = $1 FOR UPDATE"
+fn plan_lock_sql(db: &crate::db::DbPool) -> String {
+    if db.is_postgres() {
+        "SELECT id, name, grant_amount_nano_usd, schedule, group_ids, enabled, created_at, updated_at FROM billing_plans WHERE id = $1 FOR UPDATE".to_string()
     } else {
-        "SELECT id, name, grant_amount_nano_usd, schedule, group_ids, enabled, created_at, updated_at FROM billing_plans WHERE id = $1"
+        "SELECT id, name, grant_amount_nano_usd, schedule, group_ids, enabled, created_at, updated_at FROM billing_plans WHERE id = $1".to_string()
     }
 }
 
@@ -172,7 +172,7 @@ fn sql_err<E: std::fmt::Display>(error: E) -> String {
     format!("invalid persisted billing plan data: {error}")
 }
 
-fn row_to_plan(row: &sea_orm::QueryResult) -> Result<BillingPlan, String> {
+fn row_to_plan(_db: &crate::db::DbPool, row: &sea_orm::QueryResult) -> Result<BillingPlan, String> {
     let enabled = super::store::decode_required_bool(row, "enabled")?;
     let group_ids_raw: String = row.try_get("", "group_ids").map_err(sql_err)?;
     Ok(BillingPlan {
@@ -221,7 +221,7 @@ impl UserStore {
             ))
             .await
             .map_err(|e| e.to_string())?;
-        rows.iter().map(row_to_plan).collect()
+        rows.iter().map(|row| row_to_plan(&self.db, row)).collect()
     }
 
     pub async fn get_billing_plan_by_id(&self, id: &str) -> Result<Option<BillingPlan>, String> {
@@ -235,7 +235,7 @@ impl UserStore {
             .await
             .map_err(|e| e.to_string())?;
         match row {
-            Some(row) => Ok(Some(row_to_plan(&row)?)),
+            Some(row) => Ok(Some(row_to_plan(&self.db, &row)?)),
             None => Ok(None),
         }
     }
@@ -309,12 +309,12 @@ impl UserStore {
             let existing_row = tx
                 .query_one(
                     self.db
-                        .stmt(plan_lock_sql(self.db.is_postgres()), vec![plan_id.into()]),
+                        .stmt(&plan_lock_sql(&self.db), vec![plan_id.into()]),
                 )
                 .await
                 .map_err(|e| e.to_string())?;
             let existing = match existing_row {
-                Some(row) => row_to_plan(&row)?,
+                Some(row) => row_to_plan(&self.db, &row)?,
                 None => return Err("not_found".to_string()),
             };
             if self
@@ -373,7 +373,7 @@ impl UserStore {
         let existing = tx
             .query_one(
                 self.db
-                    .stmt(plan_lock_sql(self.db.is_postgres()), vec![plan_id.into()]),
+                    .stmt(&plan_lock_sql(&self.db), vec![plan_id.into()]),
             )
             .await
             .map_err(|e| e.to_string())?;

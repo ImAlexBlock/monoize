@@ -128,10 +128,16 @@ fn append_images_as_markdown_nodes(output: &mut Vec<crate::urp::Node>, config: &
             crate::urp::Node::Text {
                 role: crate::urp::OrdinaryRole::Assistant,
                 content,
+                signature,
+                logprobs,
                 ..
             } => {
                 if !pending_appended.is_empty() {
                     content.push_str(&pending_appended);
+                    // Appended bytes are outside the signed region: replay
+                    // metadata must not restore a signature over them.
+                    *signature = None;
+                    *logprobs = None;
                     pending_appended.clear();
                 }
                 last_text_index = Some(index);
@@ -142,8 +148,16 @@ fn append_images_as_markdown_nodes(output: &mut Vec<crate::urp::Node>, config: &
 
     if !pending_appended.is_empty() {
         if let Some(index) = last_text_index {
-            if let Some(crate::urp::Node::Text { content, .. }) = output.get_mut(index) {
+            if let Some(crate::urp::Node::Text {
+                content,
+                signature,
+                logprobs,
+                ..
+            }) = output.get_mut(index)
+            {
                 content.push_str(&pending_appended);
+                *signature = None;
+                *logprobs = None;
             }
         } else {
             output.push(crate::urp::Node::Text {

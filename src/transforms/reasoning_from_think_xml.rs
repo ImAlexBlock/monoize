@@ -102,14 +102,24 @@ impl Transform for ReasoningFromThinkXmlTransform {
             UrpData::Response(resp) => {
                 let mut out = Vec::with_capacity(resp.output.len());
                 for node in resp.output.drain(..) {
+                    let contains_tag = match &node {
+                        Node::Text {
+                            role: OrdinaryRole::Assistant,
+                            content,
+                            ..
+                        } => content.contains(&format!("<{tag}>", tag = cfg.tag)),
+                        _ => false,
+                    };
                     match node {
                         Node::Text {
                             role: OrdinaryRole::Assistant,
                             content,
                             ..
-                        } => {
+                        } if contains_tag => {
                             out.extend(extract_text_and_reasoning(&content, &cfg.tag));
                         }
+                        // A no-op node keeps its object so signature, logprobs,
+                        // and citations survive byte-identical replay.
                         other => out.push(other),
                     }
                 }
@@ -248,12 +258,24 @@ fn apply_stream(event: &mut UrpStreamEvent, state: &mut StreamState, tag: &str) 
         UrpStreamEvent::ResponseDone { output, .. } => {
             let mut rewritten = Vec::with_capacity(output.len());
             for node in output.drain(..) {
+                let contains_tag = match &node {
+                    Node::Text {
+                        role: OrdinaryRole::Assistant,
+                        content,
+                        ..
+                    } => content.contains(&open),
+                    _ => false,
+                };
                 match node {
                     Node::Text {
                         role: OrdinaryRole::Assistant,
                         content,
                         ..
-                    } => rewritten.extend(extract_text_and_reasoning(&content, tag)),
+                    } if contains_tag => {
+                        rewritten.extend(extract_text_and_reasoning(&content, tag))
+                    }
+                    // A no-op node keeps its object so signature, logprobs,
+                    // and citations survive byte-identical replay.
                     other => rewritten.push(other),
                 }
             }

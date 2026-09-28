@@ -1379,15 +1379,29 @@ fn insert_openrouter_reasoning_fields(
             continue;
         }
 
-        let native_raw_surface = extra_body
-            .get(CHAT_REASONING_SURFACE_EXTRA_KEY)
-            .and_then(Value::as_str)
-            == Some(CHAT_REASONING_SURFACE_REASONING_CONTENT);
-        if native_raw_surface && reasoning_content_value.is_none() {
-            reasoning_content_value = content
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
+        let scalar_surface = extra_body.get(CHAT_REASONING_SURFACE_EXTRA_KEY).and_then(Value::as_str);
+        if scalar_surface.is_some() && summary.is_none() && encrypted.is_none() {
+            // CHAT-3: reasoning decoded from a scalar field stays scalar. Re-entering
+            // it into reasoning_details would make a later decode treat it as
+            // structured and drop the distinct scalar alias (UPS-11). Typed
+            // mutation (a summary or cipher added, content deleted) leaves the
+            // scalar shape and must encode through the structured branch.
+            match scalar_surface {
+                Some(CHAT_REASONING_SURFACE_REASONING_CONTENT) => {
+                    if reasoning_content_value.is_none() {
+                        reasoning_content_value = content
+                            .as_deref()
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string);
+                    }
+                }
+                _ => {
+                    if reasoning_value.is_none() {
+                        reasoning_value = content.clone();
+                    }
+                }
+            }
+            continue;
         }
 
         if let Some(summary) = summary.as_deref().filter(|summary| !summary.is_empty()) {
@@ -1409,8 +1423,7 @@ fn insert_openrouter_reasoning_fields(
             }
         }
 
-        if !native_raw_surface
-            && let Some(content) = content.as_deref().filter(|content| !content.is_empty())
+        if let Some(content) = content.as_deref().filter(|content| !content.is_empty())
         {
             if reasoning_value.is_none() {
                 reasoning_value = Some(content.to_string());
