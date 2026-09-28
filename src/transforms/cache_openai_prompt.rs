@@ -234,11 +234,7 @@ fn build_prefix_key_material(
     if cfg.include_user_in_key {
         if let Some(user) = &req.user {
             material.insert("user".to_string(), Value::String(user.clone()));
-        } else if let Some(username) = req
-            .extra_body
-            .get("__monoize_username")
-            .and_then(Value::as_str)
-        {
+        } else if let Some(username) = req.context.username.as_deref() {
             material.insert("user".to_string(), Value::String(username.to_string()));
         }
     }
@@ -249,16 +245,16 @@ fn build_prefix_key_material(
 fn build_identity_key_material(req: &UrpRequest, material: &mut Map<String, Value>) {
     material.insert(
         "username".to_string(),
-        req.extra_body
-            .get("__monoize_username")
-            .and_then(Value::as_str)
+        req.context
+            .username
+            .as_deref()
             .map_or(Value::Null, |v| Value::String(v.to_string())),
     );
     material.insert(
         "api_key_id".to_string(),
-        req.extra_body
-            .get("__monoize_api_key_id")
-            .and_then(Value::as_str)
+        req.context
+            .api_key_id
+            .as_deref()
             .map_or(Value::Null, |v| Value::String(v.to_string())),
     );
 }
@@ -301,9 +297,19 @@ mod tests {
 
     fn request_with_user_message(user_text: &str) -> UrpRequest {
         UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.5".to_string(),
             input: vec![
                 Node::Text {
+                    citations: Default::default(),
+                    logprobs: Default::default(),
+                    signature: Default::default(),
+
                     id: None,
                     role: OrdinaryRole::System,
                     content: "You are a coding assistant.".to_string(),
@@ -311,6 +317,10 @@ mod tests {
                     extra_body: HashMap::new(),
                 },
                 Node::Text {
+                    citations: Default::default(),
+                    logprobs: Default::default(),
+                    signature: Default::default(),
+
                     id: None,
                     role: OrdinaryRole::User,
                     content: user_text.to_string(),
@@ -324,10 +334,17 @@ mod tests {
             max_output_tokens: None,
             reasoning: None,
             tools: Some(vec![ToolDefinition {
+                config: Default::default(),
+                namespace: Default::default(),
+                origin_protocol: Default::default(),
+                tools: Default::default(),
+
                 tool_type: "function".to_string(),
                 name: None,
                 description: None,
                 function: Some(FunctionDefinition {
+                    response_schema: Default::default(),
+
                     name: "lookup".to_string(),
                     description: Some("Lookup data".to_string()),
                     parameters: Some(json!({
@@ -375,10 +392,8 @@ mod tests {
         let mut first = request_with_user_message("first question");
         let mut second = request_with_user_message("different question");
         for req in [&mut first, &mut second] {
-            req.extra_body
-                .insert("__monoize_username".to_string(), json!("alice"));
-            req.extra_body
-                .insert("__monoize_api_key_id".to_string(), json!("key-a"));
+            req.context.username = Some("alice".to_string());
+            req.context.api_key_id = Some("key-a".to_string());
         }
         first.model = "gpt-5.4-mini".to_string();
         second.model = "gpt-5.5".to_string();
@@ -386,9 +401,7 @@ mod tests {
         let first_key = build_prompt_cache_key(&first, &cfg).expect("first key");
         let second_key = build_prompt_cache_key(&second, &cfg).expect("second key");
 
-        second
-            .extra_body
-            .insert("__monoize_api_key_id".to_string(), json!("key-b"));
+        second.context.api_key_id = Some("key-b".to_string());
         let third_key = build_prompt_cache_key(&second, &cfg).expect("third key");
 
         assert_eq!(first_key, second_key);

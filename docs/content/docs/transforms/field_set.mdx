@@ -3,11 +3,17 @@ title: "Field: set"
 description: Write a JSON value at a configured path, optionally only when a condition matches.
 ---
 
+An explicit `when_equals: null` matches only a present JSON `null`. It does not match a missing field.
+
 ## What it does
 
 This transform writes a JSON value at the configured extra-body path. With `when_equals` set, it writes only when the current value equals the given JSON value. Without `when_equals`, it always writes.
 
 Use it to add or replace provider-specific fields that the protocol conversion does not carry.
+
+Request paths `reasoning.effort`, `reasoning.summary`, `reasoning.mode`, `reasoning.budget_tokens`, and `reasoning.display` control normalized reasoning settings. Other paths keep their extra-body behavior.
+
+Set `reasoning.summary` to `detailed` for GPT summary requests. The upstream must support and return summaries.
 
 ## Reference
 

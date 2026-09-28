@@ -23,7 +23,10 @@ pub struct ImageMarkdownToOutputTransform;
 struct StreamTextNodeState {
     header_id: Option<String>,
     header_phase: Option<String>,
+    header_signature: Option<Value>,
+    header_citations: Vec<crate::urp::Citation>,
     header_extra_body: HashMap<String, Value>,
+    buffered_events: Option<Vec<UrpStreamEvent>>,
     buffered_tail: String,
     cleaned_content: String,
     start_emitted: bool,
@@ -137,15 +140,25 @@ fn rewrite_assistant_markdown_images_nodes(nodes: &mut Vec<Node>) {
     for node in nodes.drain(..) {
         match node {
             Node::Text {
+                logprobs,
+                signature,
+                mut citations,
                 id,
                 role: OrdinaryRole::Assistant,
                 content,
                 phase,
                 extra_body,
             } => {
-                let (cleaned, images) = extract_markdown_images_from_text(&content);
-                if !cleaned.is_empty() {
+                let (cleaned, images, removed) = extract_markdown_images_with_ranges(&content);
+                let changed = !images.is_empty();
+                if changed {
+                    remap_citations(&mut citations, &removed);
+                }
+                if !cleaned.is_empty() || !changed {
                     rewritten.push(Node::Text {
+                        logprobs: if changed { None } else { logprobs },
+                        signature: if changed { None } else { signature },
+                        citations,
                         id,
                         role: OrdinaryRole::Assistant,
                         content: cleaned,
@@ -155,6 +168,8 @@ fn rewrite_assistant_markdown_images_nodes(nodes: &mut Vec<Node>) {
                 }
                 for source in images {
                     rewritten.push(Node::Image {
+                        metadata: Default::default(),
+
                         id: None,
                         role: OrdinaryRole::Assistant,
                         source,
@@ -168,24 +183,79 @@ fn rewrite_assistant_markdown_images_nodes(nodes: &mut Vec<Node>) {
     *nodes = rewritten;
 }
 
+#[cfg(test)]
 fn extract_markdown_images_from_text(content: &str) -> (String, Vec<ImageSource>) {
+    let (cleaned, images, _) = extract_markdown_images_with_ranges(content);
+    (cleaned, images)
+}
+
+fn extract_markdown_images_with_ranges(
+    content: &str,
+) -> (
+    String,
+    Vec<ImageSource>,
+    Vec<crate::urp::citations::TextRange>,
+) {
     let (segments, tail) = split_stream_segments(content, true);
     debug_assert!(tail.is_empty());
     let mut images = Vec::new();
     let mut cleaned = String::new();
+    let mut removed = Vec::new();
+    let mut cursor = 0;
     for segment in segments {
         match segment {
-            StreamSegment::Text(text) => cleaned.push_str(&text),
-            StreamSegment::Image(source) => images.push(source),
+            StreamSegment::Text(text) => {
+                cursor += text.chars().count() as u64;
+                cleaned.push_str(&text);
+            }
+            StreamSegment::Image {
+                source,
+                removed_chars,
+            } => {
+                removed.push(crate::urp::citations::TextRange {
+                    start: cursor,
+                    end: cursor + removed_chars,
+                });
+                cursor += removed_chars;
+                images.push(source);
+            }
         }
     }
-    (cleaned, images)
+    (cleaned, images, removed)
+}
+
+fn remap_citations(
+    citations: &mut Vec<crate::urp::Citation>,
+    removed: &[crate::urp::citations::TextRange],
+) {
+    citations.retain_mut(|citation| {
+        let Some(range) = citation.answer_range.as_mut() else {
+            return true;
+        };
+        if removed
+            .iter()
+            .any(|span| range.start < span.end && range.end > span.start)
+        {
+            return false;
+        }
+        let shift: u64 = removed
+            .iter()
+            .filter(|span| span.end <= range.start)
+            .map(|span| span.end - span.start)
+            .sum();
+        range.start -= shift;
+        range.end -= shift;
+        true
+    });
 }
 
 #[derive(Debug)]
 enum StreamSegment {
     Text(String),
-    Image(ImageSource),
+    Image {
+        source: ImageSource,
+        removed_chars: u64,
+    },
 }
 
 enum CandidateParse {
@@ -207,7 +277,10 @@ fn split_stream_segments(content: &str, terminal: bool) -> (Vec<StreamSegment>, 
                     if !text.is_empty() {
                         segments.push(StreamSegment::Text(std::mem::take(&mut text)));
                     }
-                    segments.push(StreamSegment::Image(source));
+                    segments.push(StreamSegment::Image {
+                        source,
+                        removed_chars: content[i..end].chars().count() as u64,
+                    });
                     i = end;
                     continue;
                 }
@@ -314,6 +387,8 @@ fn apply_node_stream(event: &mut UrpStreamEvent, state: &mut StreamState) -> boo
             node_index,
             header:
                 NodeHeader::Text {
+                    signature,
+                    citations,
                     id,
                     role: OrdinaryRole::Assistant,
                     phase,
@@ -325,7 +400,10 @@ fn apply_node_stream(event: &mut UrpStreamEvent, state: &mut StreamState) -> boo
                 StreamTextNodeState {
                     header_id: id.clone(),
                     header_phase: phase.clone(),
+                    header_signature: signature.clone(),
+                    header_citations: citations.clone(),
                     header_extra_body: extra_body.clone(),
+                    buffered_events: (signature.is_some() || !citations.is_empty()).then(Vec::new),
                     buffered_tail: String::new(),
                     cleaned_content: String::new(),
                     start_emitted: false,
@@ -337,7 +415,13 @@ fn apply_node_stream(event: &mut UrpStreamEvent, state: &mut StreamState) -> boo
         }
         UrpStreamEvent::NodeDelta {
             node_index,
-            delta: NodeDelta::Text { content },
+            delta:
+                NodeDelta::Text {
+                    logprobs,
+                    signature,
+                    citations,
+                    content,
+                },
             usage,
             extra_body,
         } => {
@@ -345,19 +429,38 @@ fn apply_node_stream(event: &mut UrpStreamEvent, state: &mut StreamState) -> boo
                 return false;
             };
             node_state.saw_delta = true;
-            let combined = format!("{}{}", node_state.buffered_tail, content);
-            let (segments, tail) = split_stream_segments(&combined, false);
-            node_state.buffered_tail = tail;
             let mut emitted = Vec::new();
-            emit_node_segments(
-                *node_index,
-                state,
-                &mut node_state,
-                segments,
-                &mut emitted,
-                extra_body,
-            );
-            attach_usage_to_last_node_event(&mut emitted, usage.clone());
+            // Later Markdown extraction can invalidate a signature or citation already sent.
+            if node_state.buffered_events.is_some()
+                || logprobs.is_some()
+                || signature.is_some()
+                || !citations.is_empty()
+            {
+                node_state
+                    .buffered_events
+                    .get_or_insert_with(Vec::new)
+                    .push(UrpStreamEvent::NodeDelta {
+                        node_index: *node_index,
+                        delta: NodeDelta::Text {
+                            logprobs: logprobs.clone(),
+                            signature: signature.clone(),
+                            citations: citations.clone(),
+                            content: content.clone(),
+                        },
+                        usage: usage.clone(),
+                        extra_body: extra_body.clone(),
+                    });
+            } else {
+                emit_text_delta(
+                    *node_index,
+                    state,
+                    &mut node_state,
+                    content,
+                    usage.clone(),
+                    extra_body,
+                    &mut emitted,
+                );
+            }
             state.node_text_parts.insert(*node_index, node_state);
             state.replacement = Some(emitted);
             true
@@ -366,6 +469,9 @@ fn apply_node_stream(event: &mut UrpStreamEvent, state: &mut StreamState) -> boo
             node_index,
             node:
                 Node::Text {
+                    logprobs,
+                    signature,
+                    citations,
                     id,
                     role: OrdinaryRole::Assistant,
                     content,
@@ -382,18 +488,64 @@ fn apply_node_stream(event: &mut UrpStreamEvent, state: &mut StreamState) -> boo
                     .unwrap_or_else(|| StreamTextNodeState {
                         header_id: id.clone(),
                         header_phase: phase.clone(),
+                        header_signature: signature.clone(),
+                        header_citations: citations.clone(),
                         header_extra_body: HashMap::new(),
+                        buffered_events: None,
                         buffered_tail: String::new(),
                         cleaned_content: String::new(),
                         start_emitted: false,
                         saw_delta: false,
                     });
+            let (cleaned_terminal, images, removed) = extract_markdown_images_with_ranges(content);
+            let changed = !images.is_empty();
+            let mut terminal_citations = citations.clone();
+            if changed {
+                node_state.header_signature = None;
+                node_state.header_citations.clear();
+                remap_citations(&mut terminal_citations, &removed);
+            }
+            let mut emitted = Vec::new();
+            if let Some(buffered) = node_state.buffered_events.take() {
+                if changed {
+                    for event in buffered {
+                        if let UrpStreamEvent::NodeDelta {
+                            delta: NodeDelta::Text { content, .. },
+                            usage,
+                            extra_body,
+                            ..
+                        } = event
+                        {
+                            emit_text_delta(
+                                *node_index,
+                                state,
+                                &mut node_state,
+                                &content,
+                                usage,
+                                &extra_body,
+                                &mut emitted,
+                            );
+                        }
+                    }
+                } else if !buffered.is_empty() {
+                    ensure_text_node_start(*node_index, &mut node_state, &mut emitted);
+                    let tail = std::mem::take(&mut node_state.buffered_tail);
+                    emit_node_segments(
+                        *node_index,
+                        state,
+                        &mut node_state,
+                        vec![StreamSegment::Text(tail)],
+                        &mut emitted,
+                        &HashMap::new(),
+                    );
+                    emitted.extend(buffered);
+                }
+            }
             if !node_state.saw_delta {
                 node_state.buffered_tail.push_str(content);
             }
             let (segments, tail) = split_stream_segments(&node_state.buffered_tail, true);
             node_state.buffered_tail = tail;
-            let mut emitted = Vec::new();
             emit_node_segments(
                 *node_index,
                 state,
@@ -402,13 +554,19 @@ fn apply_node_stream(event: &mut UrpStreamEvent, state: &mut StreamState) -> boo
                 &mut emitted,
                 &HashMap::new(),
             );
+            if !changed {
+                ensure_text_node_start(*node_index, &mut node_state, &mut emitted);
+            }
             if node_state.start_emitted {
                 emitted.push(UrpStreamEvent::NodeDone {
                     node_index: *node_index,
                     node: Node::Text {
+                        logprobs: if changed { None } else { logprobs.clone() },
+                        signature: if changed { None } else { signature.clone() },
+                        citations: terminal_citations,
                         id: id.clone(),
                         role: OrdinaryRole::Assistant,
-                        content: std::mem::take(&mut node_state.cleaned_content),
+                        content: cleaned_terminal,
                         phase: phase.clone(),
                         extra_body: node_extra_body.clone(),
                     },
@@ -441,6 +599,8 @@ fn ensure_text_node_start(
     emitted.push(UrpStreamEvent::NodeStart {
         node_index,
         header: NodeHeader::Text {
+            signature: node_state.header_signature.clone(),
+            citations: node_state.header_citations.clone(),
             id: node_state.header_id.clone(),
             role: OrdinaryRole::Assistant,
             phase: node_state.header_phase.clone(),
@@ -459,6 +619,8 @@ fn emit_synthetic_image_node(
     emitted.push(UrpStreamEvent::NodeStart {
         node_index,
         header: NodeHeader::Image {
+            metadata: Default::default(),
+
             id: None,
             role: OrdinaryRole::Assistant,
         },
@@ -467,6 +629,8 @@ fn emit_synthetic_image_node(
     emitted.push(UrpStreamEvent::NodeDone {
         node_index,
         node: Node::Image {
+            metadata: Default::default(),
+
             id: None,
             role: OrdinaryRole::Assistant,
             source,
@@ -495,14 +659,38 @@ fn emit_node_segments(
                 node_state.cleaned_content.push_str(&text);
                 emitted.push(UrpStreamEvent::NodeDelta {
                     node_index,
-                    delta: NodeDelta::Text { content: text },
+                    delta: NodeDelta::Text {
+                        logprobs: None,
+                        signature: None,
+                        citations: Vec::new(),
+                        content: text,
+                    },
                     usage: None,
                     extra_body: delta_extra_body.clone(),
                 });
             }
-            StreamSegment::Image(source) => emit_synthetic_image_node(state, source, emitted),
+            StreamSegment::Image { source, .. } => {
+                emit_synthetic_image_node(state, source, emitted)
+            }
         }
     }
+}
+
+fn emit_text_delta(
+    node_index: u32,
+    state: &mut StreamState,
+    node_state: &mut StreamTextNodeState,
+    content: &str,
+    usage: Option<crate::urp::Usage>,
+    extra_body: &HashMap<String, Value>,
+    emitted: &mut Vec<UrpStreamEvent>,
+) {
+    let emitted_start = emitted.len();
+    let combined = format!("{}{}", node_state.buffered_tail, content);
+    let (segments, tail) = split_stream_segments(&combined, false);
+    node_state.buffered_tail = tail;
+    emit_node_segments(node_index, state, node_state, segments, emitted, extra_body);
+    attach_usage_to_last_node_event(&mut emitted[emitted_start..], usage);
 }
 
 fn attach_usage_to_last_node_event(
@@ -570,5 +758,182 @@ mod tests {
             }
             _ => panic!("expected base64 image"),
         }
+    }
+
+    fn annotated_text(content: &str) -> Node {
+        serde_json::from_value(json!({
+            "type":"text", "role":"assistant", "id":"text_1", "phase":"answer",
+            "content":content, "signature":"signed-original-text",
+            "logprobs":[{"token":content,"logprob":-0.2,"top_logprobs":[]}],
+            "citations":[citation(Some((0, 1)))], "vendor":"kept"
+        }))
+        .unwrap()
+    }
+
+    fn citation(range: Option<(u64, u64)>) -> Value {
+        let mut citation = json!({
+            "source":{"kind":"url", "url":"https://example.com/source", "title":"Source"},
+            "origin_protocol":"responses", "extra_body":{"vendor":"kept"}
+        });
+        if let Some((start, end)) = range {
+            citation["answer_range"] = json!({"start":start,"end":end});
+        }
+        citation
+    }
+
+    fn run_stream(events: Vec<UrpStreamEvent>) -> Vec<UrpStreamEvent> {
+        let mut state = StreamState::default();
+        let mut emitted = Vec::new();
+        for mut event in events {
+            apply_stream(&mut event, &mut state);
+            emitted.extend(state.finalize_stream_event(event));
+        }
+        emitted
+    }
+
+    #[test]
+    fn unchanged_text_preserves_all_metadata_and_empty_nodes() {
+        for text in ["Plain text", "![unfinished", ""] {
+            let original = annotated_text(text);
+            let mut nodes = vec![original.clone()];
+            rewrite_assistant_markdown_images_nodes(&mut nodes);
+            assert_eq!(nodes, vec![original]);
+        }
+    }
+
+    #[test]
+    fn unchanged_stream_preserves_header_delta_and_terminal_metadata() {
+        for text in ["Plain text", "![unfinished"] {
+            let node = annotated_text(text);
+            let split = 2;
+            let events: Vec<UrpStreamEvent> = vec![
+                serde_json::from_value(json!({"event":"node_start","node_index":3,
+                    "header":{"type":"text","id":"text_1","role":"assistant","phase":"answer",
+                        "signature":"header-signature", "citations":[citation(Some((0,1)))]}, "trace":"start"})).unwrap(),
+                serde_json::from_value(json!({"event":"node_delta","node_index":3,
+                    "delta":{"type":"text","content":&text[..split],"signature":"delta-signature",
+                        "citations":[citation(Some((0,1)))],
+                        "logprobs":[{"token":&text[..split],"logprob":-0.2,"top_logprobs":[]}]}, "trace":"delta"})).unwrap(),
+                serde_json::from_value(json!({"event":"node_delta","node_index":3,
+                    "delta":{"type":"text","content":&text[split..]}})).unwrap(),
+                serde_json::from_value(json!({"event":"node_done","node_index":3,"node":node,"trace":"done"})).unwrap(),
+                serde_json::from_value(json!({"event":"response_done","output":[node]})).unwrap(),
+            ];
+            let expected = serde_json::to_value(&events).unwrap();
+            assert_eq!(serde_json::to_value(run_stream(events)).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn extracted_image_invalidates_signatures_and_remaps_retained_citations() {
+        let mut node = annotated_text("A ![x](u) B");
+        let Node::Text { citations, .. } = &mut node else {
+            panic!()
+        };
+        *citations = serde_json::from_value(json!([
+            citation(Some((0, 1))),
+            citation(Some((10, 11))),
+            citation(Some((4, 5))),
+            citation(None)
+        ]))
+        .unwrap();
+        let mut nodes = vec![node];
+        rewrite_assistant_markdown_images_nodes(&mut nodes);
+        let Node::Text {
+            content,
+            signature,
+            logprobs,
+            citations,
+            ..
+        } = &nodes[0]
+        else {
+            panic!()
+        };
+        assert_eq!(content, "A  B");
+        assert!(signature.is_none());
+        assert!(logprobs.is_none());
+        assert_eq!(
+            serde_json::to_value(citations).unwrap(),
+            json!([
+                citation(Some((0, 1))),
+                citation(Some((3, 4))),
+                citation(None)
+            ])
+        );
+        assert!(matches!(&nodes[1], Node::Image { .. }));
+    }
+
+    #[test]
+    fn changed_stream_does_not_replay_metadata_for_deleted_text() {
+        let text = "A ![x](u) B";
+        let mut node = annotated_text(text);
+        let Node::Text { citations, .. } = &mut node else {
+            panic!()
+        };
+        *citations = serde_json::from_value(json!([citation(Some((10, 11)))])).unwrap();
+        let events=vec![
+            serde_json::from_value(json!({"event":"node_start","node_index":2,
+                "header":{"type":"text","id":"text_1","role":"assistant","signature":"original", "citations":[citation(Some((10,11)))]}})).unwrap(),
+            serde_json::from_value(json!({"event":"node_delta","node_index":2,
+                "delta":{"type":"text","content":text,"signature":"original", "citations":[citation(Some((10,11)))]}})).unwrap(),
+            serde_json::from_value(json!({"event":"node_done","node_index":2,"node":node})).unwrap(),
+            serde_json::from_value(json!({"event":"response_done","output":[node]})).unwrap(),
+        ];
+        let emitted = run_stream(events);
+        for event in &emitted {
+            match event {
+                UrpStreamEvent::NodeStart {
+                    header:
+                        NodeHeader::Text {
+                            signature,
+                            citations,
+                            ..
+                        },
+                    ..
+                } => {
+                    assert!(signature.is_none());
+                    assert!(citations.is_empty());
+                }
+                UrpStreamEvent::NodeDelta {
+                    delta:
+                        NodeDelta::Text {
+                            signature,
+                            logprobs,
+                            citations,
+                            ..
+                        },
+                    ..
+                } => {
+                    assert!(signature.is_none());
+                    assert!(logprobs.is_none());
+                    assert!(citations.is_empty());
+                }
+                _ => {}
+            }
+        }
+        let terminal = emitted
+            .iter()
+            .find_map(|event| match event {
+                UrpStreamEvent::NodeDone {
+                    node:
+                        Node::Text {
+                            content,
+                            signature,
+                            logprobs,
+                            citations,
+                            ..
+                        },
+                    ..
+                } => Some((content, signature, logprobs, citations)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(terminal.0, "A  B");
+        assert!(terminal.1.is_none());
+        assert!(terminal.2.is_none());
+        assert_eq!(
+            serde_json::to_value(terminal.3).unwrap(),
+            json!([citation(Some((3, 4)))])
+        );
     }
 }

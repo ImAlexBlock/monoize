@@ -527,6 +527,7 @@ async fn openai_custom_tool_definitions_use_target_family_shape() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let messages = last_captured_body(&responses_to_messages, "messages");
-    assert!(messages.get("tools").is_none(), "{messages}");
-    assert!(messages.get("tool_choice").is_none(), "{messages}");
+    assert_eq!(messages["tools"][0]["name"], "grammar_tool");
+    assert_eq!(messages["tools"][0]["input_schema"]["properties"]["input"]["type"], "string");
+    assert_eq!(messages["tool_choice"], json!({"type":"tool","name":"grammar_tool"}));
 }

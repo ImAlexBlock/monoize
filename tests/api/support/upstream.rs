@@ -2192,7 +2192,7 @@ async fn start_upstream() -> (SocketAddr, CapturedHeaders, CapturedBodies) {
                         json!({
                             "type": "response.output_text.delta",
                             "item_id": "msg_mock",
-                            "output_index": 0,
+                            "output_index": if reasoning_enabled { 1 } else { 0 },
                             "content_index": 0,
                             "delta": text
                         })
@@ -3466,7 +3466,7 @@ async fn start_upstream() -> (SocketAddr, CapturedHeaders, CapturedBodies) {
             });
             if stream_mode == Some("chat_token_logprobs") {
                 chunk["choices"][0]["logprobs"] = json!({
-                    "content": [{ "token": "A", "logprob": -0.1 }]
+                    "content": [{ "token": text, "logprob": -0.1 }]
                 });
             }
             let mut chunks = Vec::new();

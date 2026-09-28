@@ -1267,6 +1267,8 @@ const URP_KNOWN_MESSAGES_FIELDS: [&str; 8] = [
 
 #[derive(Clone, Debug)]
 pub(crate) struct UrpRequest {
+    pub(crate) audio_output_format: Option<String>,
+    pub(crate) messages_custom_tool_names: HashSet<String>,
     pub(crate) model: String,
     pub(crate) max_multiplier: Option<Multiplier>,
     pub(crate) server_tool_usage_classes: Vec<String>,
@@ -2294,6 +2296,8 @@ fn parse_urp_request(known: &Value, extra: Map<String, Value>) -> AppResult<UrpR
         .and_then(|value| value.parse().ok());
 
     Ok(UrpRequest {
+            audio_output_format: Default::default(),
+            messages_custom_tool_names: Default::default(),
         affinity_explicit: None,
         affinity_prefix_hash: crate::handlers::helpers::short_xxh3_hex(&model),
         model,

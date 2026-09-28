@@ -842,6 +842,9 @@ async fn forwarding_applies_global_model_redirects_before_model_limits_and_routi
 #[tokio::test]
 async fn image_generation_applies_api_key_model_redirects_before_model_limits() {
     let ctx = setup().await;
+    ctx.state.monoize_runtime.write().await.global_transforms = serde_json::from_value(json!([
+        {"transform": "image_enable_openai_generation_tool", "enabled": true, "phase": "request", "config": {}}
+    ])).unwrap();
     let user = ctx
         .state
         .user_store

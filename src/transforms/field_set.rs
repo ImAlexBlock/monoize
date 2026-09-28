@@ -12,8 +12,15 @@ use std::collections::HashMap;
 struct Config {
     path: String,
     value: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_present_value")]
     when_equals: Option<Value>,
+}
+
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 fn extra_path_value<'a>(extra: &'a HashMap<String, Value>, path: &str) -> Option<&'a Value> {
@@ -110,20 +117,23 @@ impl Transform for FieldSetTransform {
             UrpData::Request(req) => {
                 if let Some(sub_path) = cfg.path.strip_prefix("reasoning.") {
                     if cfg.when_equals.as_ref().is_some_and(|expected| {
-                        req.reasoning
-                            .as_ref()
-                            .and_then(|reasoning| extra_path_value(&reasoning.extra_body, sub_path))
-                            != Some(expected)
+                        req.reasoning.as_ref().and_then(|reasoning| {
+                            if crate::urp::ReasoningConfig::is_control(sub_path) {
+                                reasoning.control(sub_path)
+                            } else {
+                                extra_path_value(&reasoning.extra_body, sub_path).cloned()
+                            }
+                        }) != Some(expected.clone())
                     }) {
                         return Ok(());
                     }
-                    let reasoning =
-                        req.reasoning
-                            .get_or_insert_with(|| crate::urp::ReasoningConfig {
-                                effort: None,
-                                extra_body: std::collections::HashMap::new(),
-                            });
-                    set_extra_path(&mut reasoning.extra_body, sub_path, cfg.value.clone());
+                    let reasoning = req.reasoning.get_or_insert_with(Default::default);
+                    if !reasoning
+                        .set_control(sub_path, Some(cfg.value.clone()))
+                        .map_err(TransformError::Apply)?
+                    {
+                        set_extra_path(&mut reasoning.extra_body, sub_path, cfg.value.clone());
+                    }
                 } else {
                     field_set(&mut req.extra_body, &cfg.path, cfg);
                 }

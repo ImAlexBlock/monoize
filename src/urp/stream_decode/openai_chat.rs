@@ -6,7 +6,7 @@ use crate::handlers::usage::{
     record_stream_terminal_event, record_stream_usage_if_present, record_visible_output_delta,
 };
 use crate::handlers::{StreamRuntimeMetrics, StreamTerminalError, UrpRequest as HandlerUrpRequest};
-use crate::urp::decode::parse_tool_call_arguments_value;
+use crate::urp::decode::{parse_compatible_media_part, parse_tool_call_arguments_value};
 use crate::urp::stream_helpers::{
     extract_chat_reasoning_content_block, extract_chat_reasoning_delta_chunks,
 };
@@ -17,7 +17,7 @@ use crate::urp::{
 use axum::http::StatusCode;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -25,6 +25,7 @@ use tokio::sync::{Mutex, mpsc};
 const CHAT_CHOICE_EXTRA_BODY_KEY: &str = "_monoize_chat_choice_extra";
 const CHAT_DELTA_EXTRA_BODY_KEY: &str = "_monoize_chat_delta_extra";
 const CHAT_ERROR_EVENT_EXTRA_KEY: &str = "_monoize_chat_error_event";
+const CHAT_ERROR_NUMERIC_CODE_EXTRA_KEY: &str = "_monoize_chat_error_numeric_code";
 const CHAT_NATIVE_FINISH_REASON_EXTRA_KEY: &str = "_monoize_chat_native_finish_reason";
 
 struct ChatToolCallStreamState<'a> {
@@ -45,8 +46,16 @@ pub(crate) async fn stream_chat_to_urp_events(
     runtime_metrics: Option<Arc<Mutex<StreamRuntimeMetrics>>>,
     idle_timeout_ms: u64,
 ) -> AppResult<()> {
-    let response_id = format!("resp_{}", uuid::Uuid::new_v4());
+    let mut response_id = format!("resp_{}", uuid::Uuid::new_v4());
     let mut output_text = String::new();
+    let mut text_logprobs = None;
+    let mut refusal_logprobs = None;
+    let mut citations = Vec::new();
+    let mut refusal_text = String::new();
+    let mut refusal_node_index = None;
+    let mut audio_fields = Map::new();
+    let mut audio_node_index = None;
+    let mut latest_usage = None;
     let mut assistant_message_phase: Option<String> = None;
     let mut reasoning_text = String::new();
     let mut reasoning_sig = String::new();
@@ -70,27 +79,16 @@ pub(crate) async fn stream_chat_to_urp_events(
 
     let idle_timeout = std::time::Duration::from_millis(idle_timeout_ms.max(1));
     let mut stream = upstream_resp.bytes_stream().eventsource();
-    loop {
-        let next = match tokio::time::timeout(idle_timeout, stream.next()).await {
-            Ok(next) => next,
-            Err(_) => {
-                // The downstream status was committed as 200 before the first frame, so an
-                // idle timeout can only be reported on the wire. Returning an error here
-                // without a terminal would close the SSE stream with no explanation, which
-                // clients report as a stream that ended before the completion event.
-                emit_chat_terminal_error(
-                    &tx,
-                    &runtime_metrics,
-                    "upstream_idle_timeout",
-                    &format!("upstream stream idle for {idle_timeout_ms}ms without data"),
-                    None,
-                    None,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        let Some(ev) = next else { break };
+    while let Some(ev) = tokio::time::timeout(idle_timeout, stream.next())
+        .await
+        .map_err(|_| {
+            AppError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_idle_timeout",
+                format!("upstream stream idle for {idle_timeout_ms}ms without data"),
+            )
+        })?
+    {
         let ev = match ev {
             Ok(ev) => ev,
             Err(err) => {
@@ -139,6 +137,12 @@ pub(crate) async fn stream_chat_to_urp_events(
                 return Ok(());
             }
         };
+        if !response_started && let Some(id) = data_val.get("id").and_then(Value::as_str) {
+            response_id = id.into();
+        }
+        if let Some(usage) = parse_usage_from_chat_object(&data_val) {
+            latest_usage = Some(usage);
+        }
         record_stream_response_service_tier(&runtime_metrics, &data_val).await;
         if let Some(model) = data_val.get("model").and_then(Value::as_str) {
             let terminal = data_val
@@ -199,10 +203,12 @@ pub(crate) async fn stream_chat_to_urp_events(
             }
             protocol_terminal_seen = true;
             finish_reason = Some(parse_finish_reason(reason));
-            terminal_extra_body.insert(
-                CHAT_NATIVE_FINISH_REASON_EXTRA_KEY.to_string(),
-                Value::String(reason.to_string()),
-            );
+            if parse_finish_reason(reason) == FinishReason::Other {
+                terminal_extra_body.insert(
+                    CHAT_NATIVE_FINISH_REASON_EXTRA_KEY.to_string(),
+                    Value::String(reason.to_string()),
+                );
+            }
             if let Some(choice) = choice {
                 let choice_extra = chat_choice_extra(choice);
                 if !choice_extra.is_empty() {
@@ -223,6 +229,28 @@ pub(crate) async fn stream_chat_to_urp_events(
             .and_then(|c| c.get("delta"))
             .cloned()
             .unwrap_or(Value::Null);
+        for content in [
+            delta.get("content"),
+            choice
+                .and_then(|choice| choice.get("message"))
+                .and_then(|message| message.get("content")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Err(message) = validate_chat_content_media(content) {
+                emit_chat_terminal_error(
+                    &tx,
+                    &runtime_metrics,
+                    "malformed_media",
+                    &message,
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
         let mut delta_extra = std::mem::take(&mut pending_delta_extra);
         for (key, value) in chat_delta_extra(&delta) {
             delta_extra.insert(key, value);
@@ -270,24 +298,155 @@ pub(crate) async fn stream_chat_to_urp_events(
             }
         }
 
-        if let Some(t) = delta.get("content").and_then(|v| v.as_str()) {
-            process_text_delta(
+        if let Some(t) = delta.get("content").and_then(Value::as_str) {
+            let scores = crate::urp::logprobs::decode(
+                choice
+                    .and_then(|c| c.get("logprobs"))
+                    .and_then(|v| v.get("content")),
+            );
+            crate::urp::logprobs::append(&mut text_logprobs, &scores);
+            let node_index = ensure_node_started(
                 &tx,
                 &response_id,
                 &urp.model,
-                t,
-                assistant_message_phase.as_deref(),
                 &mut response_started,
                 &mut text_node_index,
                 &mut next_node_index,
-                &mut output_text,
-                &mut delta_extra,
-                &runtime_metrics,
+                NodeHeader::Text {
+                    id: None,
+                    role: OrdinaryRole::Assistant,
+                    phase: assistant_message_phase.clone(),
+                    citations: vec![],
+                    signature: None,
+                },
+                HashMap::new(),
+            )
+            .await?;
+            output_text.push_str(t);
+            record_visible_output_delta(&runtime_metrics, t).await;
+            send_node_delta(
+                &tx,
+                node_index,
+                NodeDelta::Text {
+                    logprobs: scores,
+                    content: t.into(),
+                    citations: vec![],
+                    signature: None,
+                },
+                chat_delta_event_extra(std::mem::take(&mut delta_extra)),
             )
             .await?;
         }
 
-        if let Some(content_blocks) = delta.get("content").and_then(|v| v.as_array()) {
+        if let Some(annotations) = delta.get("annotations").and_then(Value::as_array) {
+            let node_index = ensure_node_started(
+                &tx,
+                &response_id,
+                &urp.model,
+                &mut response_started,
+                &mut text_node_index,
+                &mut next_node_index,
+                NodeHeader::Text {
+                    id: None,
+                    role: OrdinaryRole::Assistant,
+                    phase: assistant_message_phase.clone(),
+                    citations: vec![],
+                    signature: None,
+                },
+                HashMap::new(),
+            )
+            .await?;
+            citations.extend(crate::urp::citations::decode(
+                annotations.clone(),
+                crate::urp::ProviderProtocol::ChatCompletion,
+            ));
+            send_node_delta(
+                &tx,
+                node_index,
+                NodeDelta::Text {
+                    logprobs: None,
+                    content: String::new(),
+                    citations: crate::urp::citations::decode(
+                        annotations.clone(),
+                        crate::urp::ProviderProtocol::ChatCompletion,
+                    ),
+                    signature: None,
+                },
+                HashMap::new(),
+            )
+            .await?;
+        }
+        if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
+            let node_index = ensure_node_started(
+                &tx,
+                &response_id,
+                &urp.model,
+                &mut response_started,
+                &mut refusal_node_index,
+                &mut next_node_index,
+                NodeHeader::Refusal { id: None },
+                HashMap::new(),
+            )
+            .await?;
+            let scores = crate::urp::logprobs::decode(
+                choice
+                    .and_then(|c| c.get("logprobs"))
+                    .and_then(|v| v.get("refusal")),
+            );
+            crate::urp::logprobs::append(&mut refusal_logprobs, &scores);
+            refusal_text.push_str(refusal);
+            send_node_delta(
+                &tx,
+                node_index,
+                NodeDelta::Refusal {
+                    logprobs: scores,
+                    content: refusal.into(),
+                },
+                chat_delta_event_extra(std::mem::take(&mut delta_extra)),
+            )
+            .await?;
+        }
+        if let Some(audio) = delta.get("audio").and_then(Value::as_object) {
+            for (key, value) in audio {
+                if matches!(key.as_str(), "data" | "transcript") && value.is_string() {
+                    let joined = format!(
+                        "{}{}",
+                        audio_fields
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        value.as_str().unwrap()
+                    );
+                    audio_fields.insert(key.clone(), json!(joined));
+                } else if !key.starts_with("_monoize_") {
+                    audio_fields.insert(key.clone(), value.clone());
+                }
+            }
+            ensure_node_started(
+                &tx,
+                &response_id,
+                &urp.model,
+                &mut response_started,
+                &mut audio_node_index,
+                &mut next_node_index,
+                NodeHeader::Audio {
+                    id: None,
+                    role: OrdinaryRole::Assistant,
+                    metadata: crate::urp::MediaMetadata {
+                        media_type: urp
+                            .audio_output_format
+                            .as_deref()
+                            .and_then(crate::urp::media::audio_mime_for_format)
+                            .map(str::to_string),
+                        ..Default::default()
+                    },
+                },
+                HashMap::from([(crate::urp::CHAT_MESSAGE_AUDIO_EXTRA_KEY.into(), json!(true))]),
+            )
+            .await?;
+        }
+
+        if let Some(content_blocks) = delta.get("content").and_then(chat_content_blocks) {
             for (content_pos, block) in content_blocks.iter().enumerate() {
                 if let Some(text) = block.as_str() {
                     process_text_delta(
@@ -360,7 +519,7 @@ pub(crate) async fn stream_chat_to_urp_events(
                 let mut recognized = false;
                 if let Some(text) = block_obj.get("text").and_then(|v| v.as_str()) {
                     let item_type = block_obj.get("type").and_then(|v| v.as_str());
-                    if matches!(item_type, Some("text" | "output_text")) {
+                    if matches!(item_type, Some("input_text" | "text" | "output_text")) {
                         process_text_delta(
                             &tx,
                             &response_id,
@@ -422,6 +581,7 @@ pub(crate) async fn stream_chat_to_urp_events(
             .get("reasoning_details")
             .and_then(Value::as_array)
             .filter(|details| !details.is_empty());
+        let mut scalar_delta = delta.clone();
         if let Some(reasoning_details) = reasoning_details {
             for detail in reasoning_details {
                 process_reasoning_detail_delta(
@@ -436,57 +596,79 @@ pub(crate) async fn stream_chat_to_urp_events(
                 )
                 .await?;
             }
-        } else {
-            let (reasoning_text_deltas, reasoning_summary_deltas, reasoning_sig_deltas) =
-                extract_chat_reasoning_delta_chunks(&delta);
-            for summary in reasoning_summary_deltas {
-                process_reasoning_summary_delta(
-                    &tx,
-                    &response_id,
-                    &urp.model,
-                    Some(&summary.text),
-                    summary.format.as_deref(),
-                    &mut response_started,
-                    &mut reasoning_node_index,
-                    &mut next_node_index,
-                    &mut reasoning_summary,
-                    &mut reasoning_source,
-                    &mut delta_extra,
-                )
-                .await?;
+            let scalar_obj = scalar_delta.as_object_mut().expect("chat delta object");
+            scalar_obj.remove("reasoning_details");
+            for key in ["reasoning", "reasoning_content", "reasoning_opaque"] {
+                let duplicate = delta.get(key).and_then(Value::as_str).is_some_and(|value| {
+                    reasoning_details
+                        .iter()
+                        .any(|detail| match detail["type"].as_str() {
+                            Some("reasoning.text") => {
+                                key != "reasoning_opaque" && detail["text"].as_str() == Some(value)
+                            }
+                            Some("reasoning.summary") => {
+                                key == "reasoning" && detail["summary"].as_str() == Some(value)
+                            }
+                            Some("reasoning.encrypted") => {
+                                key == "reasoning_opaque" && detail["data"].as_str() == Some(value)
+                            }
+                            _ => false,
+                        })
+                });
+                if duplicate {
+                    scalar_obj.remove(key);
+                }
             }
-            for text in reasoning_text_deltas {
-                process_reasoning_text_delta(
-                    &tx,
-                    &response_id,
-                    &urp.model,
-                    Some(&text.text),
-                    text.format.as_deref(),
-                    &mut response_started,
-                    &mut reasoning_node_index,
-                    &mut next_node_index,
-                    &mut reasoning_text,
-                    &mut reasoning_source,
-                    &mut delta_extra,
-                )
-                .await?;
-            }
-            for encrypted in reasoning_sig_deltas {
-                process_reasoning_encrypted_delta(
-                    &tx,
-                    &response_id,
-                    &urp.model,
-                    Some(&Value::String(encrypted.text)),
-                    encrypted.format.as_deref(),
-                    &mut response_started,
-                    &mut reasoning_node_index,
-                    &mut next_node_index,
-                    &mut reasoning_sig,
-                    &mut reasoning_source,
-                    &mut delta_extra,
-                )
-                .await?;
-            }
+        }
+        let (reasoning_text_deltas, reasoning_summary_deltas, reasoning_sig_deltas) =
+            extract_chat_reasoning_delta_chunks(&scalar_delta);
+        for summary in reasoning_summary_deltas {
+            process_reasoning_summary_delta(
+                &tx,
+                &response_id,
+                &urp.model,
+                Some(&summary.text),
+                summary.format.as_deref(),
+                &mut response_started,
+                &mut reasoning_node_index,
+                &mut next_node_index,
+                &mut reasoning_summary,
+                &mut reasoning_source,
+                &mut delta_extra,
+            )
+            .await?;
+        }
+        for text in reasoning_text_deltas {
+            process_reasoning_text_delta(
+                &tx,
+                &response_id,
+                &urp.model,
+                Some(&text.text),
+                text.format.as_deref(),
+                &mut response_started,
+                &mut reasoning_node_index,
+                &mut next_node_index,
+                &mut reasoning_text,
+                &mut reasoning_source,
+                &mut delta_extra,
+            )
+            .await?;
+        }
+        for encrypted in reasoning_sig_deltas {
+            process_reasoning_encrypted_delta(
+                &tx,
+                &response_id,
+                &urp.model,
+                Some(&Value::String(encrypted.text)),
+                encrypted.format.as_deref(),
+                &mut response_started,
+                &mut reasoning_node_index,
+                &mut next_node_index,
+                &mut reasoning_sig,
+                &mut reasoning_source,
+                &mut delta_extra,
+            )
+            .await?;
         }
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
@@ -603,7 +785,7 @@ pub(crate) async fn stream_chat_to_urp_events(
         ensure_response_started(&tx, &response_id, &urp.model, &mut response_started).await?;
     }
 
-    let usage = latest_stream_usage_snapshot(&runtime_metrics).await;
+    let usage = latest_usage.or(latest_stream_usage_snapshot(&runtime_metrics).await);
     {
         let total_output_chars = (output_text.len()
             + reasoning_text.len()
@@ -616,7 +798,7 @@ pub(crate) async fn stream_chat_to_urp_events(
         )
         .await;
     }
-    let output_nodes = sorted_nodes(
+    let mut output_nodes = sorted_nodes(
         assistant_message_phase.as_deref(),
         text_node_index,
         &output_text,
@@ -632,7 +814,53 @@ pub(crate) async fn stream_chat_to_urp_events(
         &provider_items,
     );
 
-    for (node_index, node) in &output_nodes {
+    if let Some(index) = refusal_node_index {
+        output_nodes.push((
+            index,
+            Node::Refusal {
+                logprobs: None,
+                id: None,
+                content: refusal_text,
+                extra_body: HashMap::new(),
+            },
+        ));
+    }
+    if let Some(index) = audio_node_index
+        && let Some(part) = crate::urp::decode::openai_chat::parse_chat_message_audio_part(
+            &Value::Object(audio_fields),
+        )
+    {
+        let mut node = part.into_node(OrdinaryRole::Assistant);
+        if let Node::Audio {
+            source: crate::urp::AudioSource::Base64 { media_type, .. },
+            ..
+        } = &mut node
+            && let Some(mime) = urp
+                .audio_output_format
+                .as_deref()
+                .and_then(crate::urp::media::audio_mime_for_format)
+        {
+            *media_type = mime.into();
+        }
+        output_nodes.push((index, node));
+    }
+    for (_, node) in &mut output_nodes {
+        if let Node::Text {
+            citations: target, ..
+        } = node
+        {
+            *target = std::mem::take(&mut citations);
+            if let Node::Text { logprobs, .. } = node {
+                *logprobs = text_logprobs.take();
+            }
+            break;
+        }
+    }
+    output_nodes.sort_by_key(|(index, _)| *index);
+    for (node_index, node) in &mut output_nodes {
+        if let Node::Refusal { logprobs, .. } = node {
+            *logprobs = refusal_logprobs.take();
+        }
         send_event(
             &tx,
             UrpStreamEvent::NodeDone {
@@ -648,6 +876,7 @@ pub(crate) async fn stream_chat_to_urp_events(
     send_event(
         &tx,
         UrpStreamEvent::ResponseDone {
+            outcome: None,
             finish_reason,
             usage,
             output: output_nodes.into_iter().map(|(_, node)| node).collect(),
@@ -666,7 +895,7 @@ fn chat_choice_extra(choice: &Map<String, Value>) -> Map<String, Value> {
             !crate::urp::decode::is_internal_extra_key(key)
                 && !matches!(
                     key.as_str(),
-                    "index" | "delta" | "message" | "finish_reason"
+                    "index" | "delta" | "message" | "finish_reason" | "logprobs"
                 )
         })
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -692,6 +921,8 @@ fn chat_delta_extra(delta: &Value) -> Map<String, Value> {
                         | "tool_calls"
                         | "function_call"
                         | "refusal"
+                        | "audio"
+                        | "annotations"
                         | "phase"
                 )
         })
@@ -832,12 +1063,40 @@ async fn emit_chat_terminal_error(
         .filter(|status| (400..=599).contains(status))
         .map(|status| status as u16)
         .unwrap_or(StatusCode::BAD_GATEWAY.as_u16());
+    let numeric_code = error
+        .and_then(|error| {
+            error
+                .get("code")
+                .filter(|code| json_scalar_string(code).is_some())
+                .or_else(|| {
+                    error
+                        .get("metadata")
+                        .and_then(|metadata| metadata.get("provider_code"))
+                })
+        })
+        .is_some_and(Value::is_number);
 
     let mut extra_body = HashMap::new();
-    if let Some(original_event) = original_event {
-        extra_body.insert(CHAT_ERROR_EVENT_EXTRA_KEY.to_string(), original_event);
+    if numeric_code {
+        extra_body.insert(CHAT_ERROR_NUMERIC_CODE_EXTRA_KEY.into(), Value::Bool(true));
     }
-    if let Some(error) = error_value {
+    if let Some(mut original_event) = original_event {
+        if let Some(root) = original_event.as_object_mut() {
+            if let Some(error) = root.get_mut("error") {
+                strip_error_semantics(error);
+            }
+            if let Some(choices) = root.get_mut("choices").and_then(Value::as_array_mut) {
+                for choice in choices {
+                    if let Some(error) = choice.get_mut("error") {
+                        strip_error_semantics(error);
+                    }
+                }
+            }
+        }
+        crate::urp::decode::remove_untrusted_internal_keys(&mut original_event);
+        extra_body.insert(CHAT_ERROR_EVENT_EXTRA_KEY.to_string(), original_event);
+    } else if let Some(mut error) = error_value {
+        strip_error_semantics(&mut error);
         extra_body.insert("error".to_string(), error);
     }
     if let Some(error_type) = &error_type {
@@ -885,40 +1144,107 @@ async fn process_provider_item_block(
     ensure_response_started(tx, response_id, model, response_started).await?;
     let node_index = *next_node_index;
     *next_node_index += 1;
-    let node = Node::ProviderItem {
-        id: block_obj
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| Some(crate::urp::synthetic_provider_item_id())),
-        origin_protocol: ProviderProtocol::ChatCompletion,
-        role: OrdinaryRole::Assistant,
-        item_type: block_obj
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        body: Value::Object(block_obj.clone()),
-        extra_body: HashMap::new(),
+    let parsed_media = parse_compatible_media_part(block_obj).ok().flatten();
+    let mut node = parsed_media
+        .map(|part| part.into_node(OrdinaryRole::Assistant))
+        .unwrap_or_else(|| Node::ProviderItem {
+            id: block_obj
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| Some(crate::urp::synthetic_provider_item_id())),
+            origin_protocol: ProviderProtocol::ChatCompletion,
+            role: OrdinaryRole::Assistant,
+            item_type: block_obj
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            body: Value::Object(block_obj.clone()),
+            extra_body: HashMap::new(),
+        });
+    let (header, delta) = match &node {
+        Node::Image {
+            id,
+            role,
+            metadata,
+            source,
+            ..
+        } => (
+            NodeHeader::Image {
+                id: id.clone(),
+                role: *role,
+                metadata: metadata.clone(),
+            },
+            Some(NodeDelta::Image {
+                source: source.clone(),
+            }),
+        ),
+        Node::File {
+            id,
+            role,
+            metadata,
+            source,
+            ..
+        } => (
+            NodeHeader::File {
+                id: id.clone(),
+                role: *role,
+                metadata: metadata.clone(),
+            },
+            Some(NodeDelta::File {
+                source: source.clone(),
+            }),
+        ),
+        Node::Audio {
+            id,
+            role,
+            metadata,
+            source,
+            ..
+        } => (
+            NodeHeader::Audio {
+                id: id.clone(),
+                role: *role,
+                metadata: metadata.clone(),
+            },
+            Some(NodeDelta::Audio {
+                source: source.clone(),
+            }),
+        ),
+        Node::ProviderItem {
+            id,
+            origin_protocol,
+            role,
+            item_type,
+            body,
+            ..
+        } => (
+            NodeHeader::ProviderItem {
+                id: id.clone(),
+                origin_protocol: *origin_protocol,
+                role: *role,
+                item_type: item_type.clone(),
+                body: Some(body.clone()),
+            },
+            None,
+        ),
+        _ => unreachable!("media parser returned a non-media node"),
     };
+    let mut extra_body = node.extra_body_mut().clone();
+    extra_body.extend(chat_delta_event_extra(std::mem::take(delta_extra)));
     send_event(
         tx,
         UrpStreamEvent::NodeStart {
             node_index,
-            header: NodeHeader::ProviderItem {
-                id: node.id().cloned(),
-                origin_protocol: ProviderProtocol::ChatCompletion,
-                role: OrdinaryRole::Assistant,
-                item_type: block_obj
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            },
-            extra_body: chat_delta_event_extra(std::mem::take(delta_extra)),
+            header,
+            extra_body,
         },
     )
     .await?;
+    if let Some(delta) = delta {
+        send_node_delta(tx, node_index, delta, HashMap::new()).await?;
+    }
     provider_items.push((node_index, node));
     Ok(())
 }
@@ -959,6 +1285,8 @@ async fn process_text_delta(
         text_node_index,
         next_node_index,
         NodeHeader::Text {
+            signature: None,
+            citations: Vec::new(),
             id: None,
             role: OrdinaryRole::Assistant,
             phase: phase.map(str::to_string),
@@ -972,6 +1300,9 @@ async fn process_text_delta(
         tx,
         node_index,
         NodeDelta::Text {
+            logprobs: None,
+            signature: None,
+            citations: Vec::new(),
             content: text.to_string(),
         },
         chat_delta_event_extra(std::mem::take(delta_extra)),
@@ -1022,14 +1353,14 @@ fn chat_reasoning_node_from_detail(detail: &Map<String, Value>) -> Option<Node> 
         .flatten()
         .filter(|value| !value.is_null())
         .cloned();
-    let mut raw_detail = detail.clone();
-    raw_detail.retain(|key, _| !crate::urp::decode::is_internal_extra_key(key));
+    let raw_detail = crate::urp::reasoning::detail_metadata(detail);
     let extra_body = HashMap::from([(
         CHAT_REASONING_DETAIL_EXTRA_KEY.to_string(),
         Value::Object(raw_detail),
     )]);
 
     Some(Node::Reasoning {
+        metadata: Default::default(),
         id,
         content,
         encrypted,
@@ -1057,6 +1388,7 @@ async fn process_reasoning_detail_delta(
         return Ok(());
     };
     let Node::Reasoning {
+        metadata,
         id,
         content,
         encrypted,
@@ -1069,20 +1401,16 @@ async fn process_reasoning_detail_delta(
     };
 
     ensure_response_started(tx, response_id, model, response_started).await?;
-    // Upstream 2a52d8b0: text/summary fragments of the SAME reasoning detail
-    // (stable id or index) accumulate into the node they started instead of
-    // opening a new node per delta; the merged detail keeps the concatenated
-    // payload so the terminal completion appends only the unsent suffix.
     if matches!(
         detail.get("type").and_then(Value::as_str),
         Some("reasoning.text" | "reasoning.summary")
     ) && let Some((node_index, existing_node)) =
         reasoning_detail_nodes.iter_mut().find(|(_, existing)| {
             reasoning_detail_raw(existing)
-                .is_some_and(|existing| reasoning_detail_identity_matches(existing, detail))
+                .is_some_and(|existing| reasoning_detail_identity_matches(&existing, detail))
         })
     {
-        let mut accumulated = reasoning_detail_raw(existing_node).unwrap().clone();
+        let mut accumulated = reasoning_detail_raw(existing_node).unwrap();
         let payload_key = reasoning_detail_payload_key(detail["type"].as_str().unwrap()).unwrap();
         let mut text = accumulated
             .get(payload_key)
@@ -1104,6 +1432,10 @@ async fn process_reasoning_detail_delta(
             tx,
             *node_index,
             NodeDelta::Reasoning {
+                metadata: crate::urp::ReasoningMetadata {
+                    item_id: id.clone(),
+                    ..metadata.clone()
+                },
                 content: content.clone(),
                 encrypted: encrypted.clone(),
                 summary: summary.clone(),
@@ -1120,7 +1452,10 @@ async fn process_reasoning_detail_delta(
         tx,
         UrpStreamEvent::NodeStart {
             node_index,
-            header: NodeHeader::Reasoning { id: id.clone() },
+            header: NodeHeader::Reasoning {
+                metadata: metadata.clone(),
+                id: id.clone(),
+            },
             extra_body: extra_body.clone(),
         },
     )
@@ -1131,6 +1466,10 @@ async fn process_reasoning_detail_delta(
         tx,
         node_index,
         NodeDelta::Reasoning {
+            metadata: crate::urp::ReasoningMetadata {
+                item_id: id.clone(),
+                ..metadata.clone()
+            },
             content: content.clone(),
             encrypted: encrypted.clone(),
             summary: summary.clone(),
@@ -1171,7 +1510,10 @@ async fn process_reasoning_summary_delta(
         response_started,
         reasoning_node_index,
         next_node_index,
-        NodeHeader::Reasoning { id: None },
+        NodeHeader::Reasoning {
+            metadata: Default::default(),
+            id: None,
+        },
         HashMap::new(),
     )
     .await?;
@@ -1179,6 +1521,7 @@ async fn process_reasoning_summary_delta(
         tx,
         node_index,
         NodeDelta::Reasoning {
+            metadata: Default::default(),
             content: None,
             encrypted: None,
             summary: Some(summary.to_string()),
@@ -1217,7 +1560,10 @@ async fn process_reasoning_text_delta(
         response_started,
         reasoning_node_index,
         next_node_index,
-        NodeHeader::Reasoning { id: None },
+        NodeHeader::Reasoning {
+            metadata: Default::default(),
+            id: None,
+        },
         HashMap::new(),
     )
     .await?;
@@ -1226,6 +1572,7 @@ async fn process_reasoning_text_delta(
         tx,
         node_index,
         NodeDelta::Reasoning {
+            metadata: Default::default(),
             content: Some(content.to_string()),
             encrypted: None,
             summary: None,
@@ -1275,7 +1622,10 @@ async fn process_reasoning_encrypted_delta(
         response_started,
         reasoning_node_index,
         next_node_index,
-        NodeHeader::Reasoning { id: None },
+        NodeHeader::Reasoning {
+            metadata: Default::default(),
+            id: None,
+        },
         HashMap::new(),
     )
     .await?;
@@ -1284,6 +1634,7 @@ async fn process_reasoning_encrypted_delta(
         tx,
         node_index,
         NodeDelta::Reasoning {
+            metadata: Default::default(),
             content: None,
             encrypted: Some(encrypted.clone()),
             summary: None,
@@ -1312,13 +1663,34 @@ fn apply_terminal_opaque_snapshot(current: &mut String, snapshot: &str) -> Optio
     None
 }
 
-fn reasoning_detail_raw(node: &Node) -> Option<&Map<String, Value>> {
-    let Node::Reasoning { extra_body, .. } = node else {
+fn reasoning_detail_raw(node: &Node) -> Option<Map<String, Value>> {
+    let Node::Reasoning {
+        id,
+        content,
+        summary,
+        encrypted,
+        source,
+        extra_body,
+        ..
+    } = node
+    else {
         return None;
     };
-    extra_body
-        .get(CHAT_REASONING_DETAIL_EXTRA_KEY)
-        .and_then(Value::as_object)
+    let native = extra_body
+        .get(CHAT_REASONING_DETAIL_EXTRA_KEY)?
+        .as_object()?;
+    crate::urp::reasoning::chat_details(
+        content.as_deref(),
+        summary.as_deref(),
+        encrypted.as_ref(),
+        id.as_deref(),
+        source.as_deref(),
+        Some(native),
+    )
+    .into_iter()
+    .next()?
+    .as_object()
+    .cloned()
 }
 
 fn reasoning_detail_payload_key(detail_type: &str) -> Option<&'static str> {
@@ -1352,7 +1724,7 @@ fn reasoning_detail_identity_matches(
 
 fn reasoning_detail_matches(existing: &Node, terminal: &Map<String, Value>) -> bool {
     reasoning_detail_raw(existing)
-        .is_some_and(|existing| reasoning_detail_identity_matches(existing, terminal))
+        .is_some_and(|existing| reasoning_detail_identity_matches(&existing, terminal))
 }
 
 fn reasoning_detail_completion(
@@ -1413,11 +1785,18 @@ fn reasoning_detail_completion(
     delta_detail.insert(payload_key.to_string(), payload_delta);
     let extra_body = HashMap::from([(
         CHAT_REASONING_DETAIL_EXTRA_KEY.to_string(),
-        Value::Object(delta_detail),
+        Value::Object(crate::urp::reasoning::detail_metadata(&delta_detail)),
     )]);
     Some((
         merged_node,
         NodeDelta::Reasoning {
+            metadata: crate::urp::ReasoningMetadata {
+                item_id: terminal
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                ..Default::default()
+            },
             content,
             encrypted,
             summary,
@@ -1476,9 +1855,7 @@ async fn process_terminal_reasoning_details(
             send_node_delta(tx, *node_index, delta, event_extra).await?;
             *existing_node = merged_node;
         } else {
-            let mut merged_raw = reasoning_detail_raw(existing_node)
-                .cloned()
-                .unwrap_or_default();
+            let mut merged_raw = reasoning_detail_raw(existing_node).unwrap_or_default();
             for (key, value) in detail_obj {
                 if !crate::urp::decode::is_internal_extra_key(key) {
                     merged_raw.insert(key.clone(), value.clone());
@@ -1752,7 +2129,7 @@ async fn process_terminal_message_snapshot(
                 )
                 .await?;
             }
-        } else if let Some(blocks) = content.as_array() {
+        } else if let Some(blocks) = chat_content_blocks(content) {
             for (block_pos, block) in blocks.iter().enumerate() {
                 if let Some(text) = block.as_str() {
                     snapshot_text.push_str(text);
@@ -1780,7 +2157,7 @@ async fn process_terminal_message_snapshot(
                 if let Some(text) = block_obj.get("text").and_then(Value::as_str)
                     && matches!(
                         block_obj.get("type").and_then(Value::as_str),
-                        Some("text" | "output_text")
+                        Some("input_text" | "text" | "output_text")
                     )
                 {
                     snapshot_text.push_str(text);
@@ -1988,6 +2365,9 @@ async fn process_tool_call_delta(
             UrpStreamEvent::NodeStart {
                 node_index,
                 header: NodeHeader::ToolCall {
+                    namespace: None,
+                    signature: None,
+
                     id: None,
                     tool_type,
                     call_id: call_id.clone(),
@@ -2075,6 +2455,7 @@ async fn ensure_response_started_with_extra(
         send_event(
             tx,
             UrpStreamEvent::ResponseStart {
+                usage: None,
                 id: response_id.to_string(),
                 model: model.to_string(),
                 extra_body,
@@ -2186,6 +2567,7 @@ fn sorted_nodes(
         nodes.push((
             node_index,
             Node::Reasoning {
+                metadata: Default::default(),
                 id: Some(crate::urp::synthetic_reasoning_id()),
                 content: (!reasoning_text.is_empty()).then(|| reasoning_text.to_string()),
                 encrypted: (!reasoning_sig.is_empty())
@@ -2203,6 +2585,9 @@ fn sorted_nodes(
         nodes.push((
             node_index,
             Node::Text {
+                logprobs: None,
+                signature: None,
+                citations: Vec::new(),
                 id: Some(crate::urp::synthetic_message_id()),
                 role: OrdinaryRole::Assistant,
                 content: output_text.to_string(),
@@ -2230,6 +2615,9 @@ fn sorted_nodes(
         nodes.push((
             node_index,
             Node::ToolCall {
+                namespace: None,
+                signature: None,
+
                 id: Some(crate::urp::synthetic_tool_call_id()),
                 tool_type: *tool_type,
                 call_id: call_id.clone(),
@@ -2245,471 +2633,33 @@ fn sorted_nodes(
     nodes
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use tokio::sync::mpsc;
-
-    #[test]
-    fn resolve_reasoning_source_preserves_none_without_fallback() {
-        let mut reasoning_source = None;
-
-        assert_eq!(resolve_reasoning_source(&mut reasoning_source, None), None);
-        assert_eq!(reasoning_source, None);
+fn strip_error_semantics(error: &mut Value) {
+    let Some(object) = error.as_object_mut() else {
+        *error = json!({});
+        return;
+    };
+    for key in ["message", "code", "type", "param"] {
+        object.remove(key);
     }
-
-    #[test]
-    fn resolve_reasoning_source_preserves_explicit_upstream_value() {
-        let mut reasoning_source = None;
-
-        assert_eq!(
-            resolve_reasoning_source(&mut reasoning_source, Some("anthropic")),
-            Some("anthropic".to_string())
-        );
-        assert_eq!(reasoning_source, Some("anthropic".to_string()));
-        assert_eq!(
-            resolve_reasoning_source(&mut reasoning_source, None),
-            Some("anthropic".to_string())
-        );
+    if let Some(metadata) = object.get_mut("metadata").and_then(Value::as_object_mut) {
+        metadata.remove("provider_code");
+        metadata.remove("error_type");
     }
+}
 
-    #[test]
-    fn chat_reasoning_details_map_to_distinct_ordered_nodes_with_raw_entries() {
-        let details = serde_json::json!([
-            { "type": "reasoning.summary", "summary": "first", "id": "sum_1", "format": "openrouter", "index": 0, "future": "s" },
-            { "type": "reasoning.text", "text": "second", "signature": "native", "id": "txt_1", "format": "openrouter", "index": 1 },
-            { "type": "reasoning.text", "text": "second", "signature": "native", "id": "txt_1", "format": "openrouter", "index": 1 },
-            { "type": "reasoning.encrypted", "data": "third", "id": "enc_1", "format": "openrouter", "index": 2 },
-            { "type": "reasoning.server_tool_call", "tool_name": "openrouter:fusion", "arguments": "{\"q\":1}", "result": "{\"ok\":true}", "id": "srv_1", "index": 3 }
-        ]);
-        let detail_values = details.as_array().expect("detail array");
-        let nodes = detail_values
-            .iter()
-            .map(|detail| {
-                chat_reasoning_node_from_detail(detail.as_object().expect("detail object"))
-                    .expect("reasoning node")
-            })
-            .collect::<Vec<_>>();
+fn chat_content_blocks(value: &Value) -> Option<&[Value]> {
+    match value {
+        Value::Array(parts) => Some(parts),
+        Value::Object(_) => Some(std::slice::from_ref(value)),
+        _ => None,
+    }
+}
 
-        assert_eq!(nodes.len(), detail_values.len());
-        for (node, expected) in nodes.iter().zip(detail_values) {
-            let Node::Reasoning { extra_body, .. } = node else {
-                panic!("expected reasoning node");
-            };
-            assert_eq!(
-                extra_body.get(CHAT_REASONING_DETAIL_EXTRA_KEY),
-                Some(expected)
-            );
+fn validate_chat_content_media(value: &Value) -> Result<(), String> {
+    for part in chat_content_blocks(value).into_iter().flatten() {
+        if let Some(obj) = part.as_object() {
+            parse_compatible_media_part(obj)?;
         }
-        assert_eq!(nodes[1], nodes[2], "byte-identical details must repeat");
-        assert!(matches!(
-            &nodes[4],
-            Node::Reasoning {
-                content: None,
-                encrypted: None,
-                summary: None,
-                ..
-            }
-        ));
     }
-
-    #[tokio::test]
-    async fn terminal_encrypted_reasoning_detail_replaces_the_opaque_value_atomically() {
-        let initial = json!({
-            "type": "reasoning.encrypted",
-            "data": "stream_snapshot",
-            "id": "enc_1",
-            "format": "openrouter",
-            "index": 0
-        });
-        let terminal = json!({
-            "type": "reasoning.encrypted",
-            "data": "terminal_snapshot",
-            "id": "enc_1",
-            "format": "openrouter",
-            "index": 0
-        });
-        let node = chat_reasoning_node_from_detail(initial.as_object().expect("initial detail"))
-            .expect("initial reasoning node");
-        let mut nodes = vec![(0, node)];
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut response_started = true;
-        let mut next_node_index = 1;
-        let mut delta_extra = Map::new();
-
-        process_terminal_reasoning_details(
-            &tx,
-            "resp_test",
-            "gpt-5.4",
-            &[terminal.clone()],
-            &mut response_started,
-            &mut next_node_index,
-            &mut nodes,
-            &mut delta_extra,
-        )
-        .await
-        .expect("terminal reasoning detail");
-
-        let Node::Reasoning {
-            encrypted,
-            extra_body,
-            ..
-        } = &nodes[0].1
-        else {
-            panic!("expected reasoning node");
-        };
-        assert_eq!(encrypted.as_ref(), Some(&json!("terminal_snapshot")));
-        assert_eq!(
-            extra_body.get(CHAT_REASONING_DETAIL_EXTRA_KEY),
-            Some(&terminal)
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "an opaque full snapshot must not become a suffix delta"
-        );
-    }
-
-    #[test]
-    fn legacy_terminal_opaque_snapshot_appends_only_true_fragments() {
-        let mut current = "sig-a".to_string();
-        assert_eq!(
-            apply_terminal_opaque_snapshot(&mut current, "sig-asig-b"),
-            Some("sig-b".to_string())
-        );
-        assert_eq!(current, "sig-a");
-
-        assert_eq!(
-            apply_terminal_opaque_snapshot(&mut current, "different-complete-snapshot"),
-            None
-        );
-        assert_eq!(current, "different-complete-snapshot");
-    }
-
-    #[tokio::test]
-    async fn chat_text_and_tool_nodes_emit_node_first_bridge_events_with_canonical_indices() {
-        let (tx, mut rx) = mpsc::channel(32);
-        let response_id = "resp_test";
-        let model = "gpt-5.4";
-        let mut response_started = false;
-        let mut next_node_index = 0;
-        let mut text_node_index = None;
-        let mut output_text = String::new();
-        let mut delta_extra = Map::new();
-
-        process_text_delta(
-            &tx,
-            response_id,
-            model,
-            "hello",
-            Some("analysis"),
-            &mut response_started,
-            &mut text_node_index,
-            &mut next_node_index,
-            &mut output_text,
-            &mut delta_extra,
-            &None,
-        )
-        .await
-        .expect("text delta should succeed");
-
-        let mut call_order = Vec::new();
-        let mut calls = HashMap::new();
-        let mut call_id_by_index = HashMap::new();
-        let mut tool_node_index_by_call_id = HashMap::new();
-        let mut tool_state = ChatToolCallStreamState {
-            call_order: &mut call_order,
-            calls: &mut calls,
-            call_id_by_index: &mut call_id_by_index,
-            response_started: &mut response_started,
-            next_node_index: &mut next_node_index,
-            tool_node_index_by_call_id: &mut tool_node_index_by_call_id,
-            delta_extra: &mut delta_extra,
-        };
-
-        process_tool_call_delta(
-            &tx,
-            response_id,
-            model,
-            &serde_json::json!({
-                "index": 0,
-                "id": "call_1",
-                "function": {
-                    "name": "lookup",
-                    "arguments": "{\"a\":1}"
-                }
-            }),
-            0,
-            false,
-            &mut tool_state,
-        )
-        .await
-        .expect("tool call delta should succeed");
-
-        drop(tx);
-        let mut events = Vec::new();
-        while let Some(event) = rx.recv().await {
-            events.push(event);
-        }
-
-        assert!(matches!(
-            &events[0],
-            UrpStreamEvent::ResponseStart { id, model, .. }
-                if id == response_id && model == "gpt-5.4"
-        ));
-        assert!(matches!(
-            &events[1],
-            UrpStreamEvent::NodeStart {
-                node_index,
-                header: NodeHeader::Text { role: OrdinaryRole::Assistant, phase, .. },
-                ..
-            } if *node_index == 0 && phase.as_deref() == Some("analysis")
-        ));
-        assert!(matches!(
-            &events[2],
-            UrpStreamEvent::NodeDelta {
-                node_index,
-                delta: NodeDelta::Text { content },
-                ..
-            } if *node_index == 0 && content == "hello"
-        ));
-        assert!(matches!(
-            &events[3],
-            UrpStreamEvent::NodeStart {
-                node_index,
-                header: NodeHeader::ToolCall { call_id, name, .. },
-                ..
-            } if *node_index == 1 && call_id == "call_1" && name == "lookup"
-        ));
-        assert!(matches!(
-            &events[4],
-            UrpStreamEvent::NodeDelta {
-                node_index,
-                delta: NodeDelta::ToolCallArguments { arguments },
-                ..
-            } if *node_index == 1 && arguments == "{\"a\":1}"
-        ));
-    }
-
-    #[test]
-    fn chat_completion_builds_terminal_nodes_from_sorted_node_state() {
-        let call_order = vec!["call_b".to_string(), "call_a".to_string()];
-        let calls = HashMap::from([
-            (
-                "call_b".to_string(),
-                (
-                    ToolCallType::Function,
-                    "beta".to_string(),
-                    "{\"b\":2}".to_string(),
-                    false,
-                ),
-            ),
-            (
-                "call_a".to_string(),
-                (
-                    ToolCallType::Function,
-                    "alpha".to_string(),
-                    "{\"a\":1}".to_string(),
-                    false,
-                ),
-            ),
-        ]);
-        let tool_node_index_by_call_id =
-            HashMap::from([("call_b".to_string(), 5), ("call_a".to_string(), 1)]);
-
-        let nodes = sorted_nodes(
-            Some("analysis"),
-            Some(4),
-            "final text",
-            Some(0),
-            "think",
-            "summary",
-            "sig",
-            Some("anthropic"),
-            &[],
-            &call_order,
-            &calls,
-            &tool_node_index_by_call_id,
-            &[],
-        );
-
-        assert_eq!(nodes.len(), 4);
-        assert!(matches!(
-            &nodes[0],
-            (0, Node::Reasoning {
-                content: Some(content),
-                summary: Some(summary),
-                encrypted: Some(Value::String(sig)),
-                source: Some(source),
-                ..
-            }) if content == "think" && summary == "summary" && sig == "sig" && source == "anthropic"
-        ));
-        assert!(matches!(
-            &nodes[1],
-            (1, Node::ToolCall { call_id, name, arguments, .. })
-                if call_id == "call_a" && name == "alpha" && arguments == "{\"a\":1}"
-        ));
-        assert!(matches!(
-            &nodes[2],
-            (4, Node::Text { content, phase: Some(phase), .. }) if content == "final text" && phase == "analysis"
-        ));
-        assert!(matches!(
-            &nodes[3],
-            (5, Node::ToolCall { call_id, name, arguments, .. })
-                if call_id == "call_b" && name == "beta" && arguments == "{\"b\":2}"
-        ));
-    }
-
-    #[tokio::test]
-    async fn legacy_function_call_deltas_become_one_marked_tool_call_node() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let mut call_order = Vec::new();
-        let mut calls = HashMap::new();
-        let mut call_id_by_index = HashMap::new();
-        let mut response_started = false;
-        let mut next_node_index = 0;
-        let mut tool_node_index_by_call_id = HashMap::new();
-        let mut delta_extra = Map::new();
-
-        for function_call in [
-            json!({ "name": "lookup", "arguments": "{\"q\":" }),
-            json!({ "arguments": "1}" }),
-        ] {
-            let normalized = legacy_function_call_as_tool_call(&function_call)
-                .expect("legacy function call must normalize");
-            let mut state = ChatToolCallStreamState {
-                call_order: &mut call_order,
-                calls: &mut calls,
-                call_id_by_index: &mut call_id_by_index,
-                response_started: &mut response_started,
-                next_node_index: &mut next_node_index,
-                tool_node_index_by_call_id: &mut tool_node_index_by_call_id,
-                delta_extra: &mut delta_extra,
-            };
-            process_tool_call_delta(
-                &tx,
-                "resp_legacy",
-                "gpt-4",
-                &normalized,
-                0,
-                true,
-                &mut state,
-            )
-            .await
-            .expect("legacy function call delta");
-        }
-
-        let nodes = sorted_nodes(
-            None,
-            None,
-            "",
-            None,
-            "",
-            "",
-            "",
-            None,
-            &[],
-            &call_order,
-            &calls,
-            &tool_node_index_by_call_id,
-            &[],
-        );
-        let Node::ToolCall {
-            call_id,
-            name,
-            arguments,
-            extra_body,
-            ..
-        } = &nodes[0].1
-        else {
-            panic!("expected tool call");
-        };
-        assert_eq!(call_id, "legacy_function:lookup");
-        assert_eq!(name, "lookup");
-        assert_eq!(arguments, "{\"q\":1}");
-        assert_eq!(
-            extra_body.get(CHAT_LEGACY_FUNCTION_CALL_EXTRA_KEY),
-            Some(&Value::Bool(true))
-        );
-
-        drop(tx);
-        let mut events = Vec::new();
-        while let Some(event) = rx.recv().await {
-            events.push(event);
-        }
-        assert!(matches!(
-            &events[1],
-            UrpStreamEvent::NodeStart { extra_body, .. }
-                if extra_body.get(CHAT_LEGACY_FUNCTION_CALL_EXTRA_KEY) == Some(&Value::Bool(true))
-        ));
-    }
-
-    #[tokio::test]
-    async fn chat_stream_rejects_reserved_wire_extras_and_modern_legacy_marker_spoof() {
-        let choice = chat_choice_extra(
-            json!({
-                "index": 0,
-                "vendor_choice_counter": 1,
-                "_monoize_spoofed_choice": true
-            })
-            .as_object()
-            .expect("choice object"),
-        );
-        assert_eq!(choice.get("vendor_choice_counter"), Some(&json!(1)));
-        assert!(!choice.contains_key("_monoize_spoofed_choice"));
-        let delta = chat_delta_extra(&json!({
-            "role": "assistant",
-            "vendor_delta_counter": 2,
-            "_monoize_spoofed_delta": true
-        }));
-        assert_eq!(delta.get("vendor_delta_counter"), Some(&json!(2)));
-        assert!(!delta.contains_key("_monoize_spoofed_delta"));
-
-        let (tx, mut rx) = mpsc::channel(8);
-        let mut call_order = Vec::new();
-        let mut calls = HashMap::new();
-        let mut call_id_by_index = HashMap::new();
-        let mut response_started = false;
-        let mut next_node_index = 0;
-        let mut tool_node_index_by_call_id = HashMap::new();
-        let mut delta_extra = Map::new();
-        {
-            let mut state = ChatToolCallStreamState {
-                call_order: &mut call_order,
-                calls: &mut calls,
-                call_id_by_index: &mut call_id_by_index,
-                response_started: &mut response_started,
-                next_node_index: &mut next_node_index,
-                tool_node_index_by_call_id: &mut tool_node_index_by_call_id,
-                delta_extra: &mut delta_extra,
-            };
-            process_tool_call_delta(
-                &tx,
-                "resp_modern",
-                "gpt-4",
-                &json!({
-                    "index": 0,
-                    "id": "call_modern",
-                    "_monoize_chat_legacy_function_call": true,
-                    "function": { "name": "lookup", "arguments": "{}" }
-                }),
-                0,
-                false,
-                &mut state,
-            )
-            .await
-            .expect("modern tool call");
-        }
-        assert!(!calls["call_modern"].3);
-
-        drop(tx);
-        let mut events = Vec::new();
-        while let Some(event) = rx.recv().await {
-            events.push(event);
-        }
-        assert!(
-            matches!(&events[1], UrpStreamEvent::NodeStart { extra_body, .. }
-            if !extra_body.contains_key(CHAT_LEGACY_FUNCTION_CALL_EXTRA_KEY))
-        );
-    }
+    Ok(())
 }

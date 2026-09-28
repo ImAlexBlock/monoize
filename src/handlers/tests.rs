@@ -324,6 +324,7 @@ async fn allowed_missing_usage_releases_plan_and_finishes_successfully() {
     );
     attempt.allow_missing_usage = true;
     let mut response = urp::UrpResponse {
+            outcome: Default::default(),
         id: "response-1".to_string(),
         model: "handler-model".to_string(),
         created_at: None,
@@ -573,8 +574,16 @@ fn build_test_auth_with_role(
 
 fn build_test_urp_request(model: &str) -> urp::UrpRequest {
     urp::UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            sampling: Default::default(),
+            logprobs: Default::default(),
         model: model.to_string(),
         input: vec![urp::Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
             id: None,
             role: urp::OrdinaryRole::User,
             content: "hello".to_string(),
@@ -632,6 +641,8 @@ fn provider_extra_filter_retains_internal_state_until_same_chat_encoding() {
 
 fn build_test_routing_request(model: &str) -> UrpRequest {
     UrpRequest {
+            audio_output_format: Default::default(),
+            messages_custom_tool_names: Default::default(),
         model: model.to_string(),
         max_multiplier: None,
         server_tool_usage_classes: Vec::new(),
@@ -655,9 +666,17 @@ fn build_model_redirect_rule(pattern: &str, replace: &str) -> CompiledModelRedir
 #[test]
 fn strip_orphaned_tool_calls_keeps_only_closed_stateless_pairs() {
     let mut req = urp::UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            sampling: Default::default(),
+            logprobs: Default::default(),
         model: "gpt-5.5".to_string(),
         input: vec![
             urp::Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
                 id: None,
                 role: urp::OrdinaryRole::User,
                 content: "start".to_string(),
@@ -665,6 +684,8 @@ fn strip_orphaned_tool_calls_keeps_only_closed_stateless_pairs() {
                 extra_body: HashMap::new(),
             },
             urp::Node::ToolCall {
+            namespace: Default::default(),
+            signature: Default::default(),
                 id: Some("fc_answered".to_string()),
                 tool_type: urp::ToolCallType::Function,
                 call_id: "call_answered".to_string(),
@@ -673,6 +694,8 @@ fn strip_orphaned_tool_calls_keeps_only_closed_stateless_pairs() {
                 extra_body: HashMap::new(),
             },
             urp::Node::ToolCall {
+            namespace: Default::default(),
+            signature: Default::default(),
                 id: Some("fc_unanswered".to_string()),
                 tool_type: urp::ToolCallType::Function,
                 call_id: "call_unanswered".to_string(),
@@ -681,6 +704,9 @@ fn strip_orphaned_tool_calls_keeps_only_closed_stateless_pairs() {
                 extra_body: HashMap::new(),
             },
             urp::Node::ToolResult {
+            name: Default::default(),
+            namespace: Default::default(),
+            signature: Default::default(),
                 id: None,
                 tool_type: urp::ToolCallType::Function,
                 call_id: "call_answered".to_string(),
@@ -692,6 +718,9 @@ fn strip_orphaned_tool_calls_keeps_only_closed_stateless_pairs() {
                 extra_body: HashMap::new(),
             },
             urp::Node::ToolResult {
+            name: Default::default(),
+            namespace: Default::default(),
+            signature: Default::default(),
                 id: None,
                 tool_type: urp::ToolCallType::Function,
                 call_id: "call_missing".to_string(),
@@ -703,6 +732,9 @@ fn strip_orphaned_tool_calls_keeps_only_closed_stateless_pairs() {
                 extra_body: HashMap::new(),
             },
             urp::Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
                 id: None,
                 role: urp::OrdinaryRole::User,
                 content: "interrupt".to_string(),
@@ -756,9 +788,15 @@ fn strip_orphaned_tool_calls_keeps_only_closed_stateless_pairs() {
 #[test]
 fn responses_tool_replay_preserves_plaintext_raw_cot_reasoning() {
     let req = urp::UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            sampling: Default::default(),
+            logprobs: Default::default(),
         model: "gpt-5.5".to_string(),
         input: vec![
             urp::Node::Reasoning {
+            metadata: Default::default(),
                 id: Some("rs_plain".to_string()),
                 content: Some("plain summary".to_string()),
                 encrypted: None,
@@ -767,6 +805,8 @@ fn responses_tool_replay_preserves_plaintext_raw_cot_reasoning() {
                 extra_body: HashMap::new(),
             },
             urp::Node::ToolCall {
+            namespace: Default::default(),
+            signature: Default::default(),
                 id: Some("fc_answered".to_string()),
                 tool_type: urp::ToolCallType::Function,
                 call_id: "call_answered".to_string(),
@@ -775,6 +815,9 @@ fn responses_tool_replay_preserves_plaintext_raw_cot_reasoning() {
                 extra_body: HashMap::new(),
             },
             urp::Node::ToolResult {
+            name: Default::default(),
+            namespace: Default::default(),
+            signature: Default::default(),
                 id: None,
                 tool_type: urp::ToolCallType::Function,
                 call_id: "call_answered".to_string(),
@@ -786,6 +829,7 @@ fn responses_tool_replay_preserves_plaintext_raw_cot_reasoning() {
                 extra_body: HashMap::new(),
             },
             urp::Node::Reasoning {
+            metadata: Default::default(),
                 id: Some("rs_encrypted".to_string()),
                 content: Some("kept".to_string()),
                 encrypted: Some(serde_json::json!("sig_kept")),
@@ -989,6 +1033,7 @@ fn attempt_channel_names(attempts: &[MonoizeAttempt]) -> BTreeSet<&str> {
 #[test]
 fn calculate_charge_nano_uses_model_price_and_multiplier() {
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 15,
         output_tokens: 5,
         input_details: None,
@@ -1015,9 +1060,11 @@ fn calculate_charge_nano_uses_model_price_and_multiplier() {
 #[test]
 fn calculate_charge_nano_handles_cached_and_reasoning_tokens() {
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 100,
         output_tokens: 80,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 60,
             cache_read_modality_breakdown: None,
@@ -1055,9 +1102,11 @@ fn calculate_charge_nano_messages_treats_cache_creation_as_disjoint_bucket() {
     // becomes internal input_tokens=140. Billing uniformly subtracts cache buckets.
     // See user-billing-and-model-metadata.spec.md § 5 C3-ii, C3a.
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 140,
         output_tokens: 20,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 0,
             cache_read_modality_breakdown: None,
@@ -1086,9 +1135,11 @@ fn calculate_charge_nano_messages_treats_cache_creation_as_disjoint_bucket() {
 #[test]
 fn calculate_charge_nano_responses_excludes_cache_creation_from_inclusive_input_total() {
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 100,
         output_tokens: 20,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 0,
             cache_read_modality_breakdown: None,
@@ -1118,9 +1169,11 @@ fn calculate_charge_nano_responses_excludes_cache_creation_from_inclusive_input_
 fn calculate_charge_nano_responses_avoids_double_count_when_cache_read_and_creation_are_both_present()
  {
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 100,
         output_tokens: 10,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 30,
             cache_read_modality_breakdown: None,
@@ -1192,6 +1245,7 @@ fn rate_matrix_selects_short_vs_long_context_tier() {
             .expect("tiered matrix has threshold")
     );
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 128001,
         output_tokens: 10,
         input_details: None,
@@ -1263,9 +1317,11 @@ fn rate_matrix_bills_anthropic_cache_ttl_split_and_read() {
         ),
     ]);
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 1000,
         output_tokens: 10,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 100,
             cache_read_modality_breakdown: None,
@@ -1334,9 +1390,11 @@ fn rate_matrix_rejects_aggregate_cache_creation_without_ttl_split() {
         ),
     ]);
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 1000,
         output_tokens: 10,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 0,
             cache_read_modality_breakdown: None,
@@ -1396,9 +1454,11 @@ fn rate_matrix_uses_dimensionless_defaults_for_cache_and_missing_modality_breakd
         ),
     ]);
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 100,
         output_tokens: 10,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 20,
             cache_read_modality_breakdown: None,
@@ -1532,9 +1592,11 @@ fn rate_matrix_bills_gpt_image_2_modality_token_lines() {
         ),
     ]);
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 160,
         output_tokens: 20,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 10,
             cache_read_modality_breakdown: Some(urp::ModalityBreakdown {
@@ -1618,9 +1680,11 @@ fn rate_matrix_supports_input_cached_usage_class_alias() {
         ),
     ]);
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 100,
         output_tokens: 10,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 40,
             cache_read_modality_breakdown: None,
@@ -1683,9 +1747,11 @@ fn rate_matrix_does_not_double_add_inclusive_tool_prompt_or_reasoning_details() 
         ),
     ]);
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 130,
         output_tokens: 120,
         input_details: Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: Default::default(),
             standard_tokens: 0,
             cache_read_tokens: 0,
             cache_read_modality_breakdown: None,
@@ -1742,6 +1808,7 @@ fn rate_matrix_counts_call_meter_from_decoded_native_events_and_requires_duratio
         test_meter_rate("web", "web_search", "call", 100, serde_json::json!({})),
     ]);
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 1,
         output_tokens: 1,
         input_details: None,
@@ -1822,6 +1889,7 @@ fn rate_matrix_uses_only_first_dimension_matching_meter_row_per_usage_class() {
         test_meter_rate("duplicate", "web_search", "call", 500, json!({})),
     ]);
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 1,
         output_tokens: 1,
         input_details: None,
@@ -1867,6 +1935,7 @@ fn rate_matrix_uses_actual_response_service_tier_and_requires_exact_rates() {
         test_rate("output-default", "output", 2, None, None, None, json!({})),
     ];
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 1,
         output_tokens: 1,
         input_details: None,
@@ -2049,6 +2118,10 @@ async fn resolve_model_suffix_preserves_reasoning_effort_on_attempt_base_request
 
     let mut explicitly_configured_req = build_test_urp_request("gpt-5-mini-thinking");
     explicitly_configured_req.reasoning = Some(urp::ReasoningConfig {
+            summary: Default::default(),
+            budget_tokens: Default::default(),
+            display: Default::default(),
+            mode: Default::default(),
         effort: Some("low".to_string()),
         extra_body: std::collections::HashMap::new(),
     });
@@ -2864,6 +2937,8 @@ async fn seed_rta9_provider(
 
 fn rta9_request(estimated_input_tokens: u64, has_tools: bool) -> UrpRequest {
     UrpRequest {
+            audio_output_format: Default::default(),
+            messages_custom_tool_names: Default::default(),
         model: RTA9_MODEL.to_string(),
         max_multiplier: None,
         server_tool_usage_classes: Vec::new(),
@@ -4868,6 +4943,9 @@ fn session_affinity_body_session_id_wins_over_derived_digest() {
 
     let mut later = req.clone();
     later.input.push(urp::Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
         id: None,
         role: urp::OrdinaryRole::User,
         content: "turn two".to_string(),
@@ -5018,6 +5096,7 @@ fn usage_breakdown_persists_only_normalized_members() {
     );
     extra.insert("cache_read_input_tokens".to_string(), serde_json::json!(11));
     let usage = urp::Usage {
+            iterations: Default::default(),
         input_tokens: 100,
         output_tokens: 4,
         input_details: None,
@@ -5145,4 +5224,28 @@ async fn content_firewall_exempts_admin_and_super_admin_roles() {
         0,
         "exempt roles must not trigger any judge call"
     );
+}
+
+#[test]
+fn usage_iterations_are_the_complete_accounting_total() {
+    let usage = urp::Usage {
+        input_tokens: 10,
+        output_tokens: 2,
+        iterations: Some(vec![
+            urp::UsageIteration { kind: "message".into(), usage: urp::Usage { input_tokens: 10, output_tokens: 2, ..Default::default() } },
+            urp::UsageIteration { kind: "compaction".into(), usage: urp::Usage { input_tokens: 5, output_tokens: 3, ..Default::default() } },
+        ]),
+        ..Default::default()
+    };
+    let pricing = ModelPricing {
+        input_cost_per_token_nano: 1,
+        output_cost_per_token_nano: 1,
+        cache_read_input_cost_per_token_nano: None,
+        cache_creation_input_cost_per_token_nano: None,
+        output_cost_per_reasoning_token_nano: None,
+    };
+    assert_eq!(calculate_charge_nano(&usage, &pricing, Multiplier::ONE), Some(20));
+    let breakdown = build_usage_breakdown(&usage);
+    assert_eq!(breakdown["input"]["total_tokens"], 15);
+    assert_eq!(breakdown["output"]["total_tokens"], 5);
 }

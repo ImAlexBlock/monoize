@@ -346,7 +346,7 @@ async fn provider_native_tool_filtered_cross_family() {
 }
 
 #[tokio::test]
-async fn responses_custom_format_tool_filtered_for_messages_upstream() {
+async fn responses_custom_format_tool_bridged_for_messages_upstream() {
     let ctx = setup().await;
     let (status, body) = json_post(
         &ctx,
@@ -373,21 +373,12 @@ async fn responses_custom_format_tool_filtered_for_messages_upstream() {
     let tools = upstream["tools"]
         .as_array()
         .expect("messages upstream tools");
-    assert_eq!(tools.len(), 1, "{upstream}");
-    assert_eq!(tools[0]["name"], json!("lookup"));
-    assert_eq!(tools[0]["input_schema"]["type"], json!("object"));
-    assert!(
-        tools.iter().all(|tool| {
-            tool.get("name").and_then(Value::as_str) != Some("freeform_lookup")
-                && tool.get("type").and_then(Value::as_str) != Some("custom")
-                && tool.get("format").is_none()
-        }),
-        "Responses format-only custom tools must not be emitted to Messages: {upstream}"
-    );
-    assert!(
-        upstream.get("tool_choice").is_none(),
-        "tool_choice selecting a filtered custom descriptor must be omitted: {upstream}"
-    );
+    assert_eq!(tools.len(), 2, "{upstream}");
+    assert_eq!(tools[0]["name"], "lookup");
+    assert_eq!(tools[1]["name"], "freeform_lookup");
+    assert_eq!(tools[1]["input_schema"]["properties"]["input"]["type"], "string");
+    assert!(tools[1].get("format").is_none());
+    assert_eq!(upstream["tool_choice"], json!({"type":"tool","name":"freeform_lookup"}));
 }
 
 #[tokio::test]

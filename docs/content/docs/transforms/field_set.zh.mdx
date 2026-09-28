@@ -3,11 +3,17 @@ title: "字段：设置"
 description: 在配置路径写入 JSON 值，可选择仅在满足条件时写入。
 ---
 
+显式的 `when_equals: null` 只匹配值为 JSON `null` 的现有字段，不匹配缺失字段。
+
 ## 行为
 
 此变换在配置的 extra_body 路径写入 JSON 值。设置了 `when_equals` 时，仅当当前值等于给定 JSON 值才写入；未设置时总是写入。
 
 用它添加或替换协议转换不携带的厂商私有字段。
+
+请求路径 `reasoning.effort`、`reasoning.summary`、`reasoning.mode`、`reasoning.budget_tokens` 和 `reasoning.display` 操作统一推理设置。其他路径仍操作 extra-body 字段。
+
+将 `reasoning.summary` 设为 `detailed` 可请求 GPT 推理概要。上游必须支持并实际返回概要。
 
 ## 参考信息
 

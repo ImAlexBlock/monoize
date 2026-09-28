@@ -374,6 +374,12 @@ mod tests {
 
     fn request(input: Vec<Node>) -> UrpRequest {
         UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "glm-test".to_string(),
             input,
             stream: None,

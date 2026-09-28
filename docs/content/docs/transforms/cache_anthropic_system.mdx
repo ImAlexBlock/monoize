@@ -3,6 +3,8 @@ title: "Auto-cache: Anthropic system prompt"
 description: Insert an Anthropic cache_control breakpoint after the system prompt.
 ---
 
+The request-level cache setting uses one of four cache slots. Each explicit node breakpoint uses one slot. At four slots, these transforms add no marker.
+
 ## What it does
 
 This transform inserts an Anthropic ephemeral `cache_control` breakpoint on the last system or developer node of the request. The upstream then caches the stable system prefix and reads it from cache on later requests.

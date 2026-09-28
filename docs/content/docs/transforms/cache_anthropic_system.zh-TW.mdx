@@ -3,6 +3,8 @@ title: "自動快取：Anthropic 系統提示詞"
 description: 在系統提示詞之後插入 Anthropic cache_control 快取斷點。
 ---
 
+請求層級的快取設定占用四個快取槽位中的一個。每個明確的節點斷點占用一個槽位。達到四個槽位後，這些轉換不再新增標記。
+
 ## 行為
 
 此變換在請求的最後一個 system 或 developer 節點上插入 Anthropic ephemeral `cache_control` 快取斷點。上游隨後快取穩定的系統前綴，並在後續請求中直接讀取快取。

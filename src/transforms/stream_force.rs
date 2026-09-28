@@ -118,8 +118,18 @@ mod tests {
 
     fn request(stream: Option<bool>) -> UrpRequest {
         UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-image-1".to_string(),
             input: vec![Node::Text {
+                citations: Default::default(),
+                logprobs: Default::default(),
+                signature: Default::default(),
+
                 id: None,
                 role: OrdinaryRole::User,
                 content: "draw a cat".to_string(),

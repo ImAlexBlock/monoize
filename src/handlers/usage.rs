@@ -59,14 +59,60 @@ pub(crate) async fn record_stream_response_id(
     runtime_metrics.lock().await.response_id = Some(response_id.to_string());
 }
 
-pub(crate) fn response_service_tier(value: &Value) -> Option<&str> {
+fn json_string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     value
-        .get("service_tier")
-        .or_else(|| value.get("response").and_then(|v| v.get("service_tier")))
-        .or_else(|| value.get("message").and_then(|v| v.get("service_tier")))
+        .get(field)
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|tier| !tier.is_empty())
+        .filter(|value| !value.is_empty())
+}
+
+fn usage_speed_or_tier(usage: &Value) -> Option<&str> {
+    json_string_field(usage, "speed").or_else(|| json_string_field(usage, "service_tier"))
+}
+
+pub(crate) fn response_service_tier(value: &Value) -> Option<&str> {
+    json_string_field(value, "service_tier")
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| json_string_field(response, "service_tier"))
+        })
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| json_string_field(message, "service_tier"))
+        })
+        .or_else(|| value.get("usage").and_then(usage_speed_or_tier))
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+                .and_then(usage_speed_or_tier)
+        })
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("usage"))
+                .and_then(usage_speed_or_tier)
+        })
+}
+
+pub(crate) fn usage_service_tier(usage: &urp::Usage) -> Option<&str> {
+    usage
+        .extra_body
+        .get("speed")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            usage
+                .extra_body
+                .get("service_tier")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
 }
 
 pub(crate) async fn record_stream_response_service_tier(
@@ -168,11 +214,17 @@ pub(crate) async fn record_visible_stream_event_delta(
 ) {
     let content = match event {
         urp::UrpStreamEvent::NodeDelta {
-            delta: urp::NodeDelta::Text { content },
+            delta:
+                urp::NodeDelta::Text {
+                    signature: _,
+                    citations: _,
+                    logprobs: _,
+                    content,
+                },
             ..
         }
         | urp::UrpStreamEvent::NodeDelta {
-            delta: urp::NodeDelta::Refusal { content },
+            delta: urp::NodeDelta::Refusal { content, .. },
             ..
         } => content.as_str(),
         _ => return,
@@ -212,6 +264,7 @@ pub(crate) async fn record_stream_terminal_error(
 }
 
 pub(crate) fn usage_to_chat_usage_json(usage: &urp::Usage) -> Value {
+    let usage = usage.accounting();
     let mut obj = json!({
         "prompt_tokens": usage.input_tokens,
         "completion_tokens": usage.output_tokens,
@@ -251,13 +304,33 @@ pub(crate) fn usage_to_chat_usage_json(usage: &urp::Usage) -> Value {
             if !k.starts_with("_monoize_")
                 && !matches!(
                     k.as_str(),
-                    "prompt_tokens_details" | "completion_tokens_details"
+                    "prompt_tokens_details"
+                        | "completion_tokens_details"
+                        | "total_tokens"
+                        | "prompt_tokens"
+                        | "completion_tokens"
+                        | "input_tokens"
+                        | "output_tokens"
                 )
             {
                 map.insert(k.clone(), v.clone());
             }
         }
     }
+    urp::usage::write_modality(
+        &mut obj["prompt_tokens_details"],
+        &usage
+            .input_details
+            .as_ref()
+            .and_then(|d| d.modality_breakdown.clone()),
+    );
+    urp::usage::write_modality(
+        &mut obj["completion_tokens_details"],
+        &usage
+            .output_details
+            .as_ref()
+            .and_then(|d| d.modality_breakdown.clone()),
+    );
     obj
 }
 
@@ -376,6 +449,7 @@ fn make_input_details(
         || modality_breakdown.is_some()
     {
         Some(urp::InputDetails {
+            tool_prompt_modality_breakdown: None,
             standard_tokens,
             cache_read_tokens,
             cache_read_modality_breakdown,
@@ -511,7 +585,7 @@ pub(crate) fn parse_usage_from_chat_object(obj: &Value) -> Option<urp::Usage> {
         })
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let extra_body = split_usage_extra(
+    let mut extra_body = split_usage_extra(
         usage,
         &[
             "prompt_tokens",
@@ -520,7 +594,26 @@ pub(crate) fn parse_usage_from_chat_object(obj: &Value) -> Option<urp::Usage> {
             "output_tokens",
         ],
     );
+    for key in [
+        "prompt_tokens_details",
+        "input_tokens_details",
+        "completion_tokens_details",
+        "output_tokens_details",
+    ] {
+        if let Some(Value::Object(details)) = extra_body.get_mut(key) {
+            for field in [
+                "text_tokens",
+                "image_tokens",
+                "audio_tokens",
+                "video_tokens",
+                "document_tokens",
+            ] {
+                details.remove(field);
+            }
+        }
+    }
     Some(urp::Usage {
+        iterations: None,
         input_tokens,
         output_tokens,
         input_details: make_input_details(
@@ -632,6 +725,7 @@ pub(crate) fn parse_usage_from_responses_object(obj: &Value) -> Option<urp::Usag
         ],
     );
     Some(urp::Usage {
+        iterations: None,
         input_tokens,
         output_tokens,
         input_details: make_input_details(
@@ -655,105 +749,10 @@ pub(crate) fn parse_usage_from_responses_object(obj: &Value) -> Option<urp::Usag
 
 pub(crate) fn parse_usage_from_gemini_object(obj: &Value) -> Option<urp::Usage> {
     let usage = obj.get("usageMetadata")?.as_object()?;
-    let prompt_tokens = usage
-        .get("promptTokenCount")
-        .or_else(|| usage.get("prompt_token_count"))
-        .and_then(|v| v.as_u64())?;
-    let candidate_tokens = usage
-        .get("candidatesTokenCount")
-        .or_else(|| usage.get("candidates_token_count"))
-        .and_then(|v| v.as_u64())?;
-    let cache_read_tokens = usage
-        .get("cachedContentTokenCount")
-        .or_else(|| usage.get("cached_content_token_count"))
-        .or_else(|| usage.get("cached_tokens"))
-        .or_else(|| usage.get("cache_read_tokens"))
-        .or_else(|| usage.get("cache_read_input_tokens"))
-        .or_else(|| usage.get("cacheReadInputTokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let cache_creation_tokens = usage
-        .get("cacheCreationTokenCount")
-        .or_else(|| usage.get("cache_creation_token_count"))
-        .or_else(|| usage.get("cacheCreationInputTokens"))
-        .or_else(|| usage.get("cache_creation_input_tokens"))
-        .or_else(|| usage.get("cache_creation_tokens"))
-        .or_else(|| usage.get("cache_write_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let tool_prompt_tokens = usage
-        .get("toolUsePromptTokenCount")
-        .or_else(|| usage.get("tool_use_prompt_token_count"))
-        .or_else(|| usage.get("toolPromptTokenCount"))
-        .or_else(|| usage.get("tool_prompt_token_count"))
-        .or_else(|| usage.get("tool_prompt_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let reasoning_tokens = usage
-        .get("thoughtsTokenCount")
-        .or_else(|| usage.get("thoughts_token_count"))
-        .or_else(|| usage.get("reasoning_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let accepted_prediction_tokens = usage
-        .get("acceptedPredictionOutputTokenCount")
-        .or_else(|| usage.get("accepted_prediction_output_token_count"))
-        .or_else(|| usage.get("acceptedPredictionTokenCount"))
-        .or_else(|| usage.get("accepted_prediction_token_count"))
-        .or_else(|| usage.get("accepted_prediction_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let rejected_prediction_tokens = usage
-        .get("rejectedPredictionOutputTokenCount")
-        .or_else(|| usage.get("rejected_prediction_output_token_count"))
-        .or_else(|| usage.get("rejectedPredictionTokenCount"))
-        .or_else(|| usage.get("rejected_prediction_token_count"))
-        .or_else(|| usage.get("rejected_prediction_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let input_tokens = prompt_tokens.checked_add(tool_prompt_tokens)?;
-    let output_tokens = candidate_tokens.checked_add(reasoning_tokens)?;
-    let extra_body = split_usage_extra(
-        usage,
-        &[
-            "promptTokenCount",
-            "prompt_token_count",
-            "candidatesTokenCount",
-            "candidates_token_count",
-            "cachedContentTokenCount",
-            "cached_content_token_count",
-            "cacheCreationTokenCount",
-            "cache_creation_token_count",
-            "toolUsePromptTokenCount",
-            "tool_use_prompt_token_count",
-            "thoughtsTokenCount",
-            "thoughts_token_count",
-            "acceptedPredictionOutputTokenCount",
-            "accepted_prediction_output_token_count",
-            "rejectedPredictionOutputTokenCount",
-            "rejected_prediction_output_token_count",
-        ],
-    );
-    Some(urp::Usage {
-        input_tokens,
-        output_tokens,
-        input_details: make_input_details(
-            0,
-            cache_read_tokens,
-            None,
-            cache_creation_tokens,
-            tool_prompt_tokens,
-            None,
-        ),
-        output_details: make_output_details(
-            0,
-            reasoning_tokens,
-            accepted_prediction_tokens,
-            rejected_prediction_tokens,
-            None,
-        ),
-        extra_body,
-    })
+    for keys in [["promptTokenCount", "prompt_token_count"], ["candidatesTokenCount", "candidates_token_count"]] {
+        usage.get(keys[0]).or_else(|| usage.get(keys[1])).and_then(urp::decode::value_to_u64)?;
+    }
+    urp::decode::gemini::parse_usage(usage).ok()
 }
 
 pub(super) fn parse_usage_from_embeddings_object(obj: &Value) -> Option<urp::Usage> {
@@ -763,6 +762,7 @@ pub(super) fn parse_usage_from_embeddings_object(obj: &Value) -> Option<urp::Usa
     let mut extra_body = HashMap::new();
     extra_body.insert("total_tokens".to_string(), Value::from(total_tokens));
     Some(urp::Usage {
+        iterations: None,
         input_tokens,
         output_tokens: 0,
         input_details: None,
@@ -770,7 +770,6 @@ pub(super) fn parse_usage_from_embeddings_object(obj: &Value) -> Option<urp::Usa
         extra_body,
     })
 }
-
 #[cfg(test)]
 mod upstream_response_model_stream_tests {
     use super::*;
@@ -797,6 +796,8 @@ mod upstream_response_model_stream_tests {
             reqwest::Response::from(axum::http::Response::new(reqwest::Body::from(body)));
         let metrics = Arc::new(Mutex::new(StreamRuntimeMetrics::default()));
         let request = UrpRequest {
+            audio_output_format: Default::default(),
+            messages_custom_tool_names: Default::default(),
             model: "sent-model".to_string(),
             max_multiplier: None,
             server_tool_usage_classes: Vec::new(),
@@ -881,6 +882,17 @@ mod upstream_response_model_stream_tests {
     }
 
     #[tokio::test]
+    async fn gemini_later_nonterminal_models_do_not_replace_first_declaration() {
+        let observed = observe_models(ProviderType::Gemini, vec![
+            json!({"modelVersion":"initial-model", "candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}),
+            json!({"modelVersion":"intermediate-model", "candidates":[{"content":{"parts":[{"text":" world"}]}}]}),
+            json!({"candidates":[{"finishReason":"STOP"}]}),
+            json!({"modelVersion":"usage-only-model", "usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}),
+        ]).await;
+        assert_eq!(observed, (Some("initial-model".to_string()), false));
+    }
+
+    #[tokio::test]
     async fn image_terminal_model_replaces_partial_model() {
         assert_eq!(
             observe_models(
@@ -932,6 +944,9 @@ mod tests {
             &UrpStreamEvent::NodeDelta {
                 node_index: 0,
                 delta: NodeDelta::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
                     content: "hello".to_string(),
                 },
                 usage: None,
@@ -944,6 +959,7 @@ mod tests {
             &UrpStreamEvent::NodeDelta {
                 node_index: 1,
                 delta: NodeDelta::Reasoning {
+            metadata: Default::default(),
                     content: Some("hidden".to_string()),
                     encrypted: None,
                     summary: None,
@@ -971,6 +987,7 @@ mod tests {
             &UrpStreamEvent::NodeDelta {
                 node_index: 3,
                 delta: NodeDelta::Refusal {
+            logprobs: Default::default(),
                     content: "拒绝".to_string(),
                 },
                 usage: None,
@@ -1078,5 +1095,25 @@ mod tests {
             }))
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod typed_gemini_usage_tests {
+    use super::*;
+
+    #[test]
+    fn gemini_stream_usage_keeps_modality_and_tool_prompt_detail() {
+        let value = json!({"usageMetadata": {
+            "promptTokenCount":10, "toolUsePromptTokenCount":3,
+            "candidatesTokenCount":4, "thoughtsTokenCount":2,
+            "promptTokensDetails":[{"modality":"TEXT","tokenCount":8},{"modality":"IMAGE","tokenCount":2}],
+            "toolUsePromptTokensDetails":[{"modality":"TEXT","tokenCount":3}]
+        }});
+        let usage = parse_usage_from_gemini_object(&value).unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (13, 6));
+        let details = usage.input_details.unwrap();
+        assert_eq!(details.modality_breakdown.unwrap().image_tokens, Some(2));
+        assert_eq!(details.tool_prompt_modality_breakdown.unwrap().text_tokens, Some(3));
     }
 }

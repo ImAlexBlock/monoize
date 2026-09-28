@@ -8,13 +8,17 @@ const TARGETS: [DownstreamProtocol; 3] = [
 ];
 
 fn media_response() -> urp::UrpResponse {
-    urp::decode::openai_responses::decode_response(&json!({
+    let mut response = urp::decode::openai_responses::decode_response(&json!({
         "id": "resp_media", "object": "response", "model": "test-model", "status": "completed",
         "output": [{"type": "message", "role": "assistant", "content": [
             {"type": "output_image", "url": "https://example.com/image.png"}
         ]}]
     }))
-    .unwrap()
+    .unwrap();
+    if let urp::Node::Image { source, .. } = &mut response.output[0] {
+        *source = urp::ImageSource::FileId { file_id: "private-file".into(), detail: None };
+    }
+    response
 }
 
 async fn collect_wire(mut rx: mpsc::Receiver<Event>) -> String {
@@ -99,6 +103,7 @@ async fn exercise_media_failure(synthetic: bool) {
                 .unwrap();
             event_tx
                 .send(urp::UrpStreamEvent::ResponseDone {
+            outcome: Default::default(),
                     finish_reason: response.finish_reason,
                     usage: response.usage.clone(),
                     output: response.output.clone(),
@@ -238,6 +243,7 @@ async fn gemini_stream_failures_mark_the_emitted_terminal_error() {
                 .unwrap();
             event_tx
                 .send(urp::UrpStreamEvent::ResponseDone {
+            outcome: Default::default(),
                     finish_reason: Some(urp::FinishReason::Stop),
                     usage: None,
                     output: vec![],
@@ -278,4 +284,18 @@ async fn gemini_stream_failures_mark_the_emitted_terminal_error() {
         assert!(values.last().unwrap().get("error").is_some());
         assert!(!wire.contains("[DONE]") && !wire.contains("downstream_stream_terminal_sent"));
     }
+}
+
+#[test]
+fn incomplete_encoder_terminal_preserves_original_transport_error_without_repeating_it() {
+    let result = combine_stream_stage_results([
+        Err(AppError::new(StatusCode::BAD_GATEWAY, "upstream_transport_failed", "connection ended")),
+        Ok(()),
+        Ok(()),
+        Err(AppError::new(StatusCode::BAD_GATEWAY, "upstream_stream_incomplete", "missing terminal")
+            .with_downstream_stream_terminal_sent(true)),
+    ]).unwrap_err();
+    assert_eq!(result.code, "upstream_transport_failed");
+    assert_eq!(result.message, "connection ended");
+    assert!(result.downstream_stream_terminal_sent);
 }

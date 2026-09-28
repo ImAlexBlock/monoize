@@ -225,10 +225,11 @@ pub(super) async fn execute_nonstream_typed_with_validator(
     // because cross-family strip runs BEFORE all transforms per-attempt
     // (auto_cache_* etc. must observe the stripped request so their cache
     // breakpoints actually survive into the upstream encoding).
-    let original_req = req.clone();
+    let mut original_req = req.clone();
     let logical_model = req.model.clone();
     let routing_stub = build_routing_stub(&req, max_multiplier);
     let mut attempts = build_monoize_attempts(state, &routing_stub, auth).await?;
+    bind_media_request_routes(&mut original_req, &mut attempts)?;
     attach_client_session_id(&mut attempts, client_session_id, Some(&req));
     let funding_scope = ensure_balance_before_forward_for_attempts(
         state,
@@ -857,9 +858,12 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                         {
                             convert_assistant_images_to_markdown(&mut resp);
                         }
-                        if let Some(validate) = response_validator
-                            && let Err(err) = validate(&resp)
-                        {
+                        let validation = match response_validator {
+                            Some(validate) => validate(&resp),
+                            None => encode_response_for_downstream(downstream, &resp, &logical_model)
+                                .map(|_| ()),
+                        };
+                        if let Err(err) = validation {
                             return Err(finish_nonstream_error(
                                 state,
                                 auth,
@@ -1095,12 +1099,14 @@ async fn collect_streamed_upstream_response(
     while let Some(event) = decoded_rx.recv().await {
         match event {
             crate::urp::UrpStreamEvent::ResponseDone {
+                                    outcome,
                 finish_reason,
                 usage,
                 output,
                 extra_body,
             } => {
                 final_response = Some(urp::UrpResponse {
+                                        outcome,
                     id: extra_body
                         .get("id")
                         .and_then(|value| value.as_str())
@@ -1207,11 +1213,7 @@ pub(super) async fn forward_nonstream_typed_with_task_state(
         task_state,
     )
     .await?;
-    Ok(encode_response_for_downstream(
-        downstream,
-        &resp,
-        &logical_model,
-    ))
+    encode_response_for_downstream(downstream, &resp, &logical_model)
 }
 
 #[allow(clippy::result_large_err)]
@@ -1220,6 +1222,7 @@ pub(super) fn encode_request_for_provider(
     attempt: &MonoizeAttempt,
     downstream: DownstreamProtocol,
 ) -> AppResult<Value> {
+    validate_media_request_route(req, attempt)?;
     if matches!(downstream, DownstreamProtocol::Responses)
         && attempt.provider_type != ProviderType::Responses
     {
@@ -1248,14 +1251,18 @@ pub(super) fn encode_request_for_provider(
     }
     let model = req.model.clone();
     let value = match attempt.provider_type {
-        ProviderType::Responses => urp::encode::openai_responses::encode_request(req, &model),
-        ProviderType::ChatCompletion => urp::encode::openai_chat::encode_request(req, &model),
+        ProviderType::Responses => urp::encode::openai_responses::encode_request_checked(req, &model)
+            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
+        ProviderType::ChatCompletion => urp::encode::openai_chat::encode_request_checked(req, &model)
+            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
         ProviderType::Messages => urp::encode::anthropic::encode_request_checked(req, &model)
             .map_err(|message| {
                 AppError::new(StatusCode::BAD_REQUEST, "invalid_request", message)
             })?,
-        ProviderType::Gemini => urp::encode::gemini::encode_request(req, &model),
-        ProviderType::OpenaiImage => urp::encode::openai_image::encode_request(req, &model),
+        ProviderType::Gemini => urp::encode::gemini::encode_request_checked(req, &model)
+            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
+        ProviderType::OpenaiImage => urp::encode::openai_image::encode_request_checked(req, &model)
+            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
         ProviderType::Replicate => urp::encode::replicate::encode_request(req, &model),
         ProviderType::OpenaiVideo | ProviderType::FalVideo => {
             return Err(AppError::new(
@@ -1314,8 +1321,40 @@ pub(super) fn decode_response_from_provider(
         }
     }
     .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, "invalid_upstream_response", e))?;
+    if let Some(body) = decoded.outcome.as_ref().and_then(|outcome| outcome.failure_body(false)) {
+        return Err(embedded_upstream_error_to_app(
+            &body["error"],
+            mask_sensitive_info,
+            "upstream_response_failed",
+        ));
+    }
     if provider_type == ProviderType::Messages {
         restore_messages_custom_tool_calls(request, &mut decoded);
+    }
+    if provider_type == ProviderType::ChatCompletion {
+        if let Some(mime) = request
+            .extra_body
+            .get("audio")
+            .and_then(|v| v.get("format"))
+            .and_then(Value::as_str)
+            .and_then(urp::media::audio_mime_for_format)
+        {
+            for node in &mut decoded.output {
+                if let urp::Node::Audio {
+                    source: urp::AudioSource::Base64 { media_type, .. },
+                    ..
+                } = node
+                {
+                    if media_type == "audio/unknown" {
+                        *media_type = mime.into();
+                    }
+                }
+            }
+        }
+    }
+    let aliases = tool_namespace_aliases(request);
+    for node in &mut decoded.output {
+        restore_tool_namespace_node(node, &aliases);
     }
     Ok(decoded)
 }
@@ -1345,12 +1384,16 @@ fn chat_completion_finish_reason_is_error(value: &Value) -> bool {
 }
 
 fn embedded_chat_completion_error_to_app(error: &Value, mask_sensitive_info: bool) -> AppError {
+    embedded_upstream_error_to_app(error, mask_sensitive_info, "upstream_chat_error")
+}
+
+fn embedded_upstream_error_to_app(error: &Value, mask_sensitive_info: bool, code: &str) -> AppError {
     let message = error
         .get("message")
         .and_then(Value::as_str)
         .or_else(|| error.as_str())
         .filter(|message| !message.is_empty())
-        .unwrap_or("upstream Chat Completions response terminated with an error");
+        .unwrap_or("upstream response terminated with an error");
     let metadata = error.get("metadata").and_then(Value::as_object);
     let upstream_code = error.get("code").and_then(json_scalar_string).or_else(|| {
         metadata
@@ -1391,7 +1434,7 @@ fn embedded_chat_completion_error_to_app(error: &Value, mask_sensitive_info: boo
     };
     AppError::new(
         StatusCode::BAD_GATEWAY,
-        "upstream_chat_error",
+        code,
         client_message,
     )
     .with_internal_message(crate::error_sanitize::truncate_error_detail(message))
@@ -1416,16 +1459,17 @@ pub(super) fn encode_response_for_downstream(
     downstream: DownstreamProtocol,
     resp: &urp::UrpResponse,
     logical_model: &str,
-) -> Value {
+) -> AppResult<Value> {
     match downstream {
         DownstreamProtocol::Responses => {
-            urp::encode::openai_responses::encode_response(resp, logical_model)
+            urp::encode::openai_responses::encode_response_checked(resp, logical_model)
         }
         DownstreamProtocol::ChatCompletions => {
-            urp::encode::openai_chat::encode_response(resp, logical_model)
+            urp::encode::openai_chat::encode_response_checked(resp, logical_model)
         }
         DownstreamProtocol::AnthropicMessages => {
-            urp::encode::anthropic::encode_response(resp, logical_model)
+            urp::encode::anthropic::encode_response_checked(resp, logical_model)
         }
     }
+    .map_err(|message| AppError::new(StatusCode::BAD_GATEWAY, "unsupported_output_media", message))
 }

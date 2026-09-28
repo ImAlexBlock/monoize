@@ -6,6 +6,7 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod cache_anthropic_auto;
 pub mod cache_anthropic_system;
 pub mod cache_anthropic_tool_use;
 pub mod cache_openai_prompt;
@@ -265,6 +266,7 @@ pub type TransformRegistry = HashMap<&'static str, Arc<dyn Transform>>;
 
 fn builtin_transforms() -> Vec<Box<dyn Transform>> {
     vec![
+        Box::new(cache_anthropic_auto::CacheAnthropicAutoTransform),
         Box::new(cache_anthropic_system::CacheAnthropicSystemTransform),
         Box::new(cache_anthropic_tool_use::CacheAnthropicToolUseTransform),
         Box::new(cache_openai_prompt::CacheOpenAiPromptTransform),
@@ -434,6 +436,9 @@ pub fn model_glob_match(pattern: &str, model: &str) -> bool {
 
 pub fn text_node(role: OrdinaryRole, content: impl Into<String>) -> Node {
     Node::Text {
+        citations: Vec::new(),
+        logprobs: None,
+        signature: None,
         id: None,
         role,
         content: content.into(),
@@ -586,6 +591,7 @@ mod registry_tests {
 
     /// TF-7 canonical built-in list.
     const EXPECTED_BUILTIN_IDS: &[&str] = &[
+        "cache_anthropic_auto",
         "cache_anthropic_system",
         "cache_anthropic_tool_use",
         "cache_openai_prompt",
@@ -783,5 +789,26 @@ mod registry_tests {
         );
         // Idempotence: a second pass reports no change.
         assert!(!canonicalize_transform_rules(&mut rules));
+    }
+}
+
+#[cfg(test)]
+mod upstream_sync_tests;
+
+#[cfg(test)]
+mod test_fixtures {
+    use crate::urp::{Node, internal_legacy_bridge::Item};
+
+    pub fn items_to_nodes(items: Vec<Item>) -> Vec<Node> {
+        items
+            .into_iter()
+            .flat_map(|item| {
+                let Item::Message { role, parts, .. } = item else {
+                    panic!("fixture requires an ordinary message");
+                };
+                let role = role.to_ordinary().expect("ordinary fixture role");
+                parts.into_iter().map(move |part| part.into_node(role))
+            })
+            .collect()
     }
 }

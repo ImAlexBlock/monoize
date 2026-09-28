@@ -1701,9 +1701,12 @@ async fn chat_streaming_preserves_choice_logprobs_on_nonterminal_frame() {
 
     assert_eq!(
         logprobs_frame["choices"][0]["logprobs"]["content"][0]["token"],
-        json!("A")
+        json!("terminal semantics")
     );
-    assert_eq!(logprobs_frame["choices"][0]["delta"], json!({}));
+    assert_eq!(
+        logprobs_frame["choices"][0]["delta"]["content"],
+        json!("terminal semantics")
+    );
     assert_eq!(logprobs_frame["choices"][0]["finish_reason"], Value::Null);
     assert_eq!(count_done_sentinels(&text), 1, "{text}");
 }

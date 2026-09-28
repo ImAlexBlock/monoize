@@ -162,19 +162,20 @@ TF-5. Transform registry discovery MUST be automatic through `inventory`.
 
 TF-6. Adding a new transform file with a valid inventory submission MUST be sufficient for registration.
 
-TF-6a. In addition to built-in transforms, administrator-authored custom JavaScript transforms exist under the reserved id prefix `js:`. Their identity, persistence, sandbox, registry exposure, and lookup semantics are defined by `spec/custom-js-transforms.spec.md`. Rules TF-7, TF-7a, TF-7b, and TF-14 apply to built-in canonical IDs only.
-
 TF-7. Built-ins that MUST exist are exactly:
+- `cache_anthropic_auto`
 - `cache_anthropic_system`
 - `cache_anthropic_tool_use`
 - `cache_openai_prompt`
 - `cache_openai_tool_use`
+- `cache_prefix_stabilize`
 - `cache_user_id`
 - `field_alias_reserved_tool_names`
 - `field_custom_tools_to_function`
 - `field_override_max_tokens`
 - `field_remove`
 - `field_set`
+- `field_strip_sampling`
 - `image_compress_input`
 - `image_compress_output`
 - `image_enable_openai_generation_tool`
@@ -344,6 +345,12 @@ ROLE-10. If `role_merge_consecutive` merges neighboring ordinary nodes, it MUST 
 
 ROLE-11. `role_merge_consecutive` MUST NOT merge `ToolResult` into ordinary nodes and MUST NOT cross a control-node boundary.
 
+ROLE-10a. Text nodes with a signature, token scores, or citations MUST remain separate during `role_merge_consecutive`. The transform MUST preserve their text and metadata without merging adjacent text into them.
+
+TXT-M1. If `reasoning_from_think_xml` finds no configured opening tag in an assistant text node, it MUST preserve that node unchanged in non-stream output and terminal stream output.
+
+TXT-M2. When `image_output_to_markdown` appends image Markdown to existing text, it MUST clear that text node's signature and token scores. Existing citation ranges remain valid because the original text prefix is unchanged.
+
 Motivation for ROLE-12 through ROLE-19: some chat-completion upstreams accept an image part carried on an assistant message at the wire level but silently drop it before the model sees it, so the model answers as if the conversation contained no image. Relocating such images onto a following user message keeps the image visible to the model.
 
 ROLE-12. `role_assistant_image_to_user` is request-phase only and supports the provider, global, and api-key scopes.
@@ -512,34 +519,35 @@ EOIGT-2. Config MAY contain:
 - `action` as a string; optional;
 - `force_stream` as a boolean; default `false`; and
 - `force_tool_choice` as a boolean; default `false`; and
-- `extra` as an object whose entries are copied verbatim into the inserted tool descriptor's `extra_body`.
+- `extra` as an object whose entries supply defaults in the inserted tool descriptor's typed `config`.
 
 EOIGT-3. The transform MUST inspect only top-level `request.tools`.
 
 EOIGT-4. If `request.tools` is absent, the transform MUST create it as a one-element array containing one tool descriptor with `type = "image_generation"`.
 
-EOIGT-5. If `request.tools` already contains at least one tool descriptor whose `type` is `image_generation` and `force_stream = false`, the transform MUST leave `request.tools` unchanged.
+EOIGT-5. If `request.tools` already contains an `image_generation` descriptor, the transform MUST NOT append another descriptor.
 
-EOIGT-5a. If `request.tools` already contains at least one tool descriptor whose `type` is `image_generation` and `force_stream = true`, the transform MUST NOT append another `image_generation` descriptor.
+EOIGT-5a. Existing tool configuration MUST retain its values. With `force_stream = true`, the transform MAY supply the missing `partial_images` default defined by EOIGT-6a.
 
 EOIGT-6. When the transform inserts a tool descriptor, it MUST set:
 1. `type = "image_generation"`;
-2. `extra_body.size = request.extra_body.size` when `request.extra_body` contains `size`;
-3. `extra_body.quality = request.extra_body.quality` when `request.extra_body` contains `quality`;
-4. all `extra` object entries into `extra_body` afterward, preserving their JSON values verbatim;
-5. `extra_body.output_format = <configured output_format>`;
-6. `extra_body.action = <configured action>` only when `action` is configured; and
-7. `extra_body.partial_images = 3` when `force_stream = true`.
+2. `config` from the configured `extra` object, preserving its JSON values;
+3. `config.output_format = <configured output_format>`;
+4. `config.action = <configured action>` only when `action` is configured; and
+5. `config.partial_images = 3` when EOIGT-6a permits that default.
 
-EOIGT-6a. If `force_stream = true`, the transform MUST set `request.stream = true` and MUST set `extra_body.partial_images = 3` on every `image_generation` tool descriptor in `request.tools`, including any descriptor inserted by the transform.
+EOIGT-6a. With `force_stream = true`, the transform MUST set `request.stream = true`. It MUST default `config.partial_images` to `3` only when the request and tool omit that field.
 
-EOIGT-6b. `partial_images` set by EOIGT-6a MUST override any preserved or configured `partial_images` value on the same tool descriptor.
+EOIGT-6b. Explicit `partial_images` values, including `0`, MUST override the transform default.
 
-EOIGT-6c. If `extra` contains keys `size` or `quality`, the transform MUST preserve the `extra` values in the inserted tool descriptor and MUST NOT overwrite them with same-named values from `request.extra_body`.
+EOIGT-6c. Typed `request.image_generation` values MUST remain authoritative. The Responses encoder MUST project them into each compatible `image_generation` tool after transform defaults.
 
-EOIGT-6d. If `extra` contains keys `output_format`, `action`, or `partial_images`, the transform MUST still apply EOIGT-6.5, EOIGT-6.6, and EOIGT-6.7 afterward so that the explicit transform-owned fields take precedence over colliding `extra` entries.
+EOIGT-6d. The transform MUST NOT create a second copy of typed image request values in adapter extras.
+When typed image options are absent, the transform MUST lift recognized image controls from `request.extra_body` into `request.image_generation`.
+It MUST preserve a boolean top-level `background` as a Responses control.
+When typed image options exist, the transform MUST remove duplicate image controls from extras without restoring absent typed values.
 
-EOIGT-7. The transform MUST preserve the source order of all pre-existing tool descriptors and MUST append the inserted `image_generation` tool after them. The only allowed mutation to a pre-existing `image_generation` descriptor is the `partial_images` assignment required by EOIGT-6a.
+EOIGT-7. The transform MUST preserve the source order of existing tools. It MUST append an inserted tool after them.
 
 EOIGT-8. If `force_stream = true`, the transform MUST set `request.stream = true` during request-phase application. This rule applies even when `request.tools` already contains an `image_generation` descriptor.
 
@@ -550,6 +558,25 @@ EOIGT-10. If `force_tool_choice = true`, the transform MUST set `request.tool_ch
 EOIGT-11. If `force_tool_choice = false`, the transform MUST NOT modify `request.tool_choice`.
 
 EOIGT-12. The transform MUST NOT modify `request.input` or any response-phase payload surface.
+
+EOIGT-13. The Responses encoder MUST map typed image settings into `image_generation` tool configuration, for inserted and existing tools.
+Supported settings are `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation`, `partial_images`, and `input_fidelity`.
+These values MUST override same-named tool defaults and MUST NOT appear as image controls at the Responses request top level.
+An ordinary Responses `background` boolean MUST retain its top-level meaning.
+
+EOIGT-14. If `request.image_generation` is present without a compatible `image_generation` tool, Responses encoding MUST return an error before the upstream request.
+The encoder MUST NOT inject a tool or permit a text-only request to replace an Images request.
+
+EOIGT-15. Responses encoding MUST reject explicit image `style`, `n` other than `1`, and `response_format` other than `b64_json`.
+Images ingress fan-out owns multiple outputs. Responses image tools return Base64 data and cannot fulfill a requested hosted URL.
+
+EOIGT-16. A request image with typed `metadata.image_mask = true` MUST become `image_generation.config.input_image_mask`.
+Base64 sources MUST use a data URL in `image_url`. URL sources MUST use `image_url`. File references MUST use `file_id`.
+Existing media validation and provider provenance checks MUST run before this mapping.
+
+EOIGT-17. The encoder MUST exclude mask nodes from ordinary Responses input.
+It MUST reject multiple masks, non-user masks, masks without a source image, and masks without a compatible image generation tool.
+The typed mask MUST override any configured `input_image_mask` value.
 
 CUMI-1. `image_compress_input` is request-phase only.
 
@@ -564,24 +591,29 @@ CUMI-2. Config MAY contain:
 
 When `max_edge_px` is absent, the transform MUST preserve the decoded image dimensions. When it is present, it MUST be at least `1`, and the transform MUST resize the decoded image only when its width or height exceeds that value.
 
-CUMI-3. The transform MUST inspect only ordinary `Image` nodes with `role = user`.
+CUMI-3. The transform MUST inspect ordinary `Image` nodes with `role = user`, `ToolResultContent::Image` entries in request `ToolResult` nodes, and complete JSON arguments of function `ToolCall` nodes. Custom-tool freeform input MUST remain unchanged.
+
+CUMI-3a. If any user image or tool-result image has typed `metadata.image_mask = true`, the transform MUST leave every request image source unchanged. This check MUST precede cache lookup, decoding, resizing, and format conversion.
 
 CUMI-4. Eligible image sources are:
 1. `Image.source = Base64`; or
 2. `Image.source = Url` whose `url` is a `data:<image-media-type>;base64,<payload>` URL.
 
+CUMI-4a. In a function `ToolCall.arguments` JSON value, the transform MUST inspect complete `data:<image-media-type>;base64,<payload>` string values and `source = { type: "base64", media_type, data }` inside objects with `type = "image"`, `"input_image"`, `"output_image"`, or `"image_url"`. It MUST apply CUMI-4 through CUMI-12 to those image sources, preserve other object fields and array order, and serialize the JSON only if a source changes. Invalid JSON, other strings, custom-tool input, and non-image base64 objects MUST remain unchanged.
+
 CUMI-5. Non-`data:` URL sources MUST remain unchanged.
 
 CUMI-6. If the media type is not decodable by the image codec stack, the node MUST remain unchanged.
 
-CUMI-6a. For an eligible source within the encoded-byte limit, the transform MUST detect JPEG, PNG, or WebP from its bytes. The detected format MUST determine `output_format = original` and the cache key. If `skip_if_smaller` retains a successfully decoded image, the transform MUST correct a mismatched declared media type to the detected media type. It MUST preserve the original bytes, source representation, and image detail. Invalid images and sources exceeding CUMI-12 limits MUST remain unchanged. Sources without a detected JPEG, PNG, or WebP format retain their existing behavior.
+CUMI-6a. For an eligible source within the encoded-byte limit, the transform MUST detect JPEG, PNG, or WebP from the source bytes. The detected format MUST determine `output_format = original` and the cache key. If `skip_if_smaller` retains a decoded image, the transform MUST replace a mismatched declared media type with the detected media type. It MUST preserve the image bytes and source representation. If the source exceeds a CUMI-12 limit or fails image decoding, the transform MUST leave it unchanged. A source without a detected JPEG, PNG, or WebP format retains its existing behavior.
 
 CUMI-7. On successful replacement:
 1. `Base64` sources MUST remain `Base64` with updated `media_type` and `data`;
-2. `data:` URL sources MUST remain `Url` with updated `url`; and
-3. provider-specific typed fields such as image detail hints MUST remain unchanged.
+2. `data:` URL sources MUST remain `Url` with updated `url`;
+3. tool-call JSON carriers MUST retain their original shape with only image MIME and bytes changed; and
+4. typed image metadata and provider-specific fields such as image detail hints MUST remain unchanged.
 
-CUMI-8. When `output_format = original`, the transform MUST use the detected format from CUMI-6a when available. Otherwise, it MUST use the declared supported format. It MUST normalize the `image/jpg` alias to `image/jpeg`. Source WebP MUST use the `webp_lossless` encoder path. When `output_format` is any other configured value, the transform MUST emit the explicitly selected image format. The exact encoder modes are:
+CUMI-8. When `output_format = original`, the transform MUST use the detected format from CUMI-6a when available. Otherwise, it MUST use the declared supported format. It MUST normalize the `image/jpg` alias to `image/jpeg`. Source WebP MUST use the `webp_lossless` encoder path. When `output_format` is any other configured value, the transform MUST emit the explicitly selected image format, except as required by CUMI-8a. The exact encoder modes are:
 1. `jpg` uses the mozjpeg fastest profile with `jpeg_quality`;
 2. `jpegxl_lossless` uses the reference libjxl encoder in lossless mode with `jpegxl_effort`;
 3. `jpegxl` uses the reference libjxl encoder in lossy mode with `jpegxl_quality` mapped through `JxlEncoderDistanceFromQuality` and `jpegxl_effort`;
@@ -591,8 +623,10 @@ CUMI-8. When `output_format = original`, the transform MUST use the detected for
 
 Both JPEG XL modes MUST emit media type `image/jxl`. Both WebP modes MUST emit media type `image/webp`.
 
+CUMI-8a. If the decoded source has an alpha channel and the selected output format is `jpg`, the transform MUST leave the image source unchanged. This rule applies even when all alpha samples are opaque. It takes precedence over `max_edge_px` and `skip_if_smaller`. The transform MUST preserve the original encoded bytes, media type, dimensions, and source representation. Formats that support alpha MUST continue to use CUMI-8. Cached results created before this rule MUST NOT replace the source.
+
 CUMI-9. The cache key material MUST be the ordered byte sequence:
-1. UTF-8 bytes of `compress_user_message_images:v5:detected-mime-v1` (a version-frozen cache-key literal that excludes cached results created before CUMI-6a);
+1. UTF-8 bytes of `compress_user_message_images:v7` (a version-frozen cache-key literal; version 7 excludes cached results that predate CUMI-6a);
 2. one zero byte;
 3. UTF-8 bytes of the source media type after CUMI-6a normalization;
 4. one zero byte;
@@ -608,7 +642,7 @@ CUMI-9. The cache key material MUST be the ordered byte sequence:
 
 CUMI-10. The cache key MUST be SHA-256 over the cache key material, formatted as 64 lowercase hexadecimal characters.
 
-CUMI-11. The cache persistence, eviction, and failure-isolation rules from the previous transform specification remain normative, but they apply to eligible ordinary `Image` nodes rather than to nested message parts.
+CUMI-11. Cache persistence, eviction, and failure isolation MUST apply equally to eligible ordinary, tool-result, and tool-call image sources.
 
 CUMI-12. The decoded source payload MUST be bounded before allocation and image decode. Defaults are 20971520 encoded bytes and 40000000 pixels, configured by `MONOIZE_IMAGE_TRANSFORM_MAX_ENCODED_BYTES` and `MONOIZE_IMAGE_TRANSFORM_MAX_PIXELS`. A source exceeding either limit MUST remain unchanged.
 
@@ -651,7 +685,7 @@ PRTS-5. PRTS-4 applies whether or not the same `Reasoning` node also carries `en
 
 PRTS-6. If a `Reasoning` node already has `summary`, the moved plaintext `content` value MUST replace the previous `summary`.
 
-PRTS-7. The transform MUST preserve `encrypted`, `source`, and node-local `extra_body`.
+PRTS-7. The transform MUST preserve `encrypted`, `source`, and node-local `extra_body`. When it moves plaintext content, it MUST set typed `metadata.summary_as_thinking = true`.
 
 PRTS-8. Empty plaintext content MUST NOT create a non-empty summary.
 
@@ -669,7 +703,7 @@ RSRC-4. If a `Reasoning` node carries non-empty `summary`, the transform MUST se
 
 RSRC-5. The transform MUST NOT modify `content`, `summary`, or `encrypted`.
 
-RSRC-6. On streams, the transform MAY annotate reasoning `NodeDelta` event `extra_body` for downstream encoders, but terminal correctness is defined by marking the final `Reasoning` nodes in `NodeDone.node` and `ResponseDone.output`.
+RSRC-6. On streams, the transform MUST set `NodeDelta::Reasoning.metadata.chat_content = true` when summary is non-empty. It MUST apply the same typed marker to final reasoning nodes in `NodeDone.node` and `ResponseDone.output`.
 
 RSRC-7. A downstream Chat encoder MUST honor the typed reasoning_content presentation option using the current typed summary or content. The option MUST NOT relabel a summary as raw CoT in canonical storage.
 
@@ -715,6 +749,8 @@ SER-6. The transform MUST preserve plaintext reasoning surfaces. Specifically, `
 SER-7. The transform MUST be a no-op on `UrpData::Request`. Request-side stripping of replayed encrypted reasoning is governed by `spec/unified_responses_proxy.spec.md` PR4c.6 through PR4c.8 and is not the responsibility of this transform.
 
 SER-8. The transform MUST behave identically whether the encrypted payload it observes is an `mz2.` envelope string or a raw upstream encrypted reasoning value. PIPE-1d guarantees that when `reasoning_envelope_enabled = true`, only the envelope form is observable; this transform MUST NOT depend on that guarantee for correctness.
+
+SER-8a. The transform MUST clear typed `ToolCall.signature` in non-stream responses, `NodeHeader::ToolCall.signature` on `NodeStart`, and terminal tool-call signatures in `NodeDone` and `ResponseDone`. It MUST preserve tool-call arguments and other fields.
 
 SER-9. The motivating use case for SER-1 through SER-8 is downstream SSE clients that cannot tolerate single SSE `data:` lines exceeding their per-line buffer. Removing `encrypted_content` shrinks the per-line payload of `response.output_item.done` and `response.completed` events without changing other observable response semantics.
 
@@ -774,7 +810,7 @@ Later summary deltas for that node MUST remain unchanged.
 RSH-14. On a `NodeDone` whose `node.type = reasoning`:
 1. format `node.summary` with RSH-4 through RSH-8;
 2. if the formatted `summary` is non-empty and `summary_delta_seen` is false, `finalize_stream_event` MUST emit a `NodeDelta::Reasoning` whose `summary` is the formatted full text, then the mutated `NodeDone`;
-3. the injected delta MUST copy `source` from the node and MUST leave `content` and `encrypted` unset.
+3. the injected delta MUST copy `source` and typed reasoning metadata from the node, set `metadata.item_id` from the node ID when present, and leave `content` and `encrypted` unset.
 The replacement vector MUST include both events. The pipeline MUST ignore the original event when replacement is `Some`.
 
 RSH-15. On `ResponseDone`, the transform MUST format every `Reasoning.summary` with RSH-4 through RSH-8. It MUST NOT inject events on `ResponseDone`.
@@ -809,6 +845,13 @@ AMIO-10. On streams where the downstream protocol can faithfully represent extra
 AMIO-11. Under the incremental path in AMIO-10, the transform MUST update terminal `NodeDone.node` and `ResponseDone.output` so the authoritative final flat node state contains the cleaned text nodes and inserted image nodes.
 
 AMIO-12. If the selected downstream protocol cannot faithfully represent the incremental rewritten node lifecycle, the runtime MUST use the buffered synthetic stream path.
+
+AMIO-13. If no Markdown image is extracted from an assistant text node, the transform MUST preserve every node field, including empty content, logprobs, signature, citations, ID, phase, and extras. This rule applies to non-stream output, `NodeDone`, and `ResponseDone`.
+
+AMIO-14. If extraction changes text, the transform MUST clear its signature and logprobs because they describe the original bytes. It MUST preserve citations without answer ranges. For each citation with an answer range, it MUST discard a range that intersects removed Markdown. Otherwise, it MUST subtract the number of removed Unicode scalars before the range from both offsets. Source coordinates and citation extras MUST remain unchanged.
+
+AMIO-15. A stream text node with header metadata or a delta carrying logprobs, signature, or citations MUST buffer that node's subsequent deltas until its terminal text is known. When no image is extracted, it MUST replay buffered deltas with their metadata, usage, and extras unchanged. When extraction changes text, it MUST emit rewritten content without stale text metadata and apply AMIO-14 to terminal citations. Metadata-free text retains AMIO-10's incremental path.
+
 
 AOIM-1. `image_output_to_markdown` is response-phase only.
 
@@ -851,12 +894,14 @@ CAOI-2. Config MAY contain:
 
 When `max_edge_px` is absent, the transform MUST preserve the decoded image dimensions. When it is present, it MUST be at least `1`, and the transform MUST resize the decoded image only when its width or height exceeds that value.
 
-CAOI-3. On non-stream responses, the transform MUST inspect only ordinary `Image` nodes with `role = assistant` in `response.output`.
+CAOI-3. On non-stream responses, the transform MUST inspect ordinary `Image` nodes with `role = assistant`, `ToolResultContent::Image` entries in `ToolResult` nodes, and complete JSON arguments of function `ToolCall` nodes in `response.output`. Tool-result and tool-call images follow CUMI-4a and the same source eligibility and preservation rules as request images.
 
 CAOI-4. On stream responses, the transform MUST inspect:
 1. `NodeDelta` image sources only when a preceding `NodeStart` for the same `node_index` has `header.type = image` and `header.role = assistant`;
-2. `NodeDone.node` only when it is an ordinary `Image` node with `role = assistant`; and
-3. ordinary `Image` nodes with `role = assistant` in `ResponseDone.output`.
+2. complete JSON `NodeDelta::ToolCallArguments` values only when the matching `NodeStart` is a function `ToolCall`; incomplete argument fragments MUST remain unchanged;
+3. `NodeDone.node` and `ResponseDone.output` ordinary `Image` nodes with `role = assistant`, function `ToolCall` arguments, and `ToolResultContent::Image` entries; and
+4. no custom-tool freeform input or non-image tool content.
+Terminal tool-call arguments MUST use the transformed complete value even when earlier fragments could not be transformed.
 
 CAOI-5. Eligible image sources are:
 1. `Image.source = Base64`; or
@@ -866,16 +911,13 @@ CAOI-6. Non-`data:` URL sources MUST remain unchanged.
 
 CAOI-7. If the media type is not decodable by the image codec stack, the node or delta MUST remain unchanged.
 
-CAOI-8. On successful replacement:
-1. `Base64` sources MUST remain `Base64` with updated `media_type` and `data`;
-2. `data:` URL sources MUST remain `Url` with updated `url`; and
-3. provider-specific typed fields such as image detail hints MUST remain unchanged.
+CAOI-8. Successful replacements MUST preserve source representation, tool-call JSON shape, typed metadata, and provider-specific fields under CUMI-7.
 
-CAOI-9. The output format selection and encoding rules MUST be identical to CUMI-8.
+CAOI-9. The output format selection and encoding rules MUST be identical to CUMI-8 and CUMI-8a. The alpha-channel protection MUST apply to non-streaming images and all eligible streaming image sources.
 
 CAOI-10. The cache key material and cache key algorithm MUST be identical to CUMI-9 and CUMI-10.
 
-CAOI-11. The cache persistence, eviction, and failure-isolation rules from the previous transform specification remain normative, but they apply to eligible ordinary assistant `Image` nodes and eligible assistant image deltas.
+CAOI-11. Cache persistence, eviction, and failure isolation MUST apply equally to eligible ordinary, tool-result, and tool-call image sources and assistant image deltas.
 
 ### 4.9 `prompt_strip_anthropic_billing_header`
 

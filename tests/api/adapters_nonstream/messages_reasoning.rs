@@ -202,7 +202,7 @@ async fn messages_structured_output_round_trips_and_maps_to_openai_families() {
                 assert_eq!(upstream["response_format"]["type"], json!("json_schema"));
                 assert_eq!(
                     upstream["response_format"]["json_schema"],
-                    json!({ "name": "response", "schema": schema.clone() })
+                    json!({ "name": "response", "schema": schema.clone(), "messages_extension": {"mode":"exact"} })
                 );
             }
             "responses" => {
@@ -211,7 +211,8 @@ async fn messages_structured_output_round_trips_and_maps_to_openai_families() {
                     json!({
                         "type": "json_schema",
                         "name": "response",
-                        "schema": schema.clone()
+                        "schema": schema.clone(),
+                        "messages_extension": {"mode":"exact"}
                     })
                 );
             }
@@ -433,6 +434,7 @@ async fn messages_response_signature_embeds_item_id_sigil_from_responses_upstrea
             "model": "gpt-5-mini",
             "max_tokens": 64,
             "thinking": { "type": "enabled", "budget_tokens": 2048 },
+            "output_config": { "effort": "medium" },
             "messages": [{ "role": "user", "content": [{ "type": "text", "text": "show reasoning" }] }]
         }),
     )

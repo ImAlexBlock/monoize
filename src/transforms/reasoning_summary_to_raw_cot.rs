@@ -103,9 +103,7 @@ impl Transform for ReasoningSummaryToRawCotTransform {
 
 fn mark_node(node: &mut Node) {
     let Node::Reasoning {
-        summary,
-        extra_body,
-        ..
+        summary, metadata, ..
     } = node
     else {
         return;
@@ -114,21 +112,21 @@ fn mark_node(node: &mut Node) {
         .as_deref()
         .is_some_and(|summary| !summary.is_empty())
     {
-        extra_body.insert("openwebui_reasoning_content".to_string(), Value::Bool(true));
+        metadata.chat_content = true;
     }
 }
 
 fn mark_stream(event: &mut UrpStreamEvent) {
     match event {
-        UrpStreamEvent::NodeDelta {
-            delta, extra_body, ..
-        } => {
-            if let NodeDelta::Reasoning { summary, .. } = delta
+        UrpStreamEvent::NodeDelta { delta, .. } => {
+            if let NodeDelta::Reasoning {
+                summary, metadata, ..
+            } = delta
                 && summary
                     .as_deref()
                     .is_some_and(|summary| !summary.is_empty())
             {
-                extra_body.insert("openwebui_reasoning_content".to_string(), Value::Bool(true));
+                metadata.chat_content = true;
             }
         }
         UrpStreamEvent::NodeDone { node, .. } => mark_node(node),
@@ -149,9 +147,10 @@ inventory::submit!(TransformEntry {
 mod tests {
     use super::*;
     use crate::image_transform_cache::ImageTransformCache;
+    use crate::transforms::test_fixtures::items_to_nodes;
     use crate::transforms::{TransformRuntimeContext, build_states_for_rules, registry};
     use crate::urp::UrpResponse;
-    use crate::urp::internal_legacy_bridge::{Item, Part, Role, items_to_nodes, nodes_to_items};
+    use crate::urp::internal_legacy_bridge::{Item, Part, Role, nodes_to_items};
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -182,6 +181,8 @@ mod tests {
         }];
         let mut states = build_states_for_rules(&rules, &registry).expect("states");
         let mut resp = UrpResponse {
+            outcome: Default::default(),
+
             id: "resp_1".to_string(),
             model: "gpt-test".to_string(),
             created_at: None,
@@ -189,6 +190,8 @@ mod tests {
                 id: None,
                 role: Role::Assistant,
                 parts: vec![Part::Reasoning {
+                    metadata: Default::default(),
+
                     id: None,
                     content: Some("full reasoning".to_string()),
                     encrypted: None,
@@ -218,15 +221,10 @@ mod tests {
         let Item::Message { parts, .. } = &outputs[0] else {
             panic!("expected message");
         };
-        let Part::Reasoning { extra_body, .. } = &parts[0] else {
+        let Part::Reasoning { metadata, .. } = &parts[0] else {
             panic!("expected reasoning");
         };
-        assert_eq!(
-            extra_body
-                .get("openwebui_reasoning_content")
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert!(metadata.chat_content);
     }
 
     #[tokio::test]
@@ -238,6 +236,8 @@ mod tests {
         let mut event = UrpStreamEvent::NodeDelta {
             node_index: 7,
             delta: NodeDelta::Reasoning {
+                metadata: Default::default(),
+
                 content: None,
                 encrypted: None,
                 summary: Some("brief summary".to_string()),
@@ -257,14 +257,13 @@ mod tests {
             .await
             .expect("apply");
 
-        let UrpStreamEvent::NodeDelta { extra_body, .. } = event else {
+        let UrpStreamEvent::NodeDelta {
+            delta: NodeDelta::Reasoning { metadata, .. },
+            ..
+        } = event
+        else {
             panic!("expected delta");
         };
-        assert_eq!(
-            extra_body
-                .get("openwebui_reasoning_content")
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert!(metadata.chat_content);
     }
 }

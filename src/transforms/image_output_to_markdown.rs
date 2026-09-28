@@ -147,6 +147,9 @@ fn append_images_as_markdown_nodes(output: &mut Vec<crate::urp::Node>, config: &
             }
         } else {
             output.push(crate::urp::Node::Text {
+                logprobs: None,
+                signature: None,
+                citations: Vec::new(),
                 id: None,
                 role: crate::urp::OrdinaryRole::Assistant,
                 content: pending_appended,
@@ -213,6 +216,10 @@ mod tests {
         let cfg = Config { template: None };
         let mut nodes = vec![
             Node::Text {
+                citations: Default::default(),
+                logprobs: Default::default(),
+                signature: Default::default(),
+
                 id: None,
                 role: OrdinaryRole::Assistant,
                 content: "hello".to_string(),
@@ -220,6 +227,8 @@ mod tests {
                 extra_body: HashMap::new(),
             },
             Node::Image {
+                metadata: Default::default(),
+
                 id: None,
                 role: OrdinaryRole::Assistant,
                 source: ImageSource::Url {

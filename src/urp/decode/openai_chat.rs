@@ -1,8 +1,7 @@
 use crate::urp::decode::{
     deserialize_u64ish_default, is_internal_extra_key, normalize_reasoning_effort,
-    parse_audio_part_from_obj, parse_file_part_from_obj, parse_image_part_from_obj,
-    parse_tool_call_part_from_obj, parse_tool_definition, remove_untrusted_internal_keys,
-    retain_wire_extra_fields, split_extra, value_to_text,
+    parse_compatible_media_part, parse_tool_call_part_from_obj, parse_tool_definition,
+    remove_untrusted_internal_keys, retain_wire_extra_fields, split_extra,
 };
 use crate::urp::internal_legacy_bridge::{Part, Role};
 use crate::urp::{
@@ -22,33 +21,11 @@ use std::collections::HashMap;
 const CHAT_CHOICE_EXTRA_BODY_KEY: &str = "_monoize_chat_choice_extra";
 const CHAT_NATIVE_FINISH_REASON_EXTRA_KEY: &str = "_monoize_chat_native_finish_reason";
 
-/// Top-level usage-object aliases for the cached subset of an inclusive prompt
-/// total (user-billing-and-model-metadata.spec.md C3-i-a), in precedence order.
-/// The first field present with a positive value wins.
-pub(crate) fn chat_usage_top_level_cache_read(extra: &HashMap<String, Value>) -> Option<u64> {
-    [
-        "prompt_cache_hit_tokens",
-        "input_cache_read",
-        "cache_read_input_tokens",
-    ]
-    .into_iter()
-    .find_map(|key| extra.get(key).and_then(super::value_to_u64))
-    .filter(|&value| value > 0)
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct OpenAiChatUsage {
-    #[serde(
-        default,
-        deserialize_with = "deserialize_u64ish_default",
-        alias = "input_tokens"
-    )]
+    #[serde(default, deserialize_with = "deserialize_u64ish_default")]
     prompt_tokens: u64,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_u64ish_default",
-        alias = "output_tokens"
-    )]
+    #[serde(default, deserialize_with = "deserialize_u64ish_default")]
     completion_tokens: u64,
     #[serde(default)]
     prompt_tokens_details: Option<OpenAiChatInputDetails>,
@@ -130,33 +107,32 @@ impl From<OpenAiChatUsage> for Usage {
             retain_wire_extra_fields(&mut details.extra);
         }
 
-        let wire_input_details = prompt_tokens_details.as_ref().or(input_tokens_details.as_ref());
-        let cache_creation_tokens = wire_input_details
-            .map(|details| details.cache_creation_tokens.max(details.cache_write_tokens))
-            .unwrap_or(0);
-        let tool_prompt_tokens = wire_input_details
-            .map(|details| details.tool_prompt_tokens)
-            .unwrap_or(0);
-        // C3-i-a: a chat-shaped upstream may report the cached subset only in a
-        // top-level usage field; such aliases never adjust `input_tokens`,
-        // which is already the inclusive prompt total for this protocol shape.
-        let cache_read_tokens = wire_input_details
-            .map(|details| details.cached_tokens)
-            .filter(|&value| value > 0)
-            .or_else(|| chat_usage_top_level_cache_read(&extra))
-            .unwrap_or(0);
-        let input_details = (cache_read_tokens > 0
-            || cache_creation_tokens > 0
-            || tool_prompt_tokens > 0)
-            .then(|| InputDetails {
-                standard_tokens: 0,
-                cache_read_tokens,
-                cache_read_modality_breakdown: None,
-                cache_creation_tokens,
-                cache_creation_5m_tokens: 0,
-                cache_creation_1h_tokens: 0,
-                tool_prompt_tokens,
-                modality_breakdown: None,
+        let input_details = prompt_tokens_details
+            .as_ref()
+            .or(input_tokens_details.as_ref())
+            .and_then(|details| {
+                let cache_creation_tokens = details
+                    .cache_creation_tokens
+                    .max(details.cache_write_tokens);
+                if details.cached_tokens > 0
+                    || cache_creation_tokens > 0
+                    || details.tool_prompt_tokens > 0
+                    || crate::urp::usage::modality(&details.extra).is_some()
+                {
+                    Some(InputDetails {
+                        tool_prompt_modality_breakdown: None,
+                        standard_tokens: 0,
+                        cache_read_tokens: details.cached_tokens,
+                        cache_read_modality_breakdown: None,
+                        cache_creation_tokens,
+                        cache_creation_5m_tokens: 0,
+                        cache_creation_1h_tokens: 0,
+                        tool_prompt_tokens: details.tool_prompt_tokens,
+                        modality_breakdown: crate::urp::usage::modality(&details.extra),
+                    })
+                } else {
+                    None
+                }
             });
 
         let output_details = completion_tokens_details
@@ -166,13 +142,14 @@ impl From<OpenAiChatUsage> for Usage {
                 if details.reasoning_tokens > 0
                     || details.accepted_prediction_tokens > 0
                     || details.rejected_prediction_tokens > 0
+                    || crate::urp::usage::modality(&details.extra).is_some()
                 {
                     Some(OutputDetails {
                         standard_tokens: 0,
                         reasoning_tokens: details.reasoning_tokens,
                         accepted_prediction_tokens: details.accepted_prediction_tokens,
                         rejected_prediction_tokens: details.rejected_prediction_tokens,
-                        modality_breakdown: None,
+                        modality_breakdown: crate::urp::usage::modality(&details.extra),
                     })
                 } else {
                     None
@@ -183,9 +160,10 @@ impl From<OpenAiChatUsage> for Usage {
             ("prompt_tokens_details", prompt_tokens_details),
             ("input_tokens_details", input_tokens_details),
         ] {
-            if let Some(details) = details
+            if let Some(mut details) = details
                 && !details.extra.is_empty()
             {
+                crate::urp::usage::strip_modality(&mut details.extra);
                 extra.insert(
                     key.to_string(),
                     Value::Object(details.extra.into_iter().collect()),
@@ -196,9 +174,10 @@ impl From<OpenAiChatUsage> for Usage {
             ("completion_tokens_details", completion_tokens_details),
             ("output_tokens_details", output_tokens_details),
         ] {
-            if let Some(details) = details
+            if let Some(mut details) = details
                 && !details.extra.is_empty()
             {
+                crate::urp::usage::strip_modality(&mut details.extra);
                 extra.insert(
                     key.to_string(),
                     Value::Object(details.extra.into_iter().collect()),
@@ -207,6 +186,7 @@ impl From<OpenAiChatUsage> for Usage {
         }
 
         Usage {
+            iterations: None,
             input_tokens: prompt_tokens,
             output_tokens: completion_tokens,
             input_details,
@@ -225,6 +205,9 @@ fn text_part_with_phase(
         extra_body.insert("phase".to_string(), Value::String(phase.to_string()));
     }
     Part::Text {
+        logprobs: None,
+        signature: None,
+        citations: Vec::new(),
         content: content.into(),
         extra_body,
     }
@@ -291,6 +274,9 @@ fn parse_legacy_function_call_part(value: &Value) -> Option<Part> {
         Value::Bool(true),
     );
     Some(Part::ToolCall {
+        namespace: None,
+        signature: None,
+
         id: None,
         tool_type: ToolCallType::Function,
         call_id: legacy_function_call_id(&name),
@@ -300,30 +286,70 @@ fn parse_legacy_function_call_part(value: &Value) -> Option<Part> {
     })
 }
 
-fn parse_chat_message_audio_part(value: &Value) -> Option<Part> {
-    let body = value.as_object()?.clone();
+pub(crate) fn parse_chat_message_audio_part(value: &Value) -> Option<Part> {
+    let body = value.as_object()?;
     if body.is_empty() {
         return None;
+    }
+    let shape = HashMap::from([(CHAT_MESSAGE_AUDIO_EXTRA_KEY.to_string(), Value::Bool(true))]);
+    if let Some(data) = body.get("data").and_then(Value::as_str) {
+        let mut extra_body = split_extra(body, &["id", "data", "transcript", "expires_at"]);
+        extra_body.extend(shape);
+        return Some(Part::Audio {
+            metadata: crate::urp::MediaMetadata {
+                reference_id: body.get("id").and_then(Value::as_str).map(str::to_string),
+                transcript: body
+                    .get("transcript")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                expires_at: body.get("expires_at").and_then(Value::as_i64),
+                ..Default::default()
+            },
+            source: crate::urp::AudioSource::Base64 {
+                media_type: "audio/unknown".into(),
+                data: data.into(),
+            },
+            extra_body,
+        });
     }
     Some(Part::ProviderItem {
         id: body.get("id").and_then(Value::as_str).map(str::to_string),
         origin_protocol: ProviderProtocol::ChatCompletion,
         item_type: "audio".to_string(),
-        body: Value::Object(body),
-        extra_body: HashMap::from([(CHAT_MESSAGE_AUDIO_EXTRA_KEY.to_string(), Value::Bool(true))]),
+        body: Value::Object(body.clone()),
+        extra_body: shape,
     })
 }
 
-fn push_chat_content_parts(parts: &mut Vec<Part>, content: &Value, message_phase: Option<&str>) {
+fn attach_chat_annotations(parts: &mut [Part], message: &Map<String, Value>) {
+    if let Some(annotations) = message.get("annotations").and_then(Value::as_array)
+        && let Some(Part::Text { citations, .. }) = parts
+            .iter_mut()
+            .find(|part| matches!(part, Part::Text { .. }))
+    {
+        citations.extend(crate::urp::citations::decode(
+            annotations.clone(),
+            crate::urp::ProviderProtocol::ChatCompletion,
+        ));
+    }
+}
+
+fn push_chat_content_parts(
+    parts: &mut Vec<Part>,
+    content: &Value,
+    message_phase: Option<&str>,
+) -> Result<(), String> {
     if let Some(s) = content.as_str() {
         if !s.is_empty() {
             parts.push(text_part_with_phase(s, message_phase, HashMap::new()));
         }
-        return;
+        return Ok(());
     }
 
-    let Some(arr) = content.as_array() else {
-        return;
+    let arr = match content {
+        Value::Array(parts) => parts.as_slice(),
+        Value::Object(_) => std::slice::from_ref(content),
+        _ => return Ok(()),
     };
 
     for item in arr {
@@ -339,7 +365,8 @@ fn push_chat_content_parts(parts: &mut Vec<Part>, content: &Value, message_phase
         let mut recognized = false;
         if let Some(text) = item_obj.get("text").and_then(|v| v.as_str()) {
             let item_type = item_obj.get("type").and_then(|v| v.as_str());
-            if !text.is_empty() && matches!(item_type, Some("text" | "output_text")) {
+            if !text.is_empty() && matches!(item_type, Some("input_text" | "text" | "output_text"))
+            {
                 parts.push(text_part_with_phase(
                     text,
                     message_phase,
@@ -348,16 +375,8 @@ fn push_chat_content_parts(parts: &mut Vec<Part>, content: &Value, message_phase
                 recognized = true;
             }
         }
-        if let Some(image_part) = parse_image_part_from_obj(item_obj) {
-            parts.push(image_part);
-            recognized = true;
-        }
-        if let Some(file_part) = parse_file_part_from_obj(item_obj) {
-            parts.push(file_part);
-            recognized = true;
-        }
-        if let Some(audio_part) = parse_audio_part_from_obj(item_obj) {
-            parts.push(audio_part);
+        if let Some(media) = parse_compatible_media_part(item_obj)? {
+            parts.push(media);
             recognized = true;
         }
         if let Some(tool_call_part) = parse_tool_call_part_from_obj(item_obj) {
@@ -382,98 +401,81 @@ fn push_chat_content_parts(parts: &mut Vec<Part>, content: &Value, message_phase
             });
         }
     }
+    Ok(())
 }
 
-fn decode_chat_tool_result_content(content: &Value) -> Vec<ToolResultContent> {
-    let mut out = Vec::new();
-    match content {
-        Value::Null => {}
-        Value::String(text) => {
-            if !text.is_empty() {
-                out.push(ToolResultContent::Text {
-                    text: text.clone(),
-                    extra_body: HashMap::new(),
-                });
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                decode_chat_tool_result_item(item, &mut out);
-            }
-        }
-        Value::Object(_) => decode_chat_tool_result_item(content, &mut out),
-        other => {
-            let text = value_to_text(other);
-            if !text.is_empty() {
-                out.push(ToolResultContent::Text {
-                    text,
-                    extra_body: HashMap::new(),
-                });
-            }
-        }
-    }
-    out
-}
-
-fn decode_chat_tool_result_item(value: &Value, content: &mut Vec<ToolResultContent>) {
-    if let Some(text) = value.as_str() {
-        if !text.is_empty() {
-            content.push(ToolResultContent::Text {
-                text: text.to_string(),
-                extra_body: HashMap::new(),
-            });
-        }
-        return;
-    }
-    let Some(obj) = value.as_object() else {
-        let text = value_to_text(value);
-        if !text.is_empty() {
-            content.push(ToolResultContent::Text {
-                text,
-                extra_body: HashMap::new(),
-            });
-        }
-        return;
+fn decode_chat_tool_result_content(value: &Value) -> Result<Vec<ToolResultContent>, String> {
+    let values = match value {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(values) => values.as_slice(),
+        _ => std::slice::from_ref(value),
     };
-
-    let ptype = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    match ptype {
-        "input_text" | "output_text" | "text" => {
-            if let Some(text) = obj
-                .get("text")
-                .and_then(|v| v.as_str())
-                .or_else(|| obj.get("content").and_then(|v| v.as_str()))
+    let mut content = Vec::new();
+    for value in values {
+        if let Some(obj) = value.as_object() {
+            let kind = obj.get("type").and_then(Value::as_str);
+            if matches!(kind, Some("input_text" | "output_text" | "text"))
+                && let Some(text) = obj
+                    .get("text")
+                    .or_else(|| obj.get("content"))
+                    .and_then(Value::as_str)
             {
                 content.push(ToolResultContent::Text {
-                    text: text.to_string(),
+                    text: text.into(),
                     extra_body: split_extra(obj, &["type", "text", "content"]),
                 });
+                continue;
             }
-        }
-        _ => {
-            if let Some(image) = parse_image_part_from_obj(obj) {
-                let Part::Image { source, extra_body } = image else {
-                    unreachable!();
-                };
-                content.push(ToolResultContent::Image { source, extra_body });
-                return;
-            }
-            if let Some(file) = parse_file_part_from_obj(obj) {
-                let Part::File { source, extra_body } = file else {
-                    unreachable!();
-                };
-                content.push(ToolResultContent::File { source, extra_body });
-                return;
-            }
-            let text = value_to_text(value);
-            if !text.is_empty() {
-                content.push(ToolResultContent::Text {
-                    text,
-                    extra_body: HashMap::new(),
+            if let Some(part) = parse_compatible_media_part(obj)? {
+                content.push(match part {
+                    Part::Image {
+                        metadata,
+                        source,
+                        extra_body,
+                    } => ToolResultContent::Image {
+                        metadata,
+                        source,
+                        extra_body,
+                    },
+                    Part::File {
+                        metadata,
+                        source,
+                        extra_body,
+                    } => ToolResultContent::File {
+                        metadata,
+                        source,
+                        extra_body,
+                    },
+                    Part::Audio {
+                        metadata,
+                        source,
+                        extra_body,
+                    } => ToolResultContent::File {
+                        metadata,
+                        source: match source {
+                            crate::urp::AudioSource::Base64 { media_type, data } => {
+                                crate::urp::FileSource::Base64 { media_type, data }
+                            }
+                            crate::urp::AudioSource::Url { url } => {
+                                crate::urp::FileSource::Url { url }
+                            }
+                        },
+                        extra_body,
+                    },
+                    _ => unreachable!(),
                 });
+                continue;
             }
         }
+        content.push(ToolResultContent::Text {
+            text: value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string()),
+            extra_body: HashMap::new(),
+        });
     }
+    Ok(content)
 }
 
 pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
@@ -504,6 +506,30 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
             Some(v) => v,
             None => continue,
         };
+        if msg_obj
+            .get("configuration_update")
+            .is_some_and(Value::is_object)
+        {
+            input_nodes.push(Node::ProviderItem {
+                id: msg_obj
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                origin_protocol: ProviderProtocol::ChatCompletion,
+                role: OrdinaryRole::System,
+                item_type: msg_obj
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("configuration_update")
+                    .to_string(),
+                body: crate::urp::encode::sanitize_provider_item_wire_body(raw_msg),
+                extra_body: HashMap::from([(
+                    crate::urp::CHAT_MESSAGE_ITEM_EXTRA_KEY.to_string(),
+                    Value::Bool(true),
+                )]),
+            });
+            continue;
+        }
         let role_name = msg_obj
             .get("role")
             .and_then(|v| v.as_str())
@@ -512,23 +538,26 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
             let name = msg_obj
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+                .map(str::to_string);
             let content = msg_obj.get("content").cloned().unwrap_or(Value::Null);
-            let mut result_extra = split_extra(msg_obj, &["role", "name", "content"]);
+            let mut result_extra = split_extra(msg_obj, &["role", "id", "name", "content"]);
             result_extra.insert(
                 CHAT_LEGACY_FUNCTION_RESULT_EXTRA_KEY.to_string(),
-                Value::String(name.clone()),
+                Value::Bool(true),
             );
             input_nodes.push(Node::ToolResult {
+                signature: None,
+                namespace: None,
+                name: name.clone(),
+
                 id: msg_obj
                     .get("id")
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 tool_type: ToolCallType::Function,
-                call_id: legacy_function_call_id(&name),
+                call_id: legacy_function_call_id(name.as_deref().unwrap_or_default()),
                 is_error: false,
-                content: decode_chat_tool_result_content(&content),
+                content: decode_chat_tool_result_content(&content)?,
                 extra_body: result_extra,
             });
             continue;
@@ -549,6 +578,13 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
                 .to_string();
             let content = msg_obj.get("content").cloned().unwrap_or(Value::Null);
             input_nodes.push(Node::ToolResult {
+                signature: None,
+                namespace: None,
+                name: msg_obj
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+
                 id: msg_obj
                     .get("id")
                     .and_then(|v| v.as_str())
@@ -559,8 +595,11 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
                     .unwrap_or(ToolCallType::Function),
                 call_id,
                 is_error: false,
-                content: decode_chat_tool_result_content(&content),
-                extra_body: split_extra(msg_obj, &["role", "tool_call_id", "content"]),
+                content: decode_chat_tool_result_content(&content)?,
+                extra_body: split_extra(
+                    msg_obj,
+                    &["role", "id", "name", "tool_call_id", "content"],
+                ),
             });
             continue;
         }
@@ -575,6 +614,7 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
                 "tool_calls",
                 "reasoning",
                 "reasoning_details",
+                "annotations",
                 "reasoning_content",
                 "reasoning_opaque",
                 "refusal",
@@ -584,7 +624,7 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
             ],
         );
 
-        parse_chat_reasoning_fields(msg_obj, &mut parts);
+        parse_chat_reasoning_fields(msg_obj, &mut parts, true);
 
         if let Some(audio) = msg_obj
             .get("audio")
@@ -595,12 +635,14 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
         }
 
         if let Some(content) = msg_obj.get("content") {
-            push_chat_content_parts(&mut parts, content, message_phase);
+            push_chat_content_parts(&mut parts, content, message_phase)?;
         }
+        attach_chat_annotations(&mut parts, msg_obj);
 
         if let Some(refusal) = msg_obj.get("refusal").and_then(|v| v.as_str()) {
             if !refusal.is_empty() {
                 parts.push(Part::Refusal {
+                    logprobs: None,
                     content: refusal.to_string(),
                     extra_body: HashMap::new(),
                 });
@@ -690,6 +732,7 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
         obj,
         &[
             "model",
+            "context",
             "messages",
             "stream",
             "temperature",
@@ -713,11 +756,31 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
     if let Some(raw_choice) = legacy_function_choice_raw {
         extra_body.insert(
             CHAT_LEGACY_FUNCTION_CHOICE_EXTRA_KEY.to_string(),
-            raw_choice,
+            raw_choice
+                .as_object()
+                .map(|obj| Value::Object(split_extra(obj, &["name"]).into_iter().collect()))
+                .unwrap_or(Value::Null),
         );
     }
 
+    crate::urp::tool_signature::restore_request_call_signatures(&mut input_nodes);
+    crate::urp::logprobs::strip_request_extras(&mut extra_body);
+    crate::urp::sampling::strip_request_extras(
+        &mut extra_body,
+        crate::urp::ProviderProtocol::ChatCompletion,
+    );
     Ok(UrpRequest {
+        image_generation: None,
+        sampling: crate::urp::sampling::request_config(
+            obj,
+            crate::urp::ProviderProtocol::ChatCompletion,
+        ),
+        logprobs: crate::urp::logprobs::request_config(
+            obj,
+            crate::urp::ProviderProtocol::ChatCompletion,
+        ),
+        context: Default::default(),
+        instructions_format: None,
         model,
         input: input_nodes,
         stream: obj.get("stream").and_then(|v| v.as_bool()),
@@ -799,6 +862,7 @@ pub fn decode_response(value: &Value) -> Result<UrpResponse, String> {
             "content",
             "reasoning",
             "reasoning_details",
+            "annotations",
             "reasoning_content",
             "reasoning_opaque",
             "tool_calls",
@@ -810,7 +874,7 @@ pub fn decode_response(value: &Value) -> Result<UrpResponse, String> {
     );
     let message_phase = msg_obj.get("phase").and_then(|v| v.as_str());
 
-    parse_chat_reasoning_fields(msg_obj, &mut parts);
+    parse_chat_reasoning_fields(msg_obj, &mut parts, false);
 
     if let Some(audio) = msg_obj
         .get("audio")
@@ -821,7 +885,7 @@ pub fn decode_response(value: &Value) -> Result<UrpResponse, String> {
     }
 
     if let Some(content) = msg_obj.get("content") {
-        push_chat_content_parts(&mut parts, content, message_phase);
+        push_chat_content_parts(&mut parts, content, message_phase)?;
     }
 
     if let Some(tool_calls) = msg_obj.get("tool_calls").and_then(|v| v.as_array()) {
@@ -847,12 +911,14 @@ pub fn decode_response(value: &Value) -> Result<UrpResponse, String> {
     if let Some(refusal) = msg_obj.get("refusal").and_then(|v| v.as_str()) {
         if !refusal.is_empty() {
             parts.push(Part::Refusal {
+                logprobs: None,
                 content: refusal.to_string(),
                 extra_body: HashMap::new(),
             });
         }
     }
 
+    attach_chat_annotations(&mut parts, msg_obj);
     let mut output_nodes = Vec::new();
     push_message_nodes(
         &mut output_nodes,
@@ -861,6 +927,19 @@ pub fn decode_response(value: &Value) -> Result<UrpResponse, String> {
         message_extra_body.clone(),
     );
 
+    if let Some(scores) = choice.get("logprobs") {
+        for node in &mut output_nodes {
+            match node {
+                Node::Text { logprobs, .. } => {
+                    *logprobs = crate::urp::logprobs::decode(scores.get("content"))
+                }
+                Node::Refusal { logprobs, .. } => {
+                    *logprobs = crate::urp::logprobs::decode(scores.get("refusal"))
+                }
+                _ => {}
+            }
+        }
+    }
     let finish_reason = native_finish_reason.as_deref().map(parse_finish_reason);
 
     let usage = obj
@@ -874,7 +953,12 @@ pub fn decode_response(value: &Value) -> Result<UrpResponse, String> {
     );
     let choice_extra = choice
         .iter()
-        .filter(|(key, _)| !matches!(key.as_str(), "index" | "message" | "finish_reason"))
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "index" | "message" | "finish_reason" | "logprobs"
+            )
+        })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<Map<String, Value>>();
     if !choice_extra.is_empty() {
@@ -883,7 +967,9 @@ pub fn decode_response(value: &Value) -> Result<UrpResponse, String> {
             Value::Object(choice_extra),
         );
     }
-    if let Some(native_finish_reason) = native_finish_reason {
+    if let Some(native_finish_reason) =
+        native_finish_reason.filter(|reason| parse_finish_reason(reason) == FinishReason::Other)
+    {
         extra_body.insert(
             CHAT_NATIVE_FINISH_REASON_EXTRA_KEY.to_string(),
             Value::String(native_finish_reason),
@@ -891,6 +977,7 @@ pub fn decode_response(value: &Value) -> Result<UrpResponse, String> {
     }
 
     Ok(UrpResponse {
+        outcome: None,
         id: obj
             .get("id")
             .and_then(|v| v.as_str())
@@ -951,7 +1038,13 @@ fn extract_reasoning(obj: &Map<String, Value>) -> Option<ReasoningConfig> {
     let mut extra_body = HashMap::new();
     if let Some(reasoning) = reasoning_obj {
         let mut reasoning = reasoning.clone();
-        reasoning.retain(|key, _| !is_internal_extra_key(key));
+        reasoning.retain(|key, _| {
+            !is_internal_extra_key(key)
+                && !matches!(
+                    key.as_str(),
+                    "effort" | "summary" | "max_tokens" | "enabled"
+                )
+        });
         extra_body.insert(
             CHAT_REASONING_CONFIG_EXTRA_KEY.to_string(),
             Value::Object(reasoning),
@@ -959,16 +1052,44 @@ fn extract_reasoning(obj: &Map<String, Value>) -> Option<ReasoningConfig> {
     }
     if let Some(thinking) = thinking_obj {
         let mut thinking = thinking.clone();
-        thinking.retain(|key, _| !is_internal_extra_key(key));
+        thinking.retain(|key, _| {
+            !is_internal_extra_key(key)
+                && !matches!(key.as_str(), "type" | "budget_tokens" | "display")
+        });
         extra_body.insert(
             CHAT_THINKING_CONFIG_EXTRA_KEY.to_string(),
             Value::Object(thinking),
         );
     }
-    Some(ReasoningConfig { effort, extra_body })
+    Some(ReasoningConfig {
+        effort,
+        summary: reasoning_obj
+            .and_then(|v| v.get("summary"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        mode: thinking_obj
+            .and_then(|v| v.get("type"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                reasoning_obj
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .map(|v| if v { "enabled" } else { "disabled" }.to_string())
+            }),
+        budget_tokens: thinking_obj
+            .and_then(|v| v.get("budget_tokens"))
+            .or_else(|| reasoning_obj.and_then(|v| v.get("max_tokens")))
+            .and_then(Value::as_u64),
+        display: thinking_obj
+            .and_then(|v| v.get("display"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        extra_body,
+    })
 }
 
-fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Part>) {
+fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Part>, request_history: bool) {
     if let Some(details) = msg_obj.get("reasoning_details").and_then(|v| v.as_array()) {
         for detail in details {
             let Some(detail_obj) = detail.as_object() else {
@@ -1001,14 +1122,14 @@ fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Par
                 .flatten()
                 .filter(|value| !value.is_null())
                 .cloned();
-            let mut raw_detail = detail_obj.clone();
-            raw_detail.retain(|key, _| !is_internal_extra_key(key));
+            let raw_detail = crate::urp::reasoning::detail_metadata(detail_obj);
             let mut extra_body = HashMap::new();
             extra_body.insert(
                 CHAT_REASONING_DETAIL_EXTRA_KEY.to_string(),
                 Value::Object(raw_detail),
             );
             parts.push(Part::Reasoning {
+                metadata: Default::default(),
                 id,
                 content,
                 encrypted,
@@ -1017,25 +1138,33 @@ fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Par
                 extra_body,
             });
         }
-        if !details.is_empty() {
-            return;
-        }
     }
 
-    let scalar = msg_obj
-        .get("reasoning")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(|value| (value, CHAT_REASONING_SURFACE_REASONING))
-        .or_else(|| {
-            msg_obj
-                .get("reasoning_content")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(|value| (value, CHAT_REASONING_SURFACE_REASONING_CONTENT))
-        });
-    if let Some((content, surface)) = scalar {
+    if request_history && parts.iter().any(|part| matches!(part, Part::Reasoning { content: Some(content), .. } if !content.is_empty())) {
+        return;
+    }
+
+    for (key, surface, summary_is_alias) in [
+        ("reasoning", CHAT_REASONING_SURFACE_REASONING, true),
+        (
+            "reasoning_content",
+            CHAT_REASONING_SURFACE_REASONING_CONTENT,
+            false,
+        ),
+    ] {
+        let Some(content) = msg_obj
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        if parts.iter().any(|part| matches!(part, Part::Reasoning { content: existing, summary, .. }
+            if existing.as_deref() == Some(content) || (summary_is_alias && summary.as_deref() == Some(content)))) {
+            continue;
+        }
         parts.push(Part::Reasoning {
+            metadata: Default::default(),
             id: None,
             content: Some(content.to_string()),
             encrypted: None,
@@ -1051,8 +1180,10 @@ fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Par
         .get("reasoning_opaque")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
+        .filter(|value| !parts.iter().any(|part| matches!(part, Part::Reasoning {encrypted:Some(existing),..} if existing.as_str()==Some(*value))))
     {
         parts.push(Part::Reasoning {
+            metadata: Default::default(),
             id: None,
             content: None,
             encrypted: Some(Value::String(opaque.to_string())),
@@ -1075,6 +1206,7 @@ fn tool_choice_from_value(mut v: Value) -> ToolChoice {
 fn parse_response_format(v: Value) -> Option<crate::urp::ResponseFormat> {
     if let Some(obj) = v.as_object() {
         match obj.get("type").and_then(|x| x.as_str()) {
+            Some("text") => return Some(crate::urp::ResponseFormat::Text),
             Some("json_object") => return Some(crate::urp::ResponseFormat::JsonObject),
             Some("json_schema") => {
                 let schema_obj = obj.get("json_schema")?.as_object()?;
@@ -1124,823 +1256,11 @@ fn parse_usage_from_chat(obj: &Map<String, Value>) -> Usage {
     serde_json::from_value::<OpenAiChatUsage>(Value::Object(obj.clone()))
         .map(Usage::from)
         .unwrap_or_else(|_| Usage {
+            iterations: None,
             input_tokens: 0,
             output_tokens: 0,
             input_details: None,
             output_details: None,
             extra_body: split_extra(obj, &[]),
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::urp::Node;
-    use crate::urp::internal_legacy_bridge::{Item, nodes_to_items};
-    use serde_json::json;
-
-    fn output_parts(nodes: &[Node]) -> Vec<Part> {
-        nodes_to_items(nodes)
-            .into_iter()
-            .find_map(|item| match item {
-                Item::Message { parts, .. } => Some(parts),
-                Item::ToolResult { .. } => None,
-            })
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn chat_usage_preserves_nested_unknown_details() {
-        let response = json!({
-            "id": "chatcmpl_usage_details",
-            "object": "chat.completion",
-            "model": "gpt-5.4",
-            "choices": [{
-                "index": 0,
-                "message": { "role": "assistant", "content": "ok" },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 12,
-                "completion_tokens": 8,
-                "prompt_tokens_details": {
-                    "cached_tokens": 3,
-                    "vendor_prompt_detail": { "kind": "warm" },
-                    "_monoize_spoofed_prompt": true
-                },
-                "completion_tokens_details": {
-                    "reasoning_tokens": 5,
-                    "vendor_completion_detail": [1, 2],
-                    "_monoize_spoofed_completion": true
-                },
-                "vendor_usage_counter": 9,
-                "_monoize_spoofed_usage": true
-            }
-        });
-
-        let usage = decode_response(&response)
-            .expect("decode chat response")
-            .usage
-            .expect("chat usage");
-        assert_eq!(
-            usage
-                .input_details
-                .expect("input details")
-                .cache_read_tokens,
-            3
-        );
-        assert_eq!(
-            usage
-                .output_details
-                .expect("output details")
-                .reasoning_tokens,
-            5
-        );
-        assert_eq!(
-            usage.extra_body["prompt_tokens_details"],
-            json!({ "vendor_prompt_detail": { "kind": "warm" } })
-        );
-        assert_eq!(
-            usage.extra_body["completion_tokens_details"],
-            json!({ "vendor_completion_detail": [1, 2] })
-        );
-        assert_eq!(usage.extra_body["vendor_usage_counter"], json!(9));
-        assert!(!usage.extra_body.contains_key("vendor_prompt_detail"));
-        assert!(!usage.extra_body.contains_key("vendor_completion_detail"));
-        assert!(!usage.extra_body.contains_key("_monoize_spoofed_usage"));
-    }
-
-    #[test]
-    fn chat_usage_fallback_rejects_reserved_wire_keys() {
-        let usage = parse_usage_from_chat(
-            json!({
-                "prompt_tokens": 1,
-                "completion_tokens": 2,
-                "prompt_tokens_details": "invalid",
-                "vendor_usage_counter": 3,
-                "_monoize_spoofed_usage": true
-            })
-            .as_object()
-            .expect("usage object"),
-        );
-        assert_eq!(usage.extra_body["vendor_usage_counter"], json!(3));
-        assert!(!usage.extra_body.contains_key("_monoize_spoofed_usage"));
-    }
-
-    #[test]
-    fn chat_usage_maps_top_level_cache_read_aliases_without_adjusting_input() {
-        // DeepSeek shape: the cached subset rides a top-level usage field and
-        // `prompt_tokens` is already the inclusive total (C3-i-a).
-        let usage = parse_usage_from_chat(
-            json!({
-                "prompt_tokens": 100,
-                "completion_tokens": 5,
-                "prompt_cache_hit_tokens": 60,
-                "prompt_cache_miss_tokens": 40
-            })
-            .as_object()
-            .expect("usage object"),
-        );
-        assert_eq!(usage.input_tokens, 100);
-        assert_eq!(
-            usage
-                .input_details
-                .as_ref()
-                .expect("input details from alias")
-                .cache_read_tokens,
-            60
-        );
-        assert_eq!(usage.cached_tokens(), Some(60));
-
-        // DashScope shape.
-        let usage = parse_usage_from_chat(
-            json!({
-                "input_tokens": 80,
-                "output_tokens": 4,
-                "input_cache_read": 30
-            })
-            .as_object()
-            .expect("usage object"),
-        );
-        assert_eq!(usage.input_tokens, 80);
-        assert_eq!(
-            usage
-                .input_details
-                .expect("input details from alias")
-                .cache_read_tokens,
-            30
-        );
-
-        // The standard nested field keeps precedence over the top-level aliases.
-        let usage = parse_usage_from_chat(
-            json!({
-                "prompt_tokens": 50,
-                "completion_tokens": 2,
-                "prompt_tokens_details": { "cached_tokens": 7 },
-                "prompt_cache_hit_tokens": 999
-            })
-            .as_object()
-            .expect("usage object"),
-        );
-        assert_eq!(
-            usage
-                .input_details
-                .expect("input details")
-                .cache_read_tokens,
-            7
-        );
-    }
-
-    #[test]
-    fn decode_response_reads_openrouter_reasoning_details() {
-        let value = json!({
-            "id": "chatcmpl_test",
-            "model": "m",
-            "choices": [{
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {
-                    "role": "assistant",
-                    "content": "ok",
-                    "reasoning": "new_reasoning",
-                    "reasoning_details": [
-                        {
-                            "type": "reasoning.text",
-                            "text": "new_reasoning",
-                            "format": "openrouter"
-                        },
-                        {
-                            "type": "reasoning.encrypted",
-                            "data": "new_sig",
-                            "format": "openrouter"
-                        }
-                    ],
-                    "reasoning_content": "legacy_reasoning",
-                    "reasoning_opaque": "legacy_sig"
-                }
-            }]
-        });
-
-        let decoded = decode_response(&value).expect("decode_response should succeed");
-        let parts = output_parts(&decoded.output);
-        let reasoning = parts
-            .iter()
-            .filter_map(|part| match part {
-                Part::Reasoning { .. } => Some(part),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(reasoning.len(), 2);
-        assert!(matches!(
-            reasoning[0],
-            Part::Reasoning {
-                content: Some(content),
-                encrypted: None,
-                extra_body,
-                ..
-            } if content == "new_reasoning"
-                && extra_body.get(CHAT_REASONING_DETAIL_EXTRA_KEY)
-                    == Some(&value["choices"][0]["message"]["reasoning_details"][0])
-        ));
-        assert!(matches!(
-            reasoning[1],
-            Part::Reasoning {
-                content: None,
-                encrypted: Some(Value::String(sig)),
-                extra_body,
-                ..
-            } if sig == "new_sig"
-                && extra_body.get(CHAT_REASONING_DETAIL_EXTRA_KEY)
-                    == Some(&value["choices"][0]["message"]["reasoning_details"][1])
-        ));
-    }
-
-    #[test]
-    fn decode_response_accepts_legacy_reasoning_fields() {
-        let value = json!({
-            "id": "chatcmpl_test",
-            "model": "m",
-            "choices": [{
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {
-                    "role": "assistant",
-                    "content": "ok",
-                    "reasoning_content": "legacy_reasoning",
-                    "reasoning_opaque": "legacy_sig"
-                }
-            }]
-        });
-
-        let decoded = decode_response(&value).expect("decode_response should succeed");
-        let parts = output_parts(&decoded.output);
-        assert!(parts.iter().any(|part| matches!(
-            part,
-            Part::Reasoning {
-                content: Some(content),
-                encrypted: None,
-                ..
-            } if content == "legacy_reasoning"
-        )));
-        assert!(parts.iter().any(|part| matches!(
-            part,
-            Part::Reasoning {
-                content: None,
-                encrypted: Some(Value::String(sig)),
-                ..
-            } if sig == "legacy_sig"
-        )));
-    }
-
-    #[test]
-    fn decode_response_accepts_real_upstream_gpt5_reasoning_payload_shape() {
-        let value = json!({
-            "id": "resp_real_shape",
-            "object": "chat.completion",
-            "created": 1773667800i64,
-            "model": "gpt-5.4-2026-03-05",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "One valid combination is 8 packs of pencils and 4 packs of pens.",
-                    "reasoning": "plain reasoning",
-                    "reasoning_content": "plain reasoning",
-                    "reasoning_details": [
-                        {
-                            "type": "reasoning.text",
-                            "text": "plain reasoning"
-                        },
-                        {
-                            "type": "reasoning.encrypted",
-                            "data": "opaque_sig_payload"
-                        }
-                    ],
-                    "reasoning_opaque": "opaque_sig_payload"
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 52,
-                "completion_tokens": 287,
-                "total_tokens": 339,
-                "prompt_tokens_details": { "cached_tokens": 0 },
-                "completion_tokens_details": { "reasoning_tokens": 210 }
-            }
-        });
-
-        let decoded = decode_response(&value).expect("decode_response should succeed");
-        let parts = output_parts(&decoded.output);
-        assert!(parts.iter().any(|part| matches!(
-            part,
-            Part::Reasoning {
-                content: Some(content),
-                encrypted: None,
-                ..
-            } if content == "plain reasoning"
-        )));
-        assert!(parts.iter().any(|part| matches!(
-            part,
-            Part::Reasoning {
-                content: None,
-                encrypted: Some(Value::String(sig)),
-                ..
-            } if sig == "opaque_sig_payload"
-        )));
-    }
-
-    #[test]
-    fn decode_response_accepts_content_array_tool_call_blocks() {
-        let value = json!({
-            "id": "chatcmpl_test",
-            "model": "m",
-            "choices": [{
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        { "type": "text", "text": "before tool" },
-                        { "type": "tool_call", "id": "call_1", "name": "lookup", "arguments": { "q": 1 } }
-                    ]
-                }
-            }]
-        });
-
-        let decoded = decode_response(&value).expect("decode_response should succeed");
-        let parts = output_parts(&decoded.output);
-
-        assert!(parts.iter().any(|part| {
-            matches!(part, Part::Text { content, .. } if content == "before tool")
-        }));
-        assert!(parts.iter().any(|part| {
-            matches!(
-                part,
-                Part::ToolCall {
-                    call_id,
-                    name,
-                    arguments,
-                    ..
-                } if call_id == "call_1" && name == "lookup" && arguments == "{\"q\":1}"
-            )
-        }));
-    }
-
-    #[test]
-    fn decode_response_accepts_content_array_tool_use_blocks() {
-        let value = json!({
-            "id": "chatcmpl_test",
-            "model": "m",
-            "choices": [{
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        { "type": "text", "text": "before tool" },
-                        { "type": "tool_use", "id": "call_1", "name": "lookup", "input": { "q": 1 } }
-                    ]
-                }
-            }]
-        });
-
-        let decoded = decode_response(&value).expect("decode_response should succeed");
-        let parts = output_parts(&decoded.output);
-
-        assert!(parts.iter().any(|part| {
-            matches!(part, Part::Text { content, .. } if content == "before tool")
-        }));
-        assert!(parts.iter().any(|part| {
-            matches!(
-                part,
-                Part::ToolCall {
-                    call_id,
-                    name,
-                    arguments,
-                    ..
-                } if call_id == "call_1" && name == "lookup" && arguments == "{\"q\":1}"
-            )
-        }));
-    }
-
-    #[test]
-    fn decode_response_rejects_top_level_openrouter_error() {
-        let error = decode_response(&json!({
-            "error": {
-                "message": "provider exhausted",
-                "code": 503,
-                "type": "upstream_error"
-            }
-        }))
-        .expect_err("top-level error must not decode as a successful response");
-
-        assert!(error.contains("provider exhausted"), "{error}");
-        assert!(error.contains("503"), "{error}");
-    }
-
-    #[test]
-    fn decode_response_rejects_choice_error() {
-        let error = decode_response(&json!({
-            "id": "chatcmpl_error",
-            "model": "openrouter/model",
-            "choices": [{
-                "index": 0,
-                "message": { "role": "assistant", "content": "" },
-                "finish_reason": "error",
-                "native_finish_reason": "error",
-                "error": { "message": "mid-generation failure", "code": 502 }
-            }]
-        }))
-        .expect_err("choice error must not decode as a successful response");
-
-        assert!(error.contains("mid-generation failure"), "{error}");
-        assert!(error.contains("502"), "{error}");
-    }
-
-    #[test]
-    fn decode_response_preserves_unknown_native_finish_reason_and_choice_fields() {
-        let decoded = decode_response(&json!({
-            "id": "chatcmpl_deepseek",
-            "model": "deepseek-v4",
-            "choices": [{
-                "index": 0,
-                "message": { "role": "assistant", "content": "partial" },
-                "finish_reason": "insufficient_system_resource",
-                "native_finish_reason": "insufficient_system_resource",
-                "provider_marker": "deepseek"
-            }]
-        }))
-        .expect("resource finish reason is a terminal response, not a parse error");
-
-        assert_eq!(decoded.finish_reason, Some(FinishReason::Other));
-        assert_eq!(
-            decoded
-                .extra_body
-                .get(CHAT_NATIVE_FINISH_REASON_EXTRA_KEY)
-                .and_then(Value::as_str),
-            Some("insufficient_system_resource")
-        );
-        assert_eq!(
-            decoded
-                .extra_body
-                .get(CHAT_CHOICE_EXTRA_BODY_KEY)
-                .and_then(Value::as_object)
-                .and_then(|extra| extra.get("provider_marker")),
-            Some(&json!("deepseek"))
-        );
-    }
-
-    #[test]
-    fn chat_file_and_audio_parts_decode_to_typed_media() {
-        let decoded = decode_request(&json!({
-            "model": "gpt-4o-audio-preview",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "type": "file", "file": { "file_id": "file_openai_1" } },
-                    {
-                        "type": "file",
-                        "file": { "file_data": "ZmlsZQ==", "filename": "note.txt" }
-                    },
-                    {
-                        "type": "input_audio",
-                        "input_audio": { "data": "YXVkaW8=", "format": "mp3" }
-                    }
-                ]
-            }]
-        }))
-        .expect("chat request decodes");
-
-        assert!(matches!(
-            &decoded.input[0],
-            Node::File {
-                source: crate::urp::FileSource::FileId { file_id },
-                extra_body,
-                ..
-            } if file_id == "file_openai_1"
-                && extra_body.get(crate::urp::FILE_ID_ORIGIN_EXTRA_KEY)
-                    == Some(&json!(crate::urp::FILE_ID_ORIGIN_OPENAI))
-        ));
-        assert!(matches!(
-            &decoded.input[1],
-            Node::File {
-                source: crate::urp::FileSource::Base64 {
-                    filename: Some(filename),
-                    media_type,
-                    data,
-                },
-                ..
-            } if filename == "note.txt"
-                && media_type == "application/octet-stream"
-                && data == "ZmlsZQ=="
-        ));
-        assert!(matches!(
-            &decoded.input[2],
-            Node::Audio {
-                source: crate::urp::AudioSource::Base64 { media_type, data },
-                ..
-            } if media_type == "audio/mpeg" && data == "YXVkaW8="
-        ));
-    }
-
-    #[test]
-    fn chat_request_rejects_multiple_choices() {
-        let error = decode_request(&json!({
-            "model": "gpt-5",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "n": 2
-        }))
-        .expect_err("URP cannot represent multiple candidates");
-
-        assert_eq!(error, "Chat Completions n must be the integer 1");
-    }
-
-    #[test]
-    fn chat_request_decodes_typed_stop_shape_and_verbosity() {
-        let scalar = decode_request(&json!({
-            "model": "gpt-5.4",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "stop": "END",
-            "verbosity": "low"
-        }))
-        .expect("decode scalar stop");
-        assert_eq!(scalar.stop, Some(StopControl::Single("END".to_string())));
-        assert_eq!(scalar.verbosity.as_deref(), Some("low"));
-
-        let multiple = decode_request(&json!({
-            "model": "gpt-5.4",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "stop": ["ONE", "TWO"]
-        }))
-        .expect("decode array stop");
-        assert_eq!(
-            multiple.stop,
-            Some(StopControl::Multiple(vec![
-                "ONE".to_string(),
-                "TWO".to_string()
-            ]))
-        );
-    }
-
-    #[test]
-    fn unknown_typed_text_block_remains_provider_item_and_round_trips() {
-        let native_block = json!({
-            "type": "vendor_text",
-            "text": "must stay opaque",
-            "vendor": { "revision": 2 }
-        });
-        let decoded = decode_request(&json!({
-            "model": "openrouter/model",
-            "messages": [{
-                "role": "user",
-                "content": [native_block.clone()]
-            }]
-        }))
-        .expect("decode unknown Chat block");
-
-        assert!(matches!(
-            &decoded.input[0],
-            Node::ProviderItem {
-                origin_protocol: ProviderProtocol::ChatCompletion,
-                item_type,
-                body,
-                ..
-            } if item_type == "vendor_text" && body == &native_block
-        ));
-        let encoded = crate::urp::encode::openai_chat::encode_request(&decoded, "openrouter/model");
-        assert_eq!(encoded["messages"][0]["content"][0], native_block);
-    }
-
-    #[test]
-    fn chat_audio_only_response_replays_message_audio_and_null_content() {
-        let audio = json!({
-            "id": "audio_1",
-            "data": "YXVkaW8=",
-            "expires_at": 1_900_000_000,
-            "transcript": "hello",
-            "vendor": { "codec": "pcm16" }
-        });
-        let decoded = decode_response(&json!({
-            "id": "chatcmpl_audio",
-            "model": "gpt-4o-audio-preview",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "audio": audio.clone()
-                },
-                "finish_reason": "stop"
-            }]
-        }))
-        .expect("decode audio-only response");
-        assert!(matches!(
-            &decoded.output[0],
-            Node::ProviderItem {
-                origin_protocol: ProviderProtocol::ChatCompletion,
-                item_type,
-                body,
-                extra_body,
-                ..
-            } if item_type == "audio"
-                && body == &audio
-                && extra_body.get(crate::urp::CHAT_MESSAGE_AUDIO_EXTRA_KEY)
-                    == Some(&Value::Bool(true))
-        ));
-
-        let encoded =
-            crate::urp::encode::openai_chat::encode_response(&decoded, "gpt-4o-audio-preview");
-        assert_eq!(encoded["choices"][0]["message"]["audio"], audio);
-        assert_eq!(encoded["choices"][0]["message"]["content"], Value::Null);
-    }
-
-    #[test]
-    fn chat_tool_choice_rejects_recursive_internal_key_spoofing() {
-        let decoded = decode_request(&json!({
-            "model": "gpt-5.4",
-            "messages": [{ "role": "user", "content": "lookup" }],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "lookup",
-                    "parameters": { "type": "object" }
-                }
-            }],
-            "tool_choice": {
-                "type": "allowed_tools",
-                "_monoize_outer_spoof": true,
-                "allowed_tools": {
-                    "mode": "required",
-                    "_monoize_wrapper_spoof": true,
-                    "tools": [{
-                        "type": "function",
-                        "_monoize_selector_spoof": true,
-                        "function": {
-                            "name": "lookup",
-                            "_monoize_nested_spoof": true
-                        }
-                    }]
-                }
-            }
-        }))
-        .expect("decode modern Chat selector");
-
-        let canonical = crate::urp::encode::tool_choice_to_value(
-            decoded.tool_choice.as_ref().expect("tool choice"),
-        );
-        assert_eq!(
-            canonical,
-            json!({
-                "type": "allowed_tools",
-                "allowed_tools": {
-                    "mode": "required",
-                    "tools": [{
-                        "type": "function",
-                        "function": { "name": "lookup" }
-                    }]
-                }
-            })
-        );
-
-        let chat = crate::urp::encode::openai_chat::encode_request(&decoded, "gpt-5.4");
-        let responses = crate::urp::encode::openai_responses::encode_request(&decoded, "gpt-5.4");
-        assert!(!chat["tool_choice"].to_string().contains("_monoize_"));
-        assert!(!responses["tool_choice"].to_string().contains("_monoize_"));
-    }
-
-    #[test]
-    fn legacy_chat_function_choice_provenance_rejects_recursive_internal_key_spoofing() {
-        let mut decoded = decode_request(&json!({
-            "model": "gpt-4-0613",
-            "messages": [{ "role": "user", "content": "lookup" }],
-            "functions": [{
-                "name": "lookup",
-                "parameters": { "type": "object" }
-            }],
-            "function_call": {
-                "name": "lookup",
-                "_monoize_outer_spoof": true,
-                "vendor_selector": {
-                    "keep": 1,
-                    "_monoize_nested_spoof": true
-                }
-            }
-        }))
-        .expect("decode deprecated Chat selector");
-
-        let raw = decoded
-            .extra_body
-            .get_mut(CHAT_LEGACY_FUNCTION_CHOICE_EXTRA_KEY)
-            .expect("legacy selector provenance");
-        assert_eq!(
-            raw,
-            &json!({ "name": "lookup", "vendor_selector": { "keep": 1 } })
-        );
-        raw.as_object_mut().expect("legacy selector object").insert(
-            "encoder_probe".to_string(),
-            json!({ "keep": 2, "_monoize_encoder_spoof": true }),
-        );
-
-        let encoded = crate::urp::encode::openai_chat::encode_request(&decoded, "gpt-4-0613");
-        assert_eq!(
-            encoded["function_call"],
-            json!({
-                "name": "lookup",
-                "vendor_selector": { "keep": 1 },
-                "encoder_probe": { "keep": 2 }
-            })
-        );
-        assert!(!encoded["function_call"].to_string().contains("_monoize_"));
-        assert!(encoded.get("tool_choice").is_none());
-    }
-
-    #[test]
-    fn deprecated_function_call_and_function_result_round_trip_as_legacy_messages() {
-        let decoded = decode_request(&json!({
-            "model": "gpt-4-0613",
-            "messages": [
-                { "role": "user", "content": "weather" },
-                {
-                    "role": "assistant",
-                    "content": null,
-                    "function_call": {
-                        "name": "lookup",
-                        "arguments": "{\"city\":\"Taipei\"}"
-                    }
-                },
-                {
-                    "role": "function",
-                    "name": "lookup",
-                    "content": "sunny"
-                }
-            ]
-        }))
-        .expect("decode deprecated function lifecycle");
-
-        assert!(decoded.input.iter().any(|node| matches!(
-            node,
-            Node::ToolCall { call_id, name, arguments, extra_body, .. }
-                if call_id == "legacy_function:lookup"
-                    && name == "lookup"
-                    && arguments == "{\"city\":\"Taipei\"}"
-                    && extra_body.get(CHAT_LEGACY_FUNCTION_CALL_EXTRA_KEY)
-                        == Some(&Value::Bool(true))
-        )));
-        assert!(decoded.input.iter().any(|node| matches!(
-            node,
-            Node::ToolResult { call_id, content, extra_body, .. }
-                if call_id == "legacy_function:lookup"
-                    && matches!(&content[0], ToolResultContent::Text { text, .. } if text == "sunny")
-                    && extra_body.get(CHAT_LEGACY_FUNCTION_RESULT_EXTRA_KEY)
-                        == Some(&json!("lookup"))
-        )));
-
-        let encoded = crate::urp::encode::openai_chat::encode_request(&decoded, "gpt-4-0613");
-        assert_eq!(
-            encoded["messages"][1]["function_call"],
-            json!({ "name": "lookup", "arguments": "{\"city\":\"Taipei\"}" })
-        );
-        assert!(encoded["messages"][1].get("tool_calls").is_none());
-        assert_eq!(encoded["messages"][2]["role"], json!("function"));
-        assert_eq!(encoded["messages"][2]["name"], json!("lookup"));
-        assert_eq!(encoded["messages"][2]["content"], json!("sunny"));
-        assert!(encoded["messages"][2].get("tool_call_id").is_none());
-
-        let response = decode_response(&json!({
-            "id": "chatcmpl_legacy",
-            "model": "gpt-4-0613",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "function_call": {
-                        "name": "lookup",
-                        "arguments": "{\"city\":\"Taipei\"}"
-                    }
-                },
-                "finish_reason": "function_call"
-            }]
-        }))
-        .expect("decode deprecated function response");
-        let encoded_response =
-            crate::urp::encode::openai_chat::encode_response(&response, "gpt-4-0613");
-        assert_eq!(
-            encoded_response["choices"][0]["message"]["function_call"],
-            json!({ "name": "lookup", "arguments": "{\"city\":\"Taipei\"}" })
-        );
-        assert_eq!(
-            encoded_response["choices"][0]["finish_reason"],
-            json!("function_call")
-        );
-        assert_eq!(
-            encoded_response["choices"][0]["message"]["content"],
-            Value::Null
-        );
-        assert!(
-            encoded_response["choices"][0]["message"]
-                .get("tool_calls")
-                .is_none()
-        );
-    }
 }

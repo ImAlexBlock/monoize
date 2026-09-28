@@ -71,28 +71,29 @@ fn terminal_output_node_matches_state(node: &urp::Node, state: &StreamedNodeStat
         urp::Node::Text { id, .. }
         | urp::Node::Audio { id, .. }
         | urp::Node::File { id, .. }
-        | urp::Node::Refusal { id, .. }
-        => {
+        | urp::Node::Refusal { id, .. } => {
             state.zone == ResponsesOutputZone::Message
                 && ((!state.item_id.is_empty() && id.as_deref() == Some(state.item_id.as_str()))
                     || (header_family_matches && id.is_none())
                     || (state.item_id.is_empty() && header_family_matches))
         }
         urp::Node::Image { id, extra_body, .. } => {
-            let expected_zone = if extra_body
-                .contains_key(urp::RESPONSES_IMAGE_GENERATION_CALL_EXTRA_KEY)
-            {
-                ResponsesOutputZone::ImageGenerationCall
-            } else {
-                ResponsesOutputZone::Message
-            };
+            let expected_zone =
+                if extra_body.contains_key(urp::RESPONSES_IMAGE_GENERATION_CALL_EXTRA_KEY) {
+                    ResponsesOutputZone::ImageGenerationCall
+                } else {
+                    ResponsesOutputZone::Message
+                };
             state.zone == expected_zone
                 && ((!state.item_id.is_empty() && id.as_deref() == Some(state.item_id.as_str()))
                     || (header_family_matches && id.is_none())
                     || (state.item_id.is_empty() && header_family_matches))
         }
-        urp::Node::ProviderItem { id, .. } => {
-            state.zone == ResponsesOutputZone::ProviderItem
+        urp::Node::ProviderItem { id, extra_body, .. } => {
+            let expected_zone = if extra_body.contains_key(urp::decode::openai_responses::RESPONSES_CONTENT_PART_SHAPE_KEY) {
+                ResponsesOutputZone::Message
+            } else { ResponsesOutputZone::ProviderItem };
+            state.zone == expected_zone
                 && ((!state.item_id.is_empty() && id.as_deref() == Some(state.item_id.as_str()))
                     || (header_family_matches && id.is_none())
                     || (state.item_id.is_empty() && header_family_matches))
@@ -150,7 +151,7 @@ fn synthesize_terminal_node_from_state(state: &StreamedNodeState) -> Option<urp:
     let completed_item = state.completed_item.as_ref();
 
     match header {
-        urp::NodeHeader::Reasoning { id } => {
+        urp::NodeHeader::Reasoning { metadata, id } => {
             let content = completed_item
                 .and_then(|item| item.get("text"))
                 .and_then(Value::as_str)
@@ -179,6 +180,7 @@ fn synthesize_terminal_node_from_state(state: &StreamedNodeState) -> Option<urp:
                 return None;
             }
             Some(urp::Node::Reasoning {
+                metadata: metadata.clone(),
                 id: id
                     .clone()
                     .or_else(|| (!state.item_id.is_empty()).then(|| state.item_id.clone())),
@@ -193,11 +195,13 @@ fn synthesize_terminal_node_from_state(state: &StreamedNodeState) -> Option<urp:
             })
         }
         urp::NodeHeader::ToolCall {
+            namespace, signature,
             id,
             tool_type,
             call_id,
             name,
         } => Some(urp::Node::ToolCall {
+            namespace: namespace.clone(), signature: signature.clone(),
             id: id
                 .clone()
                 .or_else(|| (!state.item_id.is_empty()).then(|| state.item_id.clone())),
@@ -218,12 +222,13 @@ fn synthesize_terminal_node_from_state(state: &StreamedNodeState) -> Option<urp:
             extra_body: state.node_extra_body.clone(),
         }),
         urp::NodeHeader::ProviderItem {
+            body: start_body,
             id,
             origin_protocol,
             item_type,
             role,
         } => {
-            let body = completed_item.cloned().unwrap_or_else(|| {
+            let body = completed_item.cloned().or_else(|| start_body.clone()).unwrap_or_else(|| {
                 let mut obj = Map::new();
                 obj.insert("type".to_string(), Value::String(item_type.clone()));
                 Value::Object(obj)

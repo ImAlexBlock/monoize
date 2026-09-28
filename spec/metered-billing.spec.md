@@ -491,3 +491,9 @@ MB-ST1. Studio `image`/`video` steps charge a fixed per-run price: `ceil(base_na
 MB-ST2. Studio `llm` steps charge by actual token usage from the rate snapshot resolved for `studio_agent_model`: `input_tokens × in_rate + output_tokens × out_rate`, settled on completion, ledger reason `studio_llm_charge`.
 
 MB-ST3. Public API `/v1/videos` jobs bill the key owner's wallet via MB-ST1; key window limits do not apply in this version.
+
+## Typed usage iterations
+
+MB-U1. If canonical Usage contains a non-empty iterations list, settlement MUST sum the inclusive counters of those iterations. Settlement MUST NOT add the primary-generation top-level counters again.
+MB-U2. Context tiers, token line quantities, and usage breakdowns MUST use the same aggregate. Native protocol response encoders MAY retain primary-generation counters where required by the target protocol.
+MB-U3. If iterations are absent or empty, settlement MUST use the top-level counters without changing existing price, currency, or rounding rules.

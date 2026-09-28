@@ -2,8 +2,8 @@
 
 ## 0. Status
 
-- Version: `1.5.0`
-- Scope: Six request-phase `cache_*` domain transforms that automatically optimize provider prompt caching by injecting Anthropic `cache_control` markers, OpenAI prompt-cache request fields and content breakpoints, and user identity fields, and by relocating per-request agent metadata out of the cacheable prompt prefix.
+- Version: `1.6.0`
+- Scope: Seven request-phase `cache_*` domain transforms that automatically optimize provider prompt caching by injecting Anthropic `cache_control` markers, OpenAI prompt-cache request fields and content breakpoints, and user identity fields, and by relocating per-request agent metadata out of the cacheable prompt prefix.
 - Dependency: URP Transform System (see `urp-transform-system.spec.md`, TF-1 through TF-7b; historical IDs map to the canonical `cache_*` IDs through TF-17).
 
 ## 1. Shared Definitions
@@ -12,9 +12,9 @@ DEF-1. An **Anthropic cache breakpoint** is any `Node` in `req.input` whose `ext
 
 DEF-2. The **Anthropic cache breakpoint count** of a request is the total number of Anthropic cache breakpoints across all nodes in `req.input`.
 
-DEF-3. The **Anthropic max cache breakpoint limit** is `4`. No transform in this specification SHALL increase the Anthropic cache breakpoint count beyond `4`.
+DEF-3. The **Anthropic cache slot count** is the Anthropic cache breakpoint count plus one when `req.extra_body` contains top-level `"cache_control"`. The maximum is `4`. No transform in this specification SHALL increase the slot count beyond `4`.
 
-DEF-4. The **Monoize username** is the string value of `req.extra_body["__monoize_username"]`, if present and non-null. The **Monoize API key ID** is the string value of `req.extra_body["__monoize_api_key_id"]`, if present and non-null. These fields are injected by the request handler before transforms run and stripped after transforms complete. Transforms MUST NOT assume their presence.
+DEF-4. The **Monoize username** is `req.context.username`. The **Monoize API key ID** is `req.context.api_key_id`. These optional fields come from authenticated runtime state. JSON decoding MUST NOT populate them, and protocol encoders MUST NOT emit them.
 
 DEF-5. The canonical Anthropic cache control value is `{"type": "ephemeral"}`.
 
@@ -40,7 +40,7 @@ ACUID-3. Config schema: empty object, no configuration parameters.
 
 ### 2.2 Preconditions
 
-ACUID-4. If `req.extra_body["__monoize_username"]` is absent or not a string, the transform is a no-op.
+ACUID-4. If `req.context.username` is absent, the transform is a no-op.
 
 ACUID-5. If no Anthropic cache breakpoint exists anywhere in `req.input` (i.e., Anthropic cache breakpoint count = 0), the transform is a no-op.
 
@@ -64,7 +64,7 @@ ACS-3. Config schema: empty object, no configuration parameters.
 
 ### 3.2 Preconditions
 
-ACS-4. If the Anthropic cache breakpoint count is `>= 4`, the transform is a no-op.
+ACS-4. If the Anthropic cache slot count is `>= 4`, the transform is a no-op.
 
 ACS-5. If `req.input` contains no node with `role == System` or `role == Developer`, the transform is a no-op.
 
@@ -92,36 +92,47 @@ ACTU-3. Config schema: empty object, no configuration parameters.
 
 ### 4.2 Preconditions
 
-ACTU-4. Let `last_node` = the last element of `req.input`. If `last_node` is not `Node::ToolResult`, the transform is a no-op. (The request is not a tool-result submission.)
+ACTU-4. Let `last_node` = the last element of `req.input`. If `last_node` is not `Node::ToolResult`, the transform is a no-op.
 
-ACTU-5. If the Anthropic cache breakpoint count is `>= 4`, the transform is a no-op.
+ACTU-5. If the Anthropic cache slot count is `>= 4`, the transform is a no-op.
 
 ### 4.3 Target Resolution
 
-ACTU-6. Starting from `last_node` and scanning backwards through `req.input`:
-1. Skip contiguous trailing `Node::ToolResult` entries.
-2. The first non-skipped node MUST be `Node::ToolCall` with assistant role. If this condition is not met, the transform is a no-op.
-3. Let `tool_call_idx` = the index of this assistant tool-call node.
+ACTU-6. The target is `last_node`. A trailing run of tool results MUST be marked only at its final node.
 
-ACTU-7. Scan backwards from `tool_call_idx - 1` to find the first node with `role == User`. Let `user_idx` = that index. If no such node exists, the transform is a no-op.
-
-ACTU-8. If `req.input[user_idx]` already contains a `"cache_control"` key in its `extra_body`, the transform is a no-op.
+ACTU-7. If `last_node.extra_body` already contains `"cache_control"`, the transform is a no-op.
 
 ### 4.4 Behavior
 
-ACTU-9. The transform MUST insert `"cache_control": {"type": "ephemeral"}` into the `extra_body` of `req.input[user_idx]`.
+ACTU-9. The transform MUST insert `"cache_control": {"type": "ephemeral"}` into `last_node.extra_body`.
 
 ACTU-10. After insertion, the Anthropic cache breakpoint count increases by exactly `1`.
 
 ACTU-11. The transform MUST NOT modify any other node, any node content, `req.model`, or `req.user`.
 
+## 4a. `cache_anthropic_auto`
+
+ACAA-1. Transform type ID: `"cache_anthropic_auto"`. Phase: `Request` only. Supported scopes: `Provider` and `ApiKey`. Config schema: empty object.
+
+ACAA-2. If the selected upstream provider type is not `messages`, the transform is a no-op.
+
+ACAA-3. If `req.extra_body` already contains `"cache_control"`, the transform is a no-op.
+
+ACAA-4. If the Anthropic cache breakpoint count is `>= 4`, the transform is a no-op.
+
+ACAA-5. Otherwise, the transform MUST set `req.extra_body["cache_control"]` to `{"type": "ephemeral"}`. The Messages encoder MUST emit this field at the top level of the upstream request JSON.
+
+ACAA-6. The transform MUST NOT modify `req.input`, `req.tools`, `req.model`, or `req.user`.
+
+ACAA-7. A gateway that does not accept top-level `cache_control` may reject the upstream request. Operators MUST enable this transform only on Channels that support Anthropic automatic caching.
+
 ## 5. Context Injection Lifecycle
 
-CTX-1. Before request-phase transforms execute, the request handler MUST inject `req.extra_body["__monoize_username"]` from `auth.username` when `auth.username` is `Some(...)`.
+CTX-1. Before request-phase transforms execute, the request handler MUST set `req.context.username` to `auth.username`.
 
-CTX-2. Before request-phase transforms execute, the request handler MUST inject `req.extra_body["__monoize_api_key_id"]` from `auth.api_key_id` when `auth.api_key_id` is `Some(...)`.
+CTX-2. Before request-phase transforms execute, the request handler MUST set `req.context.api_key_id` to `auth.api_key_id`.
 
-CTX-3. After all request-phase transforms complete (provider, global, and API-key scopes), the request handler MUST remove `req.extra_body["__monoize_username"]` and `req.extra_body["__monoize_api_key_id"]` to prevent leaking internal fields to upstream providers.
+CTX-3. The runtime context MUST be excluded from JSON deserialization and all upstream encoding. Client keys named `__monoize_username` and `__monoize_api_key_id` MUST NOT influence transform identity or appear upstream.
 
 CTX-4. `auth.username` is populated from `User.username` during API key authentication. If authentication does not resolve to a user record, `auth.username` is `None`.
 
@@ -162,13 +173,13 @@ ACOP-11. If `key_mode = "prefix"`, `key_material["tools"]` MUST equal `req.tools
 
 ACOP-12. If `key_mode = "prefix"`, `key_material["response_format"]` MUST equal `req.response_format` when `req.response_format` is present. It MUST be absent when `req.response_format` is absent.
 
-ACOP-13. If `key_mode = "prefix"` and `include_user_in_key = true`, `key_material["user"]` MUST equal `req.user` when `req.user` is present. If `req.user` is absent, it MUST equal `req.extra_body["__monoize_username"]` when that value is a string. If both are absent, `key_material["user"]` MUST be absent.
+ACOP-13. If `key_mode = "prefix"` and `include_user_in_key = true`, `key_material["user"]` MUST equal `req.user` when `req.user` is present. If `req.user` is absent, it MUST equal `req.context.username` when that value is present. If both are absent, `key_material["user"]` MUST be absent.
 
 ACOP-14. If `key_mode = "prefix"` and `include_full_input_in_key = true`, `key_material["input"]` MUST equal `req.input` and `key_material["prefix_nodes"]` MUST be absent.
 
 ACOP-14a. If `key_mode = "identity"`, `key_material` MUST contain exactly:
-1. `username`, equal to `req.extra_body["__monoize_username"]` when that value is a string, otherwise JSON null; and
-2. `api_key_id`, equal to `req.extra_body["__monoize_api_key_id"]` when that value is a string, otherwise JSON null.
+1. `username`, equal to `req.context.username` when present, otherwise JSON null; and
+2. `api_key_id`, equal to `req.context.api_key_id` when present, otherwise JSON null.
 
 ACOP-14b. If `key_mode = "identity"`, `key_material` MUST NOT include `req.model`, `req.input`, `req.tools`, `req.response_format`, `req.user`, or any node content.
 
@@ -213,9 +224,9 @@ ACOTU-9. Starting from `last_node`, scan backwards through the contiguous traili
 ACOTU-10. A **tool-result run** is a maximal contiguous sequence of one or more `Node::ToolResult` entries whose immediately preceding node is `Node::ToolCall`. Scan all tool-result runs in reverse request order. Within each run, scan its result nodes and their `content` entries in reverse order. The first content entry in each run that satisfies one of the following conditions is that run's candidate content block:
 1. every `ToolResultContent::Text`;
 2. `ToolResultContent::Image` with `ImageSource::Url` or `ImageSource::Base64`;
-3. `ToolResultContent::Image` with `ImageSource::FileId` whose `extra_body["_monoize_file_id_origin"]` equals `"openai"`;
+3. `ToolResultContent::Image` with `ImageSource::FileId` whose typed `metadata.resource` provenance is compatible with the Responses protocol;
 4. `ToolResultContent::File` with `FileSource::Url` or `FileSource::Base64`; or
-5. `ToolResultContent::File` with `FileSource::FileId` whose `extra_body["_monoize_file_id_origin"]` equals `"openai"`.
+5. `ToolResultContent::File` with `FileSource::FileId` whose typed `metadata.resource` provenance is compatible with the Responses protocol.
 
 `ToolResultContent::File` with `FileSource::Text` or `FileSource::Content` and every `ToolResultContent::ProviderItem` are not eligible. A run with no eligible content block produces no candidate. If no run produces a candidate, the transform is a no-op.
 
@@ -428,6 +439,8 @@ extract.
 
 ## 8. Transform Ordering Guidance
 
+ORD-1a. `cache_anthropic_auto` consumes one Anthropic cache slot. Operators MAY combine it with at most three explicit node breakpoints.
+
 ORD-1. `cache_anthropic_system` SHOULD be ordered before `cache_anthropic_tool_use` in the transform rule list, so that system prompt caching takes priority when approaching the 4-breakpoint limit.
 
 ORD-2. `cache_user_id` has no ordering dependency relative to the other transforms; it does not consume cache breakpoints.
@@ -448,10 +461,10 @@ ORD-9. `cache_prefix_stabilize` with the built-in line set makes `prompt_strip_a
 
 ## 9. Invariants
 
-INV-1. No transform in this specification shall produce a request whose Anthropic cache breakpoint count exceeds `4`.
+INV-1. No transform in this specification SHALL increase the Anthropic cache slot count above `4`. Existing requests above the limit MUST remain unchanged by cache-marker insertion.
 
 INV-2. No transform in this specification shall produce a request whose OpenAI explicit cache breakpoint count exceeds the limit defined by DEF-9.
 
 INV-3. No transform in this specification shall overwrite an existing `cache_control`, `prompt_cache_breakpoint`, `metadata.user_id`, `req.user`, `prompt_cache_key`, or `prompt_cache_retention` value.
 
-INV-4. All five transforms are idempotent: applying the same transform twice to the same request produces the same result as applying it once.
+INV-4. All seven transforms are idempotent: applying the same transform twice to the same request produces the same result as applying it once.

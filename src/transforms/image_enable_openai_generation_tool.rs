@@ -2,7 +2,7 @@ use crate::transforms::{
     NoState, Phase, Transform, TransformConfig, TransformEntry, TransformError,
     TransformRuntimeContext, TransformScope, TransformState, UrpData,
 };
-use crate::urp::{ToolChoice, ToolDefinition};
+use crate::urp::{ImageGenerationOptions, ToolChoice, ToolDefinition};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -127,6 +127,21 @@ impl Transform for ImageEnableOpenAiGenerationToolTransform {
         let UrpData::Request(req) = data else {
             return Ok(());
         };
+        let mut legacy_image_options = HashMap::new();
+        for key in ImageGenerationOptions::KEYS {
+            if key == "background" && req.extra_body.get(key).is_some_and(Value::is_boolean) {
+                continue;
+            }
+            if let Some(value) = req.extra_body.remove(key) {
+                legacy_image_options.insert(key.to_owned(), value);
+            }
+        }
+        if req.image_generation.is_none() && !legacy_image_options.is_empty() {
+            req.image_generation = Some(
+                ImageGenerationOptions::take_from_extra(&mut legacy_image_options)
+                    .map_err(TransformError::Apply)?,
+            );
+        }
         if cfg.force_stream {
             req.stream = Some(true);
         }
@@ -136,56 +151,64 @@ impl Transform for ImageEnableOpenAiGenerationToolTransform {
             })));
         }
 
+        let default_partial_images = cfg.force_stream
+            && !req
+                .image_generation
+                .as_ref()
+                .is_some_and(|options| options.partial_images.is_some());
         let tools = req.tools.get_or_insert_with(Vec::new);
-        if cfg.force_stream {
-            let mut found_existing = false;
-            for tool in tools
-                .iter_mut()
-                .filter(|tool| tool.tool_type == "image_generation")
+        let mut found_existing = false;
+        for tool in tools
+            .iter_mut()
+            .filter(|tool| tool.tool_type == "image_generation")
+        {
+            found_existing = true;
+            if default_partial_images
+                && !tool.extra_body.contains_key("partial_images")
+                && !tool
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.get("partial_images").is_some())
             {
-                tool.extra_body.insert(
+                let config = tool.config.get_or_insert_with(|| json!({}));
+                let config = config.as_object_mut().ok_or_else(|| {
+                    TransformError::Apply("Image generation tool config must be an object.".into())
+                })?;
+                config.insert(
                     "partial_images".to_string(),
                     Value::from(FORCE_STREAM_PARTIAL_IMAGES),
                 );
-                found_existing = true;
             }
-            if found_existing {
-                return Ok(());
-            }
-        } else if tools
-            .iter()
-            .any(|tool| tool.tool_type == "image_generation")
-        {
+        }
+        if found_existing {
             return Ok(());
         }
 
-        let mut extra_body = HashMap::new();
-        for key in ["size", "quality"] {
-            if let Some(value) = req.extra_body.get(key) {
-                extra_body.insert(key.to_string(), value.clone());
-            }
-        }
-        extra_body.extend(cfg.extra.clone());
-        extra_body.insert(
+        let mut tool_config: serde_json::Map<String, Value> = cfg.extra.into_iter().collect();
+        tool_config.insert(
             "output_format".to_string(),
-            Value::String(cfg.output_format.clone()),
+            Value::String(cfg.output_format),
         );
         if let Some(action) = cfg.action.filter(|value| !value.is_empty()) {
-            extra_body.insert("action".to_string(), Value::String(action));
+            tool_config.insert("action".to_string(), Value::String(action));
         }
-        if cfg.force_stream {
-            extra_body.insert(
-                "partial_images".to_string(),
-                Value::from(FORCE_STREAM_PARTIAL_IMAGES),
-            );
+        if default_partial_images {
+            tool_config
+                .entry("partial_images".to_string())
+                .or_insert(Value::from(FORCE_STREAM_PARTIAL_IMAGES));
         }
         tools.push(ToolDefinition {
+            namespace: None,
+            tools: None,
+            origin_protocol: None,
+            config: Some(Value::Object(tool_config)),
+
             tool_type: "image_generation".to_string(),
             name: None,
             description: None,
             function: None,
             custom: None,
-            extra_body,
+            extra_body: HashMap::new(),
         });
         Ok(())
     }
@@ -227,6 +250,12 @@ mod tests {
             .expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: None,
@@ -255,11 +284,14 @@ mod tests {
             .await
             .expect("apply");
 
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_type, "image_generation");
         assert_eq!(
-            tools[0].extra_body.get("output_format"),
+            encoded["tools"][0].get("output_format"),
             Some(&json!("png"))
         );
     }
@@ -270,6 +302,12 @@ mod tests {
         let config = transform.parse_config(json!({})).expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: None,
@@ -278,6 +316,11 @@ mod tests {
             max_output_tokens: None,
             reasoning: None,
             tools: Some(vec![ToolDefinition {
+                config: Default::default(),
+                namespace: Default::default(),
+                origin_protocol: Default::default(),
+                tools: Default::default(),
+
                 tool_type: "image_generation".to_string(),
                 name: None,
                 description: None,
@@ -308,10 +351,13 @@ mod tests {
             .await
             .expect("apply");
 
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
         assert_eq!(tools.len(), 1);
         assert_eq!(
-            tools[0].extra_body.get("output_format"),
+            encoded["tools"][0].get("output_format"),
             Some(&json!("webp"))
         );
     }
@@ -331,6 +377,12 @@ mod tests {
             .expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: None,
@@ -359,16 +411,19 @@ mod tests {
             .await
             .expect("apply");
 
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].extra_body.get("quality"), Some(&json!("high")));
-        assert_eq!(tools[0].extra_body.get("size"), Some(&json!("1024x1024")));
+        assert_eq!(encoded["tools"][0].get("quality"), Some(&json!("high")));
+        assert_eq!(encoded["tools"][0].get("size"), Some(&json!("1024x1024")));
         assert_eq!(
-            tools[0].extra_body.get("background"),
+            encoded["tools"][0].get("background"),
             Some(&json!("transparent"))
         );
         assert_eq!(
-            tools[0].extra_body.get("output_format"),
+            encoded["tools"][0].get("output_format"),
             Some(&json!("png"))
         );
     }
@@ -384,6 +439,12 @@ mod tests {
             .expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: Some(false),
@@ -392,6 +453,11 @@ mod tests {
             max_output_tokens: None,
             reasoning: None,
             tools: Some(vec![ToolDefinition {
+                config: Default::default(),
+                namespace: Default::default(),
+                origin_protocol: Default::default(),
+                tools: Default::default(),
+
                 tool_type: "image_generation".to_string(),
                 name: None,
                 description: None,
@@ -420,9 +486,12 @@ mod tests {
             .expect("apply");
 
         assert_eq!(req.stream, Some(true));
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].extra_body.get("partial_images"), Some(&json!(3)));
+        assert_eq!(encoded["tools"][0].get("partial_images"), Some(&json!(0)));
     }
 
     #[tokio::test]
@@ -435,6 +504,12 @@ mod tests {
             .expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: None,
@@ -465,16 +540,20 @@ mod tests {
 
         assert!(matches!(
             req.tool_choice,
-            Some(ToolChoice::Specific(value))
-                if value == json!({ "type": "image_generation" })
+            Some(ToolChoice::Specific(ref value))
+                if value == &json!({ "type": "image_generation" })
         ));
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
+        assert_eq!(encoded["tool_choice"], json!({"type":"image_generation"}));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_type, "image_generation");
     }
 
     #[tokio::test]
-    async fn force_stream_adds_partial_images_to_inserted_tool() {
+    async fn force_stream_preserves_explicit_partial_images_on_inserted_tool() {
         let transform = ImageEnableOpenAiGenerationToolTransform;
         let config = transform
             .parse_config(json!({
@@ -484,6 +563,12 @@ mod tests {
             .expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: None,
@@ -512,11 +597,14 @@ mod tests {
             .await
             .expect("apply");
 
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
         assert_eq!(req.stream, Some(true));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_type, "image_generation");
-        assert_eq!(tools[0].extra_body.get("partial_images"), Some(&json!(3)));
+        assert_eq!(encoded["tools"][0].get("partial_images"), Some(&json!(0)));
     }
 
     #[tokio::test]
@@ -525,6 +613,12 @@ mod tests {
         let config = transform.parse_config(json!({})).expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: None,
@@ -557,15 +651,21 @@ mod tests {
             .await
             .expect("apply");
 
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].extra_body.get("size"), Some(&json!("1280x720")));
-        assert_eq!(tools[0].extra_body.get("quality"), Some(&json!("high")));
-        assert_eq!(tools[0].extra_body.get("background"), None);
+        assert_eq!(encoded["tools"][0].get("size"), Some(&json!("1280x720")));
+        assert_eq!(encoded["tools"][0].get("quality"), Some(&json!("high")));
+        assert_eq!(
+            encoded["tools"][0].get("background"),
+            Some(&json!("transparent"))
+        );
     }
 
     #[tokio::test]
-    async fn extra_size_and_quality_override_promoted_root_fields() {
+    async fn explicit_request_size_and_quality_override_tool_defaults() {
         let transform = ImageEnableOpenAiGenerationToolTransform;
         let config = transform
             .parse_config(json!({
@@ -577,6 +677,12 @@ mod tests {
             .expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: None,
@@ -608,10 +714,13 @@ mod tests {
             .await
             .expect("apply");
 
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].extra_body.get("size"), Some(&json!("1024x1024")));
-        assert_eq!(tools[0].extra_body.get("quality"), Some(&json!("low")));
+        assert_eq!(encoded["tools"][0].get("size"), Some(&json!("1280x720")));
+        assert_eq!(encoded["tools"][0].get("quality"), Some(&json!("high")));
     }
 
     #[tokio::test]
@@ -630,6 +739,12 @@ mod tests {
             .expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.4".to_string(),
             input: Vec::new(),
             stream: None,
@@ -658,13 +773,16 @@ mod tests {
             .await
             .expect("apply");
 
-        let tools = req.tools.expect("tools");
+        let tools = req.tools.as_ref().expect("tools");
+        let encoded =
+            crate::urp::encode::openai_responses::encode_request_checked(&req, &req.model)
+                .expect("encode");
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].extra_body.get("quality"), Some(&json!("high")));
+        assert_eq!(encoded["tools"][0].get("quality"), Some(&json!("high")));
         assert_eq!(
-            tools[0].extra_body.get("output_format"),
+            encoded["tools"][0].get("output_format"),
             Some(&json!("jpeg"))
         );
-        assert_eq!(tools[0].extra_body.get("action"), Some(&json!("edit")));
+        assert_eq!(encoded["tools"][0].get("action"), Some(&json!("edit")));
     }
 }

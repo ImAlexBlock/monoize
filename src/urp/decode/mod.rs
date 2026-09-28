@@ -7,9 +7,8 @@ pub mod replicate;
 
 use crate::urp::internal_legacy_bridge::Part;
 use crate::urp::{
-    AudioSource, CustomToolDefinition, FILE_ID_ORIGIN_EXTRA_KEY, FILE_ID_ORIGIN_MESSAGES,
-    FILE_ID_ORIGIN_OPENAI, FileSource, FunctionDefinition, ImageSource, Node, OrdinaryRole,
-    ToolDefinition,
+    AudioSource, CustomToolDefinition, FileSource, FunctionDefinition, ImageSource, MediaMetadata,
+    MediaResource, Node, OrdinaryRole, ProviderProtocol, ToolDefinition,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
@@ -95,6 +94,7 @@ fn string_field(obj: &Map<String, Value>, key: &str) -> Option<String> {
 
 fn parse_function_definition(function_obj: &Map<String, Value>) -> Option<FunctionDefinition> {
     Some(FunctionDefinition {
+        response_schema: None,
         name: string_field(function_obj, "name")?,
         description: string_field(function_obj, "description"),
         parameters: normalize_tool_parameters(
@@ -131,6 +131,11 @@ fn parse_custom_tool_definition(
 
 fn native_tool_definition(tool_type: String, obj: &Map<String, Value>) -> ToolDefinition {
     ToolDefinition {
+        namespace: None,
+        tools: None,
+        origin_protocol: None,
+        config: None,
+
         tool_type,
         name: string_field(obj, "name"),
         description: string_field(obj, "description"),
@@ -149,18 +154,28 @@ pub fn parse_tool_definition(raw: &Value) -> Option<ToolDefinition> {
         let function_obj = obj.get("function").and_then(|v| v.as_object());
         if let Some(function_obj) = function_obj {
             return Some(ToolDefinition {
+                namespace: string_field(obj, "namespace"),
+                tools: None,
+                origin_protocol: None,
+                config: None,
+
                 tool_type,
                 name: None,
                 description: None,
                 function: Some(parse_function_definition(function_obj)?),
                 custom: None,
-                extra_body: split_extra(obj, &["type", "function"]),
+                extra_body: split_extra(obj, &["type", "function", "namespace"]),
             });
         }
 
         let mut function = parse_function_definition(obj)?;
         function.extra_body = HashMap::new();
         return Some(ToolDefinition {
+            namespace: string_field(obj, "namespace"),
+            tools: None,
+            origin_protocol: None,
+            config: None,
+
             tool_type,
             name: None,
             description: None,
@@ -175,6 +190,7 @@ pub fn parse_tool_definition(raw: &Value) -> Option<ToolDefinition> {
                     "parameters",
                     "input_schema",
                     "strict",
+                    "namespace",
                 ],
             ),
         });
@@ -186,20 +202,31 @@ pub fn parse_tool_definition(raw: &Value) -> Option<ToolDefinition> {
                 parse_custom_tool_definition(custom_obj, &["name", "description", "format"])
             {
                 return Some(ToolDefinition {
+                    namespace: string_field(obj, "namespace"),
+                    tools: None,
+                    origin_protocol: None,
+                    config: None,
+
                     tool_type,
                     name: None,
                     description: None,
                     function: None,
                     custom: Some(custom),
-                    extra_body: split_extra(obj, &["type", "custom"]),
+                    extra_body: split_extra(obj, &["type", "custom", "namespace"]),
                 });
             }
         }
 
-        if let Some(custom) =
-            parse_custom_tool_definition(obj, &["type", "name", "description", "format"])
-        {
+        if let Some(custom) = parse_custom_tool_definition(
+            obj,
+            &["type", "name", "description", "format", "namespace"],
+        ) {
             return Some(ToolDefinition {
+                namespace: string_field(obj, "namespace"),
+                tools: None,
+                origin_protocol: None,
+                config: None,
+
                 tool_type,
                 name: None,
                 description: None,
@@ -210,7 +237,42 @@ pub fn parse_tool_definition(raw: &Value) -> Option<ToolDefinition> {
         }
     }
 
-    explicit_tool_type.map(|_| native_tool_definition(tool_type, obj))
+    explicit_tool_type.map(|_| {
+        let mut tool = native_tool_definition(tool_type, obj);
+        tool.namespace = string_field(obj, "namespace");
+        tool.extra_body.remove("namespace");
+        if tool.tool_type == "namespace" {
+            tool.tools = obj
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(|tools| tools.iter().filter_map(parse_tool_definition).collect());
+            tool.extra_body.remove("tools");
+        } else {
+            tool.config = Some(Value::Object(
+                std::mem::take(&mut tool.extra_body).into_iter().collect(),
+            ));
+        }
+        tool
+    })
+}
+
+#[cfg(test)]
+mod canonical_tool_definition_tests {
+    use super::*;
+
+    #[test]
+    fn flat_custom_namespace_has_one_owner() {
+        let tool = parse_tool_definition(&serde_json::json!({
+            "type":"custom", "name":"patch", "namespace":"functions",
+            "format":{"type":"text"}, "future":true
+        }))
+        .unwrap();
+        assert_eq!(tool.namespace.as_deref(), Some("functions"));
+        assert!(!tool.extra_body.contains_key("namespace"));
+        let custom = tool.custom.unwrap();
+        assert!(!custom.extra_body.contains_key("namespace"));
+        assert_eq!(custom.extra_body.get("future"), Some(&Value::Bool(true)));
+    }
 }
 
 pub fn parse_tool_call_arguments_value(obj: &Map<String, Value>) -> Option<Value> {
@@ -288,6 +350,9 @@ pub fn parse_tool_call_node_from_obj(obj: &Map<String, Value>) -> Option<Node> {
     }
 
     Some(Node::ToolCall {
+        namespace: string_field(obj, "namespace").or_else(|| string_field(obj, "toolset_name")),
+        signature: None,
+
         id: obj
             .get("id")
             .and_then(|v| v.as_str())
@@ -301,6 +366,8 @@ pub fn parse_tool_call_node_from_obj(obj: &Map<String, Value>) -> Option<Node> {
             &[
                 "type",
                 "call_id",
+                "namespace",
+                "toolset_name",
                 "id",
                 "name",
                 "arguments",
@@ -315,17 +382,23 @@ pub fn parse_tool_call_node_from_obj(obj: &Map<String, Value>) -> Option<Node> {
 
 pub fn parse_tool_call_part_from_obj(obj: &Map<String, Value>) -> Option<Part> {
     let Node::ToolCall {
+        namespace,
+        signature,
         id,
         tool_type,
         call_id,
         name,
         arguments,
         extra_body,
+        ..
     } = parse_tool_call_node_from_obj(obj)?
     else {
         return None;
     };
     Some(Part::ToolCall {
+        namespace,
+        signature,
+
         id,
         tool_type,
         call_id,
@@ -336,6 +409,19 @@ pub fn parse_tool_call_part_from_obj(obj: &Map<String, Value>) -> Option<Part> {
 }
 
 pub fn parse_image_source_from_obj(obj: &Map<String, Value>) -> Option<ImageSource> {
+    let source = parse_image_source_raw(obj)?;
+    if let ImageSource::Url { url, .. } = &source {
+        if let Some((mime, data)) = crate::urp::media::parse_data_url(url) {
+            return Some(ImageSource::Base64 {
+                media_type: mime.into(),
+                data: data.into(),
+            });
+        }
+    }
+    Some(source)
+}
+
+fn parse_image_source_raw(obj: &Map<String, Value>) -> Option<ImageSource> {
     let t = obj.get("type")?.as_str()?;
     match t {
         "image_url" | "input_image" | "output_image" | "image" => {
@@ -380,8 +466,8 @@ pub fn parse_image_source_from_obj(obj: &Map<String, Value>) -> Option<ImageSour
                     media_type: obj
                         .get("media_type")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("image/png")
-                        .to_string(),
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| crate::urp::media::infer_mime(data, None)),
                     data: data.to_string(),
                 });
             }
@@ -395,7 +481,8 @@ pub fn parse_image_source_from_obj(obj: &Map<String, Value>) -> Option<ImageSour
                             .map(str::to_string),
                     });
                 }
-                if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
+                if src.get("type").and_then(Value::as_str) == Some("url") {
+                    let url = src.get("url")?.as_str()?;
                     return Some(ImageSource::Url {
                         url: url.to_string(),
                         detail: obj
@@ -404,12 +491,20 @@ pub fn parse_image_source_from_obj(obj: &Map<String, Value>) -> Option<ImageSour
                             .map(|s| s.to_string()),
                     });
                 }
+                if src.get("type").and_then(Value::as_str) != Some("base64") {
+                    return None;
+                }
                 return Some(ImageSource::Base64 {
                     media_type: src
                         .get("media_type")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("image/png")
-                        .to_string(),
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            crate::urp::media::infer_mime(
+                                src.get("data").and_then(Value::as_str).unwrap_or(""),
+                                None,
+                            )
+                        }),
                     data: src.get("data").and_then(|v| v.as_str())?.to_string(),
                 });
             }
@@ -421,7 +516,7 @@ pub fn parse_image_source_from_obj(obj: &Map<String, Value>) -> Option<ImageSour
 
 pub fn parse_image_node_from_obj(obj: &Map<String, Value>, role: OrdinaryRole) -> Option<Node> {
     let source = parse_image_source_from_obj(obj)?;
-    let mut extra_body = split_extra(
+    let extra_body = split_extra(
         obj,
         &[
             "type",
@@ -434,8 +529,10 @@ pub fn parse_image_node_from_obj(obj: &Map<String, Value>, role: OrdinaryRole) -
             "file_id",
         ],
     );
-    mark_file_id_origin(&source, obj, &mut extra_body);
+    let metadata = media_metadata(obj, matches!(source, ImageSource::FileId { .. }), false);
     Some(Node::Image {
+        metadata,
+
         id: None,
         role,
         source,
@@ -445,7 +542,7 @@ pub fn parse_image_node_from_obj(obj: &Map<String, Value>, role: OrdinaryRole) -
 
 pub fn parse_image_part_from_obj(obj: &Map<String, Value>) -> Option<Part> {
     let source = parse_image_source_from_obj(obj)?;
-    let mut extra_body = split_extra(
+    let extra_body = split_extra(
         obj,
         &[
             "type",
@@ -458,8 +555,26 @@ pub fn parse_image_part_from_obj(obj: &Map<String, Value>) -> Option<Part> {
             "file_id",
         ],
     );
-    mark_file_id_origin(&source, obj, &mut extra_body);
-    Some(Part::Image { source, extra_body })
+    let metadata = media_metadata(obj, matches!(source, ImageSource::FileId { .. }), false);
+    Some(Part::Image {
+        metadata,
+        source,
+        extra_body,
+    })
+}
+
+fn file_base64_source(filename: Option<String>, media_type: &str, data: &str) -> FileSource {
+    let (media_type, data) = crate::urp::media::parse_data_url(data)
+        .filter(|(mime, _)| mime.parse::<mime::Mime>().is_ok())
+        .unwrap_or((media_type, data));
+    FileSource::Base64 {
+        media_type: if media_type == "application/octet-stream" || media_type.is_empty() {
+            crate::urp::media::infer_mime(data, filename.as_deref())
+        } else {
+            media_type.to_string()
+        },
+        data: data.to_string(),
+    }
 }
 
 pub fn parse_file_source_from_obj(obj: &Map<String, Value>) -> Option<FileSource> {
@@ -478,14 +593,13 @@ pub fn parse_file_source_from_obj(obj: &Map<String, Value>) -> Option<FileSource
                     });
                 }
                 if let Some(data) = file.get("file_data").and_then(Value::as_str) {
-                    return Some(FileSource::Base64 {
-                        filename: file
-                            .get("filename")
+                    return Some(file_base64_source(
+                        file.get("filename")
                             .and_then(Value::as_str)
                             .map(str::to_string),
-                        media_type: "application/octet-stream".to_string(),
-                        data: data.to_string(),
-                    });
+                        "application/octet-stream",
+                        data,
+                    ));
                 }
             }
             if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
@@ -521,42 +635,43 @@ pub fn parse_file_source_from_obj(obj: &Map<String, Value>) -> Option<FileSource
                     }
                     Some("content") => {
                         return Some(FileSource::Content {
-                            content: src.get("content")?.as_array()?.clone(),
+                            content: match src.get("content")? {
+                                Value::String(text) => {
+                                    vec![serde_json::json!({"type":"text", "text":text})]
+                                }
+                                Value::Array(content) => content.clone(),
+                                Value::Object(_) => vec![src.get("content")?.clone()],
+                                _ => return None,
+                            },
                         });
                     }
                     Some("base64") => {}
                     _ => return None,
                 }
-                return Some(FileSource::Base64 {
-                    filename: src
-                        .get("filename")
+                return Some(file_base64_source(
+                    src.get("filename")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
-                    media_type: src
-                        .get("media_type")
+                    src.get("media_type")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("application/octet-stream")
-                        .to_string(),
-                    data: src.get("data").and_then(|v| v.as_str())?.to_string(),
-                });
+                        .unwrap_or("application/octet-stream"),
+                    src.get("data").and_then(|v| v.as_str())?,
+                ));
             }
             if let Some(data) = obj
                 .get("file_data")
                 .or_else(|| obj.get("data"))
                 .and_then(|v| v.as_str())
             {
-                return Some(FileSource::Base64 {
-                    filename: obj
-                        .get("filename")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    media_type: obj
-                        .get("media_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("application/octet-stream")
-                        .to_string(),
-                    data: data.to_string(),
-                });
+                return Some(file_base64_source(
+                    obj.get("filename")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    obj.get("media_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("application/octet-stream"),
+                    data,
+                ));
             }
             None
         }
@@ -579,10 +694,20 @@ pub fn parse_file_node_from_obj(obj: &Map<String, Value>, role: OrdinaryRole) ->
             "media_type",
             "file_id",
             "file",
+            "detail",
+            "title",
+            "context",
+            "citations",
         ],
     );
-    mark_file_id_origin(&source, obj, &mut extra_body);
+    let mut metadata = media_metadata(obj, matches!(source, FileSource::FileId { .. }), true);
+    metadata.resource = metadata
+        .resource
+        .or_else(|| crate::urp::media::document_resource(&source));
+    document_shape(obj, &mut extra_body);
     Some(Node::File {
+        metadata,
+
         id: None,
         role,
         source,
@@ -605,71 +730,269 @@ pub fn parse_file_part_from_obj(obj: &Map<String, Value>) -> Option<Part> {
             "media_type",
             "file_id",
             "file",
+            "detail",
+            "title",
+            "context",
+            "citations",
         ],
     );
-    mark_file_id_origin(&source, obj, &mut extra_body);
-    Some(Part::File { source, extra_body })
-}
-
-pub fn parse_audio_part_from_obj(obj: &Map<String, Value>) -> Option<Part> {
-    if obj.get("type").and_then(Value::as_str) != Some("input_audio") {
-        return None;
-    }
-    let input_audio = obj.get("input_audio")?.as_object()?;
-    let media_type = match input_audio.get("format")?.as_str()? {
-        "wav" => "audio/wav",
-        "mp3" => "audio/mpeg",
-        _ => return None,
-    };
-    Some(Part::Audio {
-        source: AudioSource::Base64 {
-            media_type: media_type.to_string(),
-            data: input_audio.get("data")?.as_str()?.to_string(),
-        },
-        extra_body: split_extra(obj, &["type", "input_audio"]),
+    let mut metadata = media_metadata(obj, matches!(source, FileSource::FileId { .. }), true);
+    metadata.resource = metadata
+        .resource
+        .or_else(|| crate::urp::media::document_resource(&source));
+    document_shape(obj, &mut extra_body);
+    Some(Part::File {
+        metadata,
+        source,
+        extra_body,
     })
 }
 
-fn file_id_origin_for_obj(obj: &Map<String, Value>) -> &'static str {
+pub fn parse_audio_part_from_obj(obj: &Map<String, Value>) -> Option<Part> {
+    if !matches!(
+        obj.get("type").and_then(Value::as_str),
+        Some("input_audio" | "audio" | "output_audio")
+    ) {
+        return None;
+    }
+    let body = obj
+        .get("input_audio")
+        .or_else(|| obj.get("audio"))
+        .and_then(Value::as_object)
+        .unwrap_or(obj);
+    let native_source = body.get("source").and_then(Value::as_object);
+    if native_source.is_some_and(|source| {
+        !matches!(
+            source.get("type").and_then(Value::as_str),
+            Some("base64" | "url")
+        )
+    }) {
+        return None;
+    }
+    let source_body = native_source.unwrap_or(body);
+    let source_kind = native_source
+        .and_then(|source| source.get("type"))
+        .and_then(Value::as_str);
+    let media_type = source_body
+        .get("media_type")
+        .or_else(|| body.get("media_type"))
+        .or_else(|| body.get("audio_url").and_then(|url| url.get("media_type")))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            body.get("format")
+                .and_then(Value::as_str)
+                .and_then(|format| {
+                    Some(
+                        match format {
+                            "wav" => "audio/wav",
+                            "mp3" => "audio/mpeg",
+                            "flac" => "audio/flac",
+                            "opus" => "audio/opus",
+                            "aac" => "audio/aac",
+                            "ogg" => "audio/ogg",
+                            "m4a" => "audio/mp4",
+                            "webm" => "audio/webm",
+                            "pcm16" => "audio/pcm",
+                            _ => return None,
+                        }
+                        .to_owned(),
+                    )
+                })
+        });
+    let url = source_body
+        .get("url")
+        .or_else(|| body.get("audio_url").filter(|url| url.is_string()))
+        .or_else(|| body.get("audio_url").and_then(|url| url.get("url")))
+        .and_then(Value::as_str);
+    let source = if let Some(url) = url {
+        if source_kind == Some("base64") {
+            return None;
+        }
+        match crate::urp::media::parse_data_url(url) {
+            Some((mime, data)) => AudioSource::Base64 {
+                media_type: mime.into(),
+                data: data.into(),
+            },
+            None => AudioSource::Url { url: url.into() },
+        }
+    } else {
+        if source_kind == Some("url") {
+            return None;
+        }
+        let data = source_body
+            .get("data")
+            .or_else(|| body.get("audio_base64"))?
+            .as_str()?;
+        let (mime, data) = crate::urp::media::parse_data_url(data)
+            .map(|(mime, data)| (mime.to_owned(), data))
+            .unwrap_or_else(|| {
+                (
+                    media_type
+                        .clone()
+                        .unwrap_or_else(|| crate::urp::media::infer_mime(data, None)),
+                    data,
+                )
+            });
+        AudioSource::Base64 {
+            media_type: mime,
+            data: data.into(),
+        }
+    };
+    let resource = match &source {
+        AudioSource::Url { url } => crate::urp::media::resource_for_url(url),
+        _ => None,
+    };
+    Some(Part::Audio {
+        metadata: MediaMetadata {
+            media_type: matches!(source, AudioSource::Url { .. })
+                .then_some(media_type)
+                .flatten(),
+            resource,
+            reference_id: body.get("id").and_then(Value::as_str).map(str::to_owned),
+            transcript: body
+                .get("transcript")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            expires_at: body.get("expires_at").and_then(Value::as_i64),
+            ..Default::default()
+        },
+        source,
+        extra_body: split_extra(
+            obj,
+            &[
+                "type",
+                "input_audio",
+                "audio",
+                "source",
+                "audio_url",
+                "url",
+                "data",
+                "audio_base64",
+                "media_type",
+                "format",
+                "id",
+                "transcript",
+                "expires_at",
+            ],
+        ),
+    })
+}
+
+pub fn parse_audio_node_from_obj(obj: &Map<String, Value>, role: OrdinaryRole) -> Option<Node> {
+    let Part::Audio {
+        source,
+        metadata,
+        extra_body,
+    } = parse_audio_part_from_obj(obj)?
+    else {
+        unreachable!()
+    };
+    Some(Node::Audio {
+        id: None,
+        role,
+        source,
+        metadata,
+        extra_body,
+    })
+}
+
+pub fn parse_compatible_media_part(obj: &Map<String, Value>) -> Result<Option<Part>, String> {
+    let kind = obj.get("type").and_then(Value::as_str).unwrap_or("");
+    let part = match kind {
+        "image" | "image_url" | "input_image" | "output_image" => parse_image_part_from_obj(obj),
+        "file" | "document" | "input_file" | "output_file" => parse_file_part_from_obj(obj),
+        "audio" | "input_audio" | "output_audio" => parse_audio_part_from_obj(obj),
+        _ => return Ok(None),
+    };
+    part.map(Some)
+        .ok_or_else(|| format!("Malformed {kind} content block."))
+}
+
+fn media_metadata(obj: &Map<String, Value>, file_id: bool, document: bool) -> MediaMetadata {
+    let source = obj.get("source").and_then(Value::as_object);
+    let file = obj.get("file").and_then(Value::as_object);
+    let url = obj
+        .get("file_url")
+        .or_else(|| obj.get("url"))
+        .or_else(|| obj.get("image_url").filter(|v| v.is_string()))
+        .or_else(|| obj.get("image_url").and_then(|v| v.get("url")))
+        .or_else(|| source.and_then(|src| src.get("url")))
+        .and_then(Value::as_str);
+    let resource = if file_id {
+        Some(MediaResource {
+            protocol: if source
+                .and_then(|src| src.get("type"))
+                .and_then(Value::as_str)
+                == Some("file")
+            {
+                ProviderProtocol::Messages
+            } else {
+                ProviderProtocol::Responses
+            },
+            provider_id: None,
+            channel_id: None,
+            credential_scope: None,
+        })
+    } else {
+        url.and_then(crate::urp::media::resource_for_url)
+    };
+    let image_url = obj.get("image_url");
+    let inline_image = url.is_some_and(|url| url.starts_with("data:"))
+        || obj.contains_key("image_base64")
+        || source
+            .and_then(|src| src.get("type"))
+            .and_then(Value::as_str)
+            == Some("base64");
+    MediaMetadata {
+        resource,
+        filename: obj
+            .get("filename")
+            .or_else(|| file.and_then(|f| f.get("filename")))
+            .or_else(|| source.and_then(|s| s.get("filename")))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        detail: (document || inline_image)
+            .then(|| {
+                obj.get("detail")
+                    .or_else(|| image_url.and_then(|v| v.get("detail")))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten(),
+        document_title: document
+            .then(|| obj.get("title").and_then(Value::as_str).map(str::to_owned))
+            .flatten(),
+        document_context: document
+            .then(|| {
+                obj.get("context")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten(),
+        document_citations: document.then(|| obj.get("citations").cloned()).flatten(),
+        media_type: url.filter(|url| !url.starts_with("data:")).and_then(|_| {
+            obj.get("media_type")
+                .or_else(|| source.and_then(|src| src.get("media_type")))
+                .or_else(|| image_url.and_then(|image| image.get("media_type")))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    (document && obj.get("type").and_then(Value::as_str) == Some("document"))
+                        .then(|| "application/pdf".into())
+                })
+        }),
+        ..Default::default()
+    }
+}
+
+fn document_shape(obj: &Map<String, Value>, extra: &mut HashMap<String, Value>) {
     if obj
         .get("source")
-        .and_then(Value::as_object)
-        .and_then(|source| source.get("type"))
-        .and_then(Value::as_str)
-        == Some("file")
+        .and_then(|v| v.get("content"))
+        .is_some_and(Value::is_string)
     {
-        FILE_ID_ORIGIN_MESSAGES
-    } else {
-        FILE_ID_ORIGIN_OPENAI
-    }
-}
-
-trait FileIdSource {
-    fn is_file_id(&self) -> bool;
-}
-
-impl FileIdSource for ImageSource {
-    fn is_file_id(&self) -> bool {
-        matches!(self, ImageSource::FileId { .. })
-    }
-}
-
-impl FileIdSource for FileSource {
-    fn is_file_id(&self) -> bool {
-        matches!(self, FileSource::FileId { .. })
-    }
-}
-
-fn mark_file_id_origin<T: FileIdSource>(
-    source: &T,
-    obj: &Map<String, Value>,
-    extra_body: &mut HashMap<String, Value>,
-) {
-    if source.is_file_id() {
-        extra_body.insert(
-            FILE_ID_ORIGIN_EXTRA_KEY.to_string(),
-            Value::String(file_id_origin_for_obj(obj).to_string()),
-        );
+        extra.insert("_monoize_document_content_string".into(), Value::Bool(true));
     }
 }
 
@@ -693,395 +1016,4 @@ pub fn value_to_text(v: &Value) -> String {
         return out;
     }
     serde_json::to_string(v).unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn split_extra_rejects_wire_spoofing_of_internal_metadata() {
-        let object = json!({
-            "known": 1,
-            "vendor": { "keep": true },
-            "_monoize_responses_instructions": [{ "role": "developer", "content": "spoof" }]
-        });
-        let extra = split_extra(object.as_object().unwrap(), &["known"]);
-
-        assert_eq!(extra.get("vendor"), Some(&json!({ "keep": true })));
-        assert!(!extra.contains_key("known"));
-        assert!(!extra.contains_key("_monoize_responses_instructions"));
-    }
-
-    #[test]
-    fn parse_tool_definition_accepts_function_and_custom_shapes() {
-        let nested_function = json!({
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "description": "Lookup a value",
-                "parameters": {
-                    "properties": {
-                        "id": { "type": "string" }
-                    },
-                    "required": ["id"]
-                },
-                "input_schema": {
-                    "properties": {
-                        "ignored": { "type": "boolean" }
-                    }
-                },
-                "strict": true,
-                "defer_loading": true
-            },
-            "x_tool": "outer"
-        });
-        let tool = parse_tool_definition(&nested_function).expect("nested function tool");
-        assert_eq!(tool.tool_type, "function");
-        assert_eq!(tool.name, None);
-        assert_eq!(tool.description, None);
-        assert!(tool.custom.is_none());
-        assert_eq!(tool.extra_body.get("x_tool"), Some(&json!("outer")));
-
-        let function = tool.function.as_ref().expect("function IR");
-        assert_eq!(function.name, "lookup");
-        assert_eq!(function.description.as_deref(), Some("Lookup a value"));
-        assert_eq!(function.strict, Some(true));
-        let parameters = function.parameters.as_ref().expect("parameters");
-        assert_eq!(parameters["type"], json!("object"));
-        assert_eq!(parameters["properties"]["id"]["type"], json!("string"));
-        assert!(parameters["properties"].get("ignored").is_none());
-        assert_eq!(function.extra_body.get("defer_loading"), Some(&json!(true)));
-
-        let missing_type_function = json!({
-            "name": "from_input_schema",
-            "description": "Uses Anthropic schema alias",
-            "input_schema": {
-                "properties": {
-                    "query": { "type": "string" }
-                }
-            },
-            "strict": false
-        });
-        let tool = parse_tool_definition(&missing_type_function).expect("missing type function");
-        assert_eq!(tool.tool_type, "function");
-        let function = tool.function.as_ref().expect("function IR");
-        assert_eq!(function.name, "from_input_schema");
-        assert_eq!(function.strict, Some(false));
-        assert_eq!(
-            function.parameters.as_ref(),
-            Some(&json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" }
-                }
-            }))
-        );
-
-        let non_object_schema = json!({
-            "name": "schema_reference",
-            "input_schema": "schema://opaque"
-        });
-        let tool = parse_tool_definition(&non_object_schema).expect("non-object schema function");
-        let function = tool.function.as_ref().expect("function IR");
-        assert_eq!(
-            function.parameters.as_ref(),
-            Some(&json!("schema://opaque"))
-        );
-
-        let nested_custom = json!({
-            "type": "custom",
-            "custom": {
-                "name": "freeform_nested",
-                "description": "Nested custom tool",
-                "format": {
-                    "type": "grammar",
-                    "syntax": "lark",
-                    "definition": "start: /[a-z]+/"
-                },
-                "x_custom": 7
-            },
-            "cache_control": { "type": "ephemeral" }
-        });
-        let tool = parse_tool_definition(&nested_custom).expect("nested custom tool");
-        assert_eq!(tool.tool_type, "custom");
-        assert_eq!(tool.name, None);
-        assert_eq!(tool.description, None);
-        assert!(tool.function.is_none());
-        assert_eq!(
-            tool.extra_body.get("cache_control"),
-            Some(&json!({ "type": "ephemeral" }))
-        );
-        let custom = tool.custom.as_ref().expect("custom IR");
-        assert_eq!(custom.name, "freeform_nested");
-        assert_eq!(custom.description.as_deref(), Some("Nested custom tool"));
-        assert_eq!(
-            custom.format.as_ref().expect("format")["type"],
-            json!("grammar")
-        );
-        assert_eq!(custom.extra_body.get("x_custom"), Some(&json!(7)));
-
-        let flat_custom = json!({
-            "type": "custom",
-            "name": "freeform_flat",
-            "description": "Flat custom tool",
-            "format": { "type": "text" },
-            "defer_loading": true
-        });
-        let tool = parse_tool_definition(&flat_custom).expect("flat custom tool");
-        assert_eq!(tool.tool_type, "custom");
-        assert!(tool.function.is_none());
-        assert!(tool.extra_body.is_empty());
-        let custom = tool.custom.as_ref().expect("custom IR");
-        assert_eq!(custom.name, "freeform_flat");
-        assert_eq!(custom.description.as_deref(), Some("Flat custom tool"));
-        assert_eq!(
-            custom.format.as_ref().expect("format")["type"],
-            json!("text")
-        );
-        assert_eq!(custom.extra_body.get("defer_loading"), Some(&json!(true)));
-    }
-
-    #[test]
-    fn parse_tool_definition_preserves_builtin_config() {
-        let builtin = json!({
-            "type": "file_search",
-            "name": "docs_search",
-            "description": "Search documentation",
-            "vector_store_ids": ["vs_1", "vs_2"],
-            "filters": {
-                "type": "eq",
-                "key": "tenant",
-                "value": "monoize"
-            },
-            "ranking_options": {
-                "ranker": "default-2024-11-15",
-                "score_threshold": 0.25
-            }
-        });
-        let tool = parse_tool_definition(&builtin).expect("builtin tool");
-        assert_eq!(tool.tool_type, "file_search");
-        assert_eq!(tool.name.as_deref(), Some("docs_search"));
-        assert_eq!(tool.description.as_deref(), Some("Search documentation"));
-        assert!(tool.function.is_none());
-        assert!(tool.custom.is_none());
-        assert_eq!(
-            tool.extra_body.get("vector_store_ids"),
-            Some(&json!(["vs_1", "vs_2"]))
-        );
-        assert_eq!(
-            tool.extra_body.get("filters"),
-            Some(&json!({
-                "type": "eq",
-                "key": "tenant",
-                "value": "monoize"
-            }))
-        );
-        assert_eq!(
-            tool.extra_body.get("ranking_options"),
-            Some(&json!({
-                "ranker": "default-2024-11-15",
-                "score_threshold": 0.25
-            }))
-        );
-        assert!(!tool.extra_body.contains_key("type"));
-        assert!(!tool.extra_body.contains_key("name"));
-        assert!(!tool.extra_body.contains_key("description"));
-
-        let unknown_native = json!({
-            "type": "vendor_native",
-            "name": "native_tool",
-            "description": "Native provider tool",
-            "enabled": true,
-            "schema": "opaque"
-        });
-        let tool = parse_tool_definition(&unknown_native).expect("unknown native tool");
-        assert_eq!(tool.tool_type, "vendor_native");
-        assert_eq!(tool.name.as_deref(), Some("native_tool"));
-        assert_eq!(tool.description.as_deref(), Some("Native provider tool"));
-        assert!(tool.function.is_none());
-        assert!(tool.custom.is_none());
-        assert_eq!(tool.extra_body.get("enabled"), Some(&json!(true)));
-        assert_eq!(tool.extra_body.get("schema"), Some(&json!("opaque")));
-
-        let web_search = json!({
-            "type": "web_search",
-            "search_context_size": "medium",
-            "user_location": {
-                "type": "approximate",
-                "country": "US",
-                "city": "San Francisco"
-            },
-            "filters": {
-                "allowed_domains": ["example.com"]
-            }
-        });
-        let tool = parse_tool_definition(&web_search).expect("web_search tool");
-        assert_eq!(tool.tool_type, "web_search");
-        assert_eq!(tool.name, None);
-        assert_eq!(tool.description, None);
-        assert!(tool.function.is_none());
-        assert!(tool.custom.is_none());
-        assert_eq!(
-            tool.extra_body.get("search_context_size"),
-            Some(&json!("medium"))
-        );
-        assert_eq!(
-            tool.extra_body.get("user_location"),
-            Some(&json!({
-                "type": "approximate",
-                "country": "US",
-                "city": "San Francisco"
-            }))
-        );
-        assert_eq!(
-            tool.extra_body.get("filters"),
-            Some(&json!({ "allowed_domains": ["example.com"] }))
-        );
-
-        let computer = json!({
-            "type": "computer_20251124",
-            "name": "desktop",
-            "description": "Computer use beta tool",
-            "display_width_px": 1024,
-            "display_height_px": 768,
-            "display_number": 1,
-            "cache_control": { "type": "ephemeral" }
-        });
-        let tool = parse_tool_definition(&computer).expect("computer_20251124 tool");
-        assert_eq!(tool.tool_type, "computer_20251124");
-        assert_eq!(tool.name.as_deref(), Some("desktop"));
-        assert_eq!(tool.description.as_deref(), Some("Computer use beta tool"));
-        assert!(tool.function.is_none());
-        assert!(tool.custom.is_none());
-        assert_eq!(tool.extra_body.get("display_width_px"), Some(&json!(1024)));
-        assert_eq!(tool.extra_body.get("display_height_px"), Some(&json!(768)));
-        assert_eq!(tool.extra_body.get("display_number"), Some(&json!(1)));
-        assert_eq!(
-            tool.extra_body.get("cache_control"),
-            Some(&json!({ "type": "ephemeral" }))
-        );
-
-        let web_search_versioned = json!({
-            "type": "web_search_20260209",
-            "name": "web_search",
-            "max_uses": 4,
-            "allowed_domains": ["example.com"],
-            "user_location": {
-                "type": "approximate",
-                "country": "US",
-                "region": "CA",
-                "city": "San Francisco"
-            }
-        });
-        let tool = parse_tool_definition(&web_search_versioned).expect("web_search_20260209 tool");
-        assert_eq!(tool.tool_type, "web_search_20260209");
-        assert_eq!(tool.name.as_deref(), Some("web_search"));
-        assert!(tool.function.is_none());
-        assert!(tool.custom.is_none());
-        assert_eq!(tool.extra_body.get("max_uses"), Some(&json!(4)));
-        assert_eq!(
-            tool.extra_body.get("allowed_domains"),
-            Some(&json!(["example.com"]))
-        );
-        assert_eq!(
-            tool.extra_body.get("user_location"),
-            Some(&json!({
-                "type": "approximate",
-                "country": "US",
-                "region": "CA",
-                "city": "San Francisco"
-            }))
-        );
-
-        let mcp_toolset = json!({
-            "type": "mcp_toolset",
-            "mcp_server_name": "docs",
-            "default_config": { "enabled": true },
-            "configs": {
-                "search": { "enabled": true, "defer_loading": true }
-            },
-            "cache_control": { "type": "ephemeral" }
-        });
-        let tool = parse_tool_definition(&mcp_toolset).expect("mcp_toolset tool");
-        assert_eq!(tool.tool_type, "mcp_toolset");
-        assert_eq!(tool.name, None);
-        assert!(tool.function.is_none());
-        assert!(tool.custom.is_none());
-        assert_eq!(tool.extra_body.get("mcp_server_name"), Some(&json!("docs")));
-        assert_eq!(
-            tool.extra_body.get("default_config"),
-            Some(&json!({ "enabled": true }))
-        );
-        assert_eq!(
-            tool.extra_body.get("configs"),
-            Some(&json!({
-                "search": { "enabled": true, "defer_loading": true }
-            }))
-        );
-        assert_eq!(
-            tool.extra_body.get("cache_control"),
-            Some(&json!({ "type": "ephemeral" }))
-        );
-    }
-
-    #[test]
-    fn parse_tool_definition_parameters_precede_input_schema_alias() {
-        let raw = json!({
-            "type": "function",
-            "function": {
-                "name": "schema_precedence",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "canonical": { "type": "string" }
-                    }
-                },
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "alias": { "type": "boolean" }
-                    }
-                }
-            }
-        });
-
-        let tool = parse_tool_definition(&raw).expect("function tool");
-        let function = tool.function.as_ref().expect("function IR");
-
-        assert_eq!(
-            function.parameters.as_ref(),
-            Some(&json!({
-                "type": "object",
-                "properties": {
-                    "canonical": { "type": "string" }
-                }
-            })),
-            "parameters is the canonical schema field and deterministically wins over input_schema"
-        );
-        assert!(
-            function.extra_body.get("input_schema").is_none(),
-            "the losing input_schema alias is consumed, not preserved as an extra collision"
-        );
-    }
-
-    #[test]
-    fn parse_tool_definition_preserves_non_object_schema_values() {
-        for schema in [json!("schema://opaque"), json!(false), json!(["ref", "v1"])] {
-            let raw = json!({
-                "name": "schema_reference",
-                "input_schema": schema.clone()
-            });
-
-            let tool = parse_tool_definition(&raw).expect("non-object schema function");
-            let function = tool.function.as_ref().expect("function IR");
-
-            assert_eq!(
-                function.parameters.as_ref(),
-                Some(&schema),
-                "non-object schema values are preserved without normalization or panic"
-            );
-        }
-    }
 }

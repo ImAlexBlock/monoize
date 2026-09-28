@@ -1,7 +1,6 @@
 use crate::error::AppResult;
 use crate::handlers::routing::now_ts;
 use crate::handlers::usage::usage_to_chat_usage_json;
-use crate::urp::encode::sanitize_provider_item_wire_body;
 use crate::urp::stream_helpers::*;
 use crate::urp::{self, FinishReason, Node, NodeDelta, NodeHeader, UrpStreamEvent};
 use axum::response::sse::Event;
@@ -12,6 +11,7 @@ use tokio::sync::mpsc;
 const CHAT_CHOICE_EXTRA_BODY_KEY: &str = "_monoize_chat_choice_extra";
 const CHAT_DELTA_EXTRA_BODY_KEY: &str = "_monoize_chat_delta_extra";
 const CHAT_ERROR_EVENT_EXTRA_KEY: &str = "_monoize_chat_error_event";
+const CHAT_ERROR_NUMERIC_CODE_EXTRA_KEY: &str = "_monoize_chat_error_numeric_code";
 const CHAT_NATIVE_FINISH_REASON_EXTRA_KEY: &str = "_monoize_chat_native_finish_reason";
 
 #[derive(Clone, Debug)]
@@ -30,6 +30,100 @@ struct StreamedChatNodeState {
     tool_call: Option<StreamedChatToolCall>,
     saw_node_start: bool,
     saw_node_done: bool,
+    text: String,
+    scored_bytes: usize,
+    scored_tokens: usize,
+}
+
+fn chat_delta_scores<'a>(
+    state: &mut StreamedChatNodeState,
+    content: &str,
+    scores: &'a Option<Vec<urp::TokenLogprob>>,
+) -> Option<&'a [urp::TokenLogprob]> {
+    let previous_len = state.text.len();
+    state.text.push_str(content);
+    let scores = scores.as_deref().filter(|scores| !scores.is_empty())?;
+    let bytes: Vec<u8> = scores
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .score
+                .bytes
+                .as_deref()
+                .unwrap_or(entry.score.token.as_bytes())
+                .iter()
+                .copied()
+        })
+        .collect();
+    let unscored = state.text.as_bytes().get(state.scored_bytes..)?;
+    if !unscored.starts_with(&bytes)
+        || (!content.is_empty()
+            && (previous_len != state.scored_bytes || bytes != content.as_bytes()))
+    {
+        return None;
+    }
+    state.scored_bytes += bytes.len();
+    state.scored_tokens += scores.len();
+    Some(scores)
+}
+
+async fn emit_chat_terminal_scores(
+    tx: &mpsc::Sender<Event>,
+    id: &str,
+    created: i64,
+    model: &str,
+    node: &Node,
+    state: &mut StreamedChatNodeState,
+    max_frame_length: Option<usize>,
+) -> AppResult<()> {
+    let (content, delta, patch) = match node {
+        Node::Text { content, .. } => (
+            content,
+            json!({"content":""}),
+            chat_delta_path_content as fn(&mut Value, &str),
+        ),
+        Node::Refusal { content, .. } => (
+            content,
+            json!({"refusal":""}),
+            chat_delta_path_refusal as fn(&mut Value, &str),
+        ),
+        _ => return Ok(()),
+    };
+    let Some(scores) = node
+        .token_scores()
+        .filter(|scores| state.text == *content && scores.len() > state.scored_tokens)
+    else {
+        return Ok(());
+    };
+    let prefix_bytes = scores[..state.scored_tokens]
+        .iter()
+        .map(|entry| {
+            entry
+                .score
+                .bytes
+                .as_deref()
+                .unwrap_or(entry.score.token.as_bytes())
+                .len()
+        })
+        .sum::<usize>();
+    if prefix_bytes != state.scored_bytes {
+        return Ok(());
+    }
+    send_chat_text_chunk(
+        tx,
+        id,
+        created,
+        model,
+        delta,
+        "",
+        patch,
+        max_frame_length,
+        Some(&scores[state.scored_tokens..]),
+    )
+    .await?;
+    state.scored_bytes = content.len();
+    state.scored_tokens = scores.len();
+    Ok(())
 }
 
 fn merge_chat_delta_extra_preserving_typed(
@@ -103,17 +197,17 @@ fn materialize_chat_error_fields(
     message: &str,
     extra_body: &HashMap<String, Value>,
 ) {
-    if error
-        .get("message")
-        .and_then(Value::as_str)
-        .is_none_or(|value| value.is_empty())
-    {
-        error.insert("message".to_string(), Value::String(message.to_string()));
-    }
-    if !nonempty_json_scalar(error.get("code")) {
-        if let Some(code) = code {
-            error.insert("code".to_string(), Value::String(code.to_string()));
-        }
+    error.insert("message".to_string(), Value::String(message.to_string()));
+    error.remove("code");
+    if let Some(code) = code {
+        let value = extra_body
+            .get(CHAT_ERROR_NUMERIC_CODE_EXTRA_KEY)
+            .and_then(Value::as_bool)
+            .filter(|numeric| *numeric)
+            .and_then(|_| serde_json::from_str::<Value>(code).ok())
+            .filter(Value::is_number)
+            .unwrap_or_else(|| Value::String(code.to_string()));
+        error.insert("code".to_string(), value);
     }
     if !nonempty_json_scalar(error.get("type")) {
         let error_type = extra_body
@@ -234,20 +328,104 @@ fn merge_pending_envelope_extra(
     }
 }
 
+fn validate_chat_media_event(event: &UrpStreamEvent) -> Result<(), String> {
+    match event {
+        UrpStreamEvent::NodeStart {
+            header: NodeHeader::ProviderItem { item_type, .. },
+            ..
+        } if matches!(
+            item_type.as_str(),
+            "input_image"
+                | "output_image"
+                | "image_url"
+                | "input_file"
+                | "output_file"
+                | "file"
+                | "input_audio"
+        ) =>
+        {
+            Err("Native response content cannot contain input-only media items".into())
+        }
+        UrpStreamEvent::NodeStart {
+            header:
+                NodeHeader::Audio {
+                    role: urp::OrdinaryRole::Assistant,
+                    ..
+                },
+            extra_body,
+            ..
+        } if extra_body
+            .get(urp::CHAT_MESSAGE_AUDIO_EXTRA_KEY)
+            .and_then(Value::as_bool)
+            == Some(true) =>
+        {
+            Ok(())
+        }
+        UrpStreamEvent::NodeStart {
+            header: NodeHeader::Image { .. } | NodeHeader::File { .. } | NodeHeader::Audio { .. },
+            ..
+        }
+        | UrpStreamEvent::NodeDelta {
+            delta:
+                NodeDelta::Image { .. }
+                | NodeDelta::File { .. }
+                | NodeDelta::Audio {
+                    source: urp::AudioSource::Url { .. },
+                },
+            ..
+        } => Err("Chat Completions responses cannot represent ordinary media content".into()),
+        UrpStreamEvent::NodeDone { node, .. } => {
+            urp::encode::openai_chat::validate_response_nodes(std::slice::from_ref(node))
+        }
+        UrpStreamEvent::ResponseDone { output, .. } => {
+            urp::encode::openai_chat::validate_response_nodes(output)
+        }
+        _ => Ok(()),
+    }
+}
+
+async fn emit_chat_media_error(tx: &mpsc::Sender<Event>, message: &str) -> AppResult<()> {
+    send_plain_sse_data(tx, urp::media::error_body(message).to_string()).await?;
+    send_plain_sse_data(tx, "[DONE]".into()).await?;
+    Err(crate::error::AppError::new(
+        axum::http::StatusCode::BAD_GATEWAY,
+        "unsupported_media",
+        message,
+    )
+    .with_downstream_stream_terminal_sent(!tx.is_closed()))
+}
+
 pub(crate) async fn emit_synthetic_chat_stream(
     logical_model: &str,
     resp: &urp::UrpResponse,
     sse_max_frame_length: Option<usize>,
     tx: mpsc::Sender<Event>,
 ) -> AppResult<()> {
+    if let Some(body) = resp
+        .outcome
+        .as_ref()
+        .and_then(|outcome| outcome.failure_body(false))
+    {
+        send_plain_sse_data(&tx, body.to_string()).await?;
+        send_plain_sse_data(&tx, "[DONE]".into()).await?;
+        return Ok(());
+    }
+
+    if let Err(error) = urp::encode::openai_chat::validate_response_nodes(&resp.output) {
+        return emit_chat_media_error(&tx, &error).await;
+    }
+    let projected = crate::urp::tool_signature::project_response(resp);
+    let resp = &projected;
     let id = format!("chatcmpl_{}", uuid::Uuid::new_v4());
     let created = now_ts();
     let mut saw_tool = false;
     let mut saw_legacy_function_call = false;
+    let mut text_offset = 0u64;
     let mut tool_idx = 0usize;
     for node in &resp.output {
         match node {
             Node::Reasoning {
+                metadata,
                 content,
                 encrypted,
                 summary,
@@ -255,17 +433,10 @@ pub(crate) async fn emit_synthetic_chat_stream(
                 extra_body,
                 ..
             } => {
-                if let Some(detail) = extra_body
-                    .get(urp::CHAT_REASONING_DETAIL_EXTRA_KEY)
-                    .and_then(Value::as_object)
-                {
-                    emit_native_chat_reasoning_detail(&tx, &id, created, logical_model, detail)
-                        .await?;
-                    continue;
-                }
-                if let Some(rc_value) = extra_body
-                    .get("inject_reasoning_content")
-                    .and_then(Value::as_str)
+                if let Some(rc_value) = metadata
+                    .chat_content
+                    .then(|| content.as_deref().or(summary.as_deref()))
+                    .flatten()
                     .filter(|s| !s.is_empty())
                 {
                     send_chat_chunk_string(
@@ -280,37 +451,42 @@ pub(crate) async fn emit_synthetic_chat_stream(
                     )
                     .await?;
                 }
-                let format = source.as_deref().filter(|format| !format.is_empty());
-                if let Some(summary) = summary.as_deref().filter(|summary| !summary.is_empty()) {
-                    if extra_body
-                        .get("openwebui_reasoning_content")
-                        .and_then(Value::as_bool)
-                        == Some(true)
-                    {
-                        send_chat_chunk_string(
+                if let Some(detail) = extra_body
+                    .get(urp::CHAT_REASONING_DETAIL_EXTRA_KEY)
+                    .and_then(Value::as_object)
+                {
+                    for detail in urp::reasoning::chat_details(
+                        content.as_deref(),
+                        summary.as_deref(),
+                        encrypted.as_ref(),
+                        node.id().map(String::as_str),
+                        source.as_deref(),
+                        Some(detail),
+                    ) {
+                        emit_native_chat_reasoning_detail(
                             &tx,
                             &id,
                             created,
                             logical_model,
-                            json!({ "reasoning_content": "" }),
-                            summary,
-                            chat_delta_path_reasoning_content,
-                            sse_max_frame_length,
-                        )
-                        .await?;
-                    } else {
-                        send_chat_chunk_string(
-                            &tx,
-                            &id,
-                            created,
-                            logical_model,
-                            chat_reasoning_delta_from_summary("", format),
-                            summary,
-                            chat_delta_path_reasoning_summary,
-                            sse_max_frame_length,
+                            detail.as_object().expect("reasoning detail object"),
                         )
                         .await?;
                     }
+                    continue;
+                }
+                let format = source.as_deref().filter(|format| !format.is_empty());
+                if let Some(summary) = summary.as_deref().filter(|summary| !summary.is_empty()) {
+                    send_chat_chunk_string(
+                        &tx,
+                        &id,
+                        created,
+                        logical_model,
+                        chat_reasoning_delta_from_summary("", format),
+                        summary,
+                        chat_delta_path_reasoning_summary,
+                        sse_max_frame_length,
+                    )
+                    .await?;
                 }
                 if let Some(content) = content.as_deref().filter(|content| !content.is_empty()) {
                     send_chat_chunk_string(
@@ -331,10 +507,7 @@ pub(crate) async fn emit_synthetic_chat_stream(
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| data.to_string());
                     if !sig.is_empty() {
-                        let reasoning_id = extra_body
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .filter(|id| !id.is_empty());
+                        let reasoning_id = node.id().map(String::as_str);
                         send_chat_chunk_string(
                             &tx,
                             &id,
@@ -426,22 +599,35 @@ pub(crate) async fn emit_synthetic_chat_stream(
             }
             | Node::Refusal { content, .. } => {
                 if !content.is_empty() {
-                    send_chat_chunk_string(
+                    send_chat_text_chunk(
                         &tx,
                         &id,
                         created,
                         logical_model,
-                        json!({ "content": "" }),
+                        {
+                            let delta = chat_text_node_delta(node, text_offset);
+                            if matches!(node, Node::Text { .. }) {
+                                text_offset += content.chars().count() as u64;
+                            }
+                            delta
+                        },
                         content,
-                        chat_delta_path_content,
+                        if matches!(node, Node::Refusal { .. }) {
+                            chat_delta_path_refusal
+                        } else {
+                            chat_delta_path_content
+                        },
                         sse_max_frame_length,
+                        node.token_scores(),
                     )
                     .await?;
                 }
             }
+            Node::Image { .. } | Node::File { .. } | Node::Audio { .. } => {
+                emit_chat_semantic_node(&tx, &id, created, logical_model, node).await?;
+            }
             Node::ProviderItem {
                 origin_protocol: urp::ProviderProtocol::ChatCompletion,
-                body,
                 ..
             } => {
                 let mut pending_extra = HashMap::new();
@@ -450,7 +636,7 @@ pub(crate) async fn emit_synthetic_chat_stream(
                     &id,
                     created,
                     logical_model,
-                    body,
+                    node,
                     &HashMap::new(),
                     &mut pending_extra,
                 )
@@ -467,6 +653,16 @@ pub(crate) async fn emit_synthetic_chat_stream(
         .filter(|reason| !reason.is_empty());
     let finish_reason = if resp.finish_reason == Some(urp::FinishReason::Other) {
         native_finish_reason.unwrap_or("error")
+    } else if matches!(
+        resp.finish_reason,
+        None | Some(FinishReason::Stop | FinishReason::ToolCalls)
+    ) && saw_legacy_function_call
+    {
+        "function_call"
+    } else if matches!(resp.finish_reason, None | Some(FinishReason::Stop)) && saw_tool {
+        "tool_calls"
+    } else if let Some(reason) = resp.finish_reason {
+        finish_reason_to_chat(reason)
     } else if saw_tool {
         "tool_calls"
     } else if saw_legacy_function_call {
@@ -491,7 +687,10 @@ pub(crate) async fn emit_synthetic_chat_stream(
 fn finish_reason_to_chat(reason: urp::FinishReason) -> &'static str {
     match reason {
         urp::FinishReason::Stop => "stop",
-        urp::FinishReason::Length => "length",
+        urp::FinishReason::Length
+        | FinishReason::ContextLimit
+        | FinishReason::Paused
+        | FinishReason::Compaction => "length",
         urp::FinishReason::ToolCalls => "tool_calls",
         urp::FinishReason::ContentFilter => "content_filter",
         urp::FinishReason::Other => "error",
@@ -551,8 +750,10 @@ pub(crate) async fn encode_urp_stream_as_chat(
     sse_max_frame_length: Option<usize>,
     mask_sensitive_info: bool,
 ) -> AppResult<()> {
+    let mut signature_projection = crate::urp::tool_signature::SignatureProjection::default();
     let mut chat_id = String::new();
     let mut created = 0i64;
+    let mut text_offset = 0u64;
     let mut tool_idx = 0usize;
     let mut saw_tool = false;
     let mut saw_legacy_function_call = false;
@@ -560,10 +761,41 @@ pub(crate) async fn encode_urp_stream_as_chat(
     let mut finished = false;
     let mut emitted_node_indices: HashSet<u32> = HashSet::new();
     let mut pending_envelope_extra = HashMap::new();
+    let mut native_audio_nodes = HashSet::new();
+    let mut node_text_offsets = HashMap::new();
 
-    while let Some(event) = rx.recv().await {
+    while let Some(event) = signature_projection.recv(&mut rx).await {
         if finished {
             continue;
+        }
+        if let UrpStreamEvent::NodeStart {
+            node_index,
+            header: NodeHeader::Audio { .. },
+            extra_body,
+            ..
+        } = &event
+            && extra_body
+                .get(urp::CHAT_MESSAGE_AUDIO_EXTRA_KEY)
+                .and_then(Value::as_bool)
+                == Some(true)
+        {
+            native_audio_nodes.insert(*node_index);
+        }
+        if let UrpStreamEvent::NodeDelta {
+            node_index,
+            delta: NodeDelta::Audio { .. },
+            ..
+        } = &event
+            && !native_audio_nodes.contains(node_index)
+        {
+            return emit_chat_media_error(
+                &tx,
+                "Chat audio fragments require a native message.audio lifecycle",
+            )
+            .await;
+        }
+        if let Err(error) = validate_chat_media_event(&event) {
+            return emit_chat_media_error(&tx, &error).await;
         }
         if let UrpStreamEvent::NodeDelta { extra_body, .. } = &event {
             emit_chat_choice_extra_chunk(&tx, &chat_id, created, logical_model, extra_body).await?;
@@ -648,30 +880,53 @@ pub(crate) async fn encode_urp_stream_as_chat(
                         tool_call: Some(tool_call),
                         saw_node_start: true,
                         saw_node_done: false,
+                        ..Default::default()
                     },
                 );
+            }
+            UrpStreamEvent::NodeStart {
+                node_index,
+                header: NodeHeader::Text { phase, .. },
+                ..
+            } => {
+                if let Some(phase) = phase {
+                    pending_envelope_extra.insert("phase".into(), json!(phase));
+                }
+                node_states.entry(node_index).or_default().saw_node_start = true;
             }
             UrpStreamEvent::NodeStart { node_index, .. } => {
                 node_states.entry(node_index).or_default().saw_node_start = true;
             }
             UrpStreamEvent::NodeDelta {
                 node_index,
-                delta: NodeDelta::Text { content },
-                extra_body,
-                ..
-            }
-            | UrpStreamEvent::NodeDelta {
-                node_index,
-                delta: NodeDelta::Refusal { content },
+                delta:
+                    NodeDelta::Text {
+                        logprobs,
+                        signature: _,
+                        citations,
+                        content,
+                    },
                 extra_body,
                 ..
             } => {
-                let delta = chat_delta_with_extras(
-                    json!({ "content": "" }),
-                    &extra_body,
-                    &mut pending_envelope_extra,
+                let node_text_offset = *node_text_offsets.entry(node_index).or_insert(text_offset);
+                text_offset = text_offset.saturating_add(content.chars().count() as u64);
+                let mut native_delta = json!({"content":""});
+                if !citations.is_empty() {
+                    native_delta["annotations"] = json!(crate::urp::citations::encode(
+                        &citations,
+                        crate::urp::ProviderProtocol::ChatCompletion,
+                        node_text_offset
+                    ));
+                }
+                let delta =
+                    chat_delta_with_extras(native_delta, &extra_body, &mut pending_envelope_extra);
+                let scores = chat_delta_scores(
+                    node_states.entry(node_index).or_default(),
+                    &content,
+                    &logprobs,
                 );
-                send_chat_chunk_string(
+                send_chat_text_chunk(
                     &tx,
                     &chat_id,
                     created,
@@ -680,6 +935,37 @@ pub(crate) async fn encode_urp_stream_as_chat(
                     &content,
                     chat_delta_path_content,
                     sse_max_frame_length,
+                    scores,
+                )
+                .await?;
+                emitted_node_indices.insert(node_index);
+            }
+            UrpStreamEvent::NodeDelta {
+                node_index,
+                delta: NodeDelta::Refusal { logprobs, content },
+                extra_body,
+                ..
+            } => {
+                let delta = chat_delta_with_extras(
+                    json!({"refusal":""}),
+                    &extra_body,
+                    &mut pending_envelope_extra,
+                );
+                let scores = chat_delta_scores(
+                    node_states.entry(node_index).or_default(),
+                    &content,
+                    &logprobs,
+                );
+                send_chat_text_chunk(
+                    &tx,
+                    &chat_id,
+                    created,
+                    logical_model,
+                    delta,
+                    &content,
+                    chat_delta_path_refusal,
+                    sse_max_frame_length,
+                    scores,
                 )
                 .await?;
                 emitted_node_indices.insert(node_index);
@@ -688,6 +974,7 @@ pub(crate) async fn encode_urp_stream_as_chat(
                 node_index,
                 delta:
                     NodeDelta::Reasoning {
+                        metadata,
                         content,
                         encrypted,
                         summary,
@@ -712,6 +999,7 @@ pub(crate) async fn encode_urp_stream_as_chat(
                     encrypted.as_ref(),
                     summary.as_deref(),
                     source.as_deref(),
+                    &metadata,
                     &extra_body,
                     &mut pending_envelope_extra,
                     sse_max_frame_length,
@@ -780,6 +1068,16 @@ pub(crate) async fn encode_urp_stream_as_chat(
             } => {
                 let state = node_states.entry(node_index).or_default();
                 state.saw_node_done = true;
+                emit_chat_terminal_scores(
+                    &tx,
+                    &chat_id,
+                    created,
+                    logical_model,
+                    &node,
+                    state,
+                    sse_max_frame_length,
+                )
+                .await?;
                 if let Node::ToolCall {
                     tool_type,
                     call_id,
@@ -844,18 +1142,23 @@ pub(crate) async fn encode_urp_stream_as_chat(
                         tool_call.arguments_streamed = true;
                     }
                     emitted_node_indices.insert(node_index);
+                } else if matches!(
+                    &node,
+                    Node::Image { .. } | Node::File { .. } | Node::Audio { .. }
+                ) {
+                    emit_chat_semantic_node(&tx, &chat_id, created, logical_model, &node).await?;
+                    emitted_node_indices.insert(node_index);
                 } else if let Node::ProviderItem {
                     origin_protocol: urp::ProviderProtocol::ChatCompletion,
-                    body,
                     ..
-                } = node
+                } = &node
                 {
                     emit_chat_provider_content_part(
                         &tx,
                         &chat_id,
                         created,
                         logical_model,
-                        &body,
+                        &node,
                         &HashMap::new(),
                         &mut pending_envelope_extra,
                     )
@@ -864,21 +1167,58 @@ pub(crate) async fn encode_urp_stream_as_chat(
                 }
             }
             UrpStreamEvent::ResponseDone {
+                outcome,
                 finish_reason,
                 usage,
                 output,
                 extra_body,
             } => {
+                if let Some(mut body) = outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.failure_body(false))
+                {
+                    let code = body["error"]["code"].as_str();
+                    let message = body["error"]["message"].as_str().unwrap_or_default();
+                    if crate::error_sanitize::stream_error_is_quota(
+                        code,
+                        message,
+                        body.get("error"),
+                    ) {
+                        body = chat_error_payload(
+                            None,
+                            code,
+                            crate::error_sanitize::GENERIC_QUOTA_TEXT,
+                            &HashMap::new(),
+                        );
+                    } else {
+                        body["error"]["message"] =
+                            json!(crate::error_sanitize::maybe_mask_sensitive_text(
+                                message,
+                                mask_sensitive_info
+                            ));
+                    }
+                    send_plain_sse_data(&tx, body.to_string()).await?;
+                    send_plain_sse_data(&tx, "[DONE]".into()).await?;
+                    return Ok(());
+                }
+
                 for (key, value) in native_chat_delta_extra(&extra_body) {
                     pending_envelope_extra.insert(key, value);
                 }
                 for (node_index, node) in output.iter().enumerate() {
                     if emitted_node_indices.contains(&(node_index as u32)) {
+                        emit_chat_terminal_scores(
+                            &tx,
+                            &chat_id,
+                            created,
+                            logical_model,
+                            node,
+                            node_states.entry(node_index as u32).or_default(),
+                            sse_max_frame_length,
+                        )
+                        .await?;
                         continue;
                     }
-                    // Upstream 2a52d8b0: a tool call that already streamed its
-                    // header and arguments must not be re-emitted from the
-                    // terminal snapshot's output list.
                     if let Node::ToolCall { call_id, .. } = node
                         && node_states.values().any(|state| {
                             state
@@ -891,6 +1231,7 @@ pub(crate) async fn encode_urp_stream_as_chat(
                     }
                     match node {
                         Node::Reasoning {
+                            metadata,
                             content,
                             encrypted,
                             summary,
@@ -915,6 +1256,7 @@ pub(crate) async fn encode_urp_stream_as_chat(
                                 encrypted.as_ref(),
                                 summary.as_deref(),
                                 source.as_deref(),
+                                metadata,
                                 extra_body,
                                 &mut pending_envelope_extra,
                                 sse_max_frame_length,
@@ -982,26 +1324,37 @@ pub(crate) async fn encode_urp_stream_as_chat(
                         | Node::Refusal { content, .. } => {
                             if !content.is_empty() {
                                 let delta = chat_delta_with_extras(
-                                    json!({ "content": "" }),
+                                    chat_text_node_delta(node, text_offset),
                                     &HashMap::new(),
                                     &mut pending_envelope_extra,
                                 );
-                                send_chat_chunk_string(
+                                if matches!(node, Node::Text { .. }) {
+                                    text_offset += content.chars().count() as u64;
+                                }
+                                send_chat_text_chunk(
                                     &tx,
                                     &chat_id,
                                     created,
                                     logical_model,
                                     delta,
                                     content,
-                                    chat_delta_path_content,
+                                    if matches!(node, Node::Refusal { .. }) {
+                                        chat_delta_path_refusal
+                                    } else {
+                                        chat_delta_path_content
+                                    },
                                     sse_max_frame_length,
+                                    node.token_scores(),
                                 )
                                 .await?;
                             }
                         }
+                        Node::Image { .. } | Node::File { .. } | Node::Audio { .. } => {
+                            emit_chat_semantic_node(&tx, &chat_id, created, logical_model, node)
+                                .await?;
+                        }
                         Node::ProviderItem {
                             origin_protocol: urp::ProviderProtocol::ChatCompletion,
-                            body,
                             ..
                         } => {
                             emit_chat_provider_content_part(
@@ -1009,7 +1362,7 @@ pub(crate) async fn encode_urp_stream_as_chat(
                                 &chat_id,
                                 created,
                                 logical_model,
-                                body,
+                                node,
                                 &HashMap::new(),
                                 &mut pending_envelope_extra,
                             )
@@ -1046,6 +1399,16 @@ pub(crate) async fn encode_urp_stream_as_chat(
                     .filter(|reason| !reason.is_empty());
                 let finish_reason = if finish_reason == Some(FinishReason::Other) {
                     native_finish_reason.unwrap_or("error")
+                } else if matches!(
+                    finish_reason,
+                    None | Some(FinishReason::Stop | FinishReason::ToolCalls)
+                ) && saw_legacy_function_call
+                {
+                    "function_call"
+                } else if matches!(finish_reason, None | Some(FinishReason::Stop)) && saw_tool {
+                    "tool_calls"
+                } else if let Some(reason) = finish_reason {
+                    finish_reason_to_chat(reason)
                 } else if saw_tool {
                     "tool_calls"
                 } else if saw_legacy_function_call {
@@ -1118,6 +1481,12 @@ pub(crate) async fn encode_urp_stream_as_chat(
         );
         send_plain_sse_data(&tx, payload.to_string()).await?;
         send_plain_sse_data(&tx, "[DONE]".to_string()).await?;
+        return Err(crate::error::AppError::new(
+            axum::http::StatusCode::BAD_GATEWAY,
+            "upstream_stream_incomplete",
+            "upstream stream ended before a terminal event",
+        )
+        .with_downstream_stream_terminal_sent(!tx.is_closed()));
     }
 
     Ok(())
@@ -1132,10 +1501,6 @@ fn reasoning_delta_has_chat_surface(
     content.is_some_and(|content| !content.is_empty())
         || encrypted.is_some_and(|encrypted| !encrypted.is_null())
         || summary.is_some_and(|summary| !summary.is_empty())
-        || extra_body
-            .get("inject_reasoning_content")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
         || extra_body.contains_key(urp::CHAT_REASONING_DETAIL_EXTRA_KEY)
         || extra_body.contains_key(CHAT_DELTA_EXTRA_BODY_KEY)
 }
@@ -1145,12 +1510,16 @@ async fn emit_chat_provider_content_part(
     chat_id: &str,
     created: i64,
     logical_model: &str,
-    body: &Value,
+    node: &Node,
     event_extra: &HashMap<String, Value>,
     pending_envelope_extra: &mut HashMap<String, Value>,
 ) -> AppResult<()> {
     let delta = chat_delta_with_extras(
-        json!({ "content": [sanitize_provider_item_wire_body(body)] }),
+        Value::Object(
+            crate::urp::encode::openai_chat::encode_assistant_chat_message_from_nodes(
+                std::slice::from_ref(node),
+            ),
+        ),
         event_extra,
         pending_envelope_extra,
     );
@@ -1268,7 +1637,7 @@ async fn emit_tool_call_arguments_delta(
         created,
         logical_model,
         delta,
-        &urp::tool_call_arguments_for_wire(arguments),
+        arguments,
         if tool_call.legacy_function_call {
             chat_delta_path_function_call_arguments
         } else if tool_call.tool_type == urp::ToolCallType::Custom {
@@ -1312,38 +1681,17 @@ async fn emit_reasoning_delta(
     encrypted: Option<&Value>,
     summary: Option<&str>,
     source: Option<&str>,
+    metadata: &urp::ReasoningMetadata,
     extra_body: &HashMap<String, Value>,
     pending_envelope_extra: &mut HashMap<String, Value>,
     sse_max_frame_length: Option<usize>,
 ) -> AppResult<()> {
     let mut event_delta_extra = native_chat_delta_extra(extra_body);
 
-    if let Some(detail) = extra_body
-        .get(urp::CHAT_REASONING_DETAIL_EXTRA_KEY)
-        .and_then(Value::as_object)
-    {
-        let delta = chat_delta_with_raw_extras(
-            json!({ "reasoning_details": [Value::Object(detail.clone())] }),
-            &mut event_delta_extra,
-            pending_envelope_extra,
-        );
-        let chunk = json!({
-            "id": chat_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": logical_model,
-            "choices": [{
-                "index": 0,
-                "delta": delta,
-                "finish_reason": Value::Null
-            }]
-        });
-        return send_plain_sse_data(tx, chunk.to_string()).await;
-    }
-
-    if let Some(rc_value) = extra_body
-        .get("inject_reasoning_content")
-        .and_then(Value::as_str)
+    if let Some(rc_value) = metadata
+        .chat_content
+        .then(|| content.or(summary))
+        .flatten()
         .filter(|s| !s.is_empty())
     {
         send_chat_chunk_string(
@@ -1362,17 +1710,29 @@ async fn emit_reasoning_delta(
         )
         .await?;
     }
-    let format = source.filter(|format| !format.is_empty()).or_else(|| {
-        extra_body
-            .get("format")
-            .and_then(Value::as_str)
-            .filter(|format| !format.is_empty())
-    });
-    let reasoning_id = extra_body
-        .get("reasoning_item_id")
-        .or_else(|| extra_body.get("id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty());
+    if let Some(detail) = extra_body
+        .get(urp::CHAT_REASONING_DETAIL_EXTRA_KEY)
+        .and_then(Value::as_object)
+    {
+        let details = urp::reasoning::chat_details(
+            content,
+            summary,
+            encrypted,
+            metadata.item_id.as_deref(),
+            source,
+            Some(detail),
+        );
+        for detail in details {
+            let delta = json!({ "reasoning_details": [detail] });
+            let delta =
+                chat_delta_with_raw_extras(delta, &mut event_delta_extra, pending_envelope_extra);
+            send_plain_sse_data(tx, json!({"id":chat_id,"object":"chat.completion.chunk","created":created,"model":logical_model,"choices":[{"index":0,"delta":delta,"finish_reason":null}]}).to_string()).await?;
+        }
+        return Ok(());
+    }
+
+    let format = source.filter(|format| !format.is_empty());
+    let reasoning_id = metadata.item_id.as_deref();
 
     if let Some(signature) = encrypted.and_then(|value| {
         value
@@ -1415,43 +1775,21 @@ async fn emit_reasoning_delta(
         .await?;
     }
     if let Some(summary) = summary.filter(|summary| !summary.is_empty()) {
-        if extra_body
-            .get("openwebui_reasoning_content")
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            send_chat_chunk_string(
-                tx,
-                chat_id,
-                created,
-                logical_model,
-                chat_delta_with_raw_extras(
-                    json!({ "reasoning_content": "" }),
-                    &mut event_delta_extra,
-                    pending_envelope_extra,
-                ),
-                summary,
-                chat_delta_path_reasoning_content,
-                sse_max_frame_length,
-            )
-            .await?;
-        } else {
-            send_chat_chunk_string(
-                tx,
-                chat_id,
-                created,
-                logical_model,
-                chat_delta_with_raw_extras(
-                    chat_reasoning_delta_from_summary("", format),
-                    &mut event_delta_extra,
-                    pending_envelope_extra,
-                ),
-                summary,
-                chat_delta_path_reasoning_summary,
-                sse_max_frame_length,
-            )
-            .await?;
-        }
+        send_chat_chunk_string(
+            tx,
+            chat_id,
+            created,
+            logical_model,
+            chat_delta_with_raw_extras(
+                chat_reasoning_delta_from_summary("", format),
+                &mut event_delta_extra,
+                pending_envelope_extra,
+            ),
+            summary,
+            chat_delta_path_reasoning_summary,
+            sse_max_frame_length,
+        )
+        .await?;
     }
     if !event_delta_extra.is_empty() || !pending_envelope_extra.is_empty() {
         let delta =
@@ -1472,192 +1810,116 @@ async fn emit_reasoning_delta(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::request_capture::{SseFrameCapture, with_sse_capture};
-    use crate::urp::decode::openai_chat::decode_response;
-    use serde_json::json;
-    use tokio::sync::mpsc;
+fn chat_delta_path_refusal(value: &mut Value, content: &str) {
+    value["choices"][0]["delta"]["refusal"] = json!(content);
+}
 
-    fn captured_chat_json_frames(frames: &[String]) -> Vec<Value> {
-        frames
-            .iter()
-            .filter_map(|frame| {
-                let data = frame.strip_prefix("data: ")?.strip_suffix("\n\n")?;
-                (data != "[DONE]").then(|| serde_json::from_str(data).expect("Chat frame JSON"))
-            })
-            .collect()
-    }
-
-    #[test]
-    fn chat_raw_error_replay_materializes_metadata_fallbacks_and_filters_reserved_owners() {
-        let original = json!({
-            "id": "chatcmpl_error",
-            "vendor_frame": true,
-            "_monoize_frame_spoof": true,
-            "error": {
-                "message": "provider failed",
-                "metadata": {
-                    "provider_code": "P529",
-                    "error_type": "provider_error",
-                    "vendor_metadata": 7,
-                    "_monoize_metadata_spoof": true
-                },
-                "vendor_error": 8,
-                "_monoize_error_spoof": true
+fn chat_text_node_delta(node: &Node, text_offset: u64) -> Value {
+    match node {
+        Node::Refusal { .. } => json!({"refusal":""}),
+        Node::Text {
+            citations, phase, ..
+        } => {
+            let mut delta = json!({"content":""});
+            if !citations.is_empty() {
+                delta["annotations"] = json!(crate::urp::citations::encode(
+                    &citations,
+                    crate::urp::ProviderProtocol::ChatCompletion,
+                    text_offset
+                ));
             }
-        });
-        let extra_body = HashMap::from([
-            ("type".to_string(), json!("provider_error")),
-            ("param".to_string(), json!("route")),
-        ]);
-
-        let replay = chat_error_payload(Some(&original), Some("P529"), "fallback", &extra_body);
-        assert_eq!(replay["vendor_frame"], json!(true));
-        assert_eq!(replay["error"]["message"], json!("provider failed"));
-        assert_eq!(replay["error"]["code"], json!("P529"));
-        assert_eq!(replay["error"]["type"], json!("provider_error"));
-        assert_eq!(replay["error"]["param"], json!("route"));
-        assert_eq!(replay["error"]["vendor_error"], json!(8));
-        assert_eq!(replay["error"]["metadata"]["vendor_metadata"], json!(7));
-        assert!(!replay.to_string().contains("_monoize_"));
-
-        let direct = chat_error_payload(
-            Some(&json!({
-                "choices": [{
-                    "index": 0,
-                    "vendor_choice": 9,
-                    "_monoize_choice_spoof": true,
-                    "error": { "message": "native", "code": 503, "type": "native_error" }
-                }]
-            })),
-            Some("P529"),
-            "fallback",
-            &extra_body,
-        );
-        assert_eq!(direct["choices"][0]["error"]["code"], json!(503));
-        assert_eq!(direct["choices"][0]["error"]["type"], json!("native_error"));
-        assert_eq!(direct["choices"][0]["vendor_choice"], json!(9));
-        assert!(!direct.to_string().contains("_monoize_"));
-    }
-
-    #[tokio::test]
-    async fn chat_stream_provider_item_filters_nested_internal_metadata() {
-        let (sse_tx, mut sse_rx) = mpsc::channel(4);
-        let frames = SseFrameCapture::new();
-        let native_body = json!({
-            "type": "vendor_part",
-            "payload": {
-                "keep": 1,
-                "_monoize_nested": "drop",
-                "rows": [{ "keep_row": true, "_monoize_row": "drop" }]
-            },
-            "_monoize_top": "drop"
-        });
-        let mut pending_envelope_extra = HashMap::new();
-
-        with_sse_capture(frames.clone(), async {
-            emit_chat_provider_content_part(
-                &sse_tx,
-                "chatcmpl_provider",
-                1,
-                "gpt-5.4",
-                &native_body,
-                &HashMap::new(),
-                &mut pending_envelope_extra,
-            )
-            .await
-            .expect("emit Chat provider content part");
-        })
-        .await;
-        drop(sse_tx);
-        while sse_rx.recv().await.is_some() {}
-
-        let frames = frames.captured_frames().await;
-        let json_frames = captured_chat_json_frames(&frames);
-        assert_eq!(
-            json_frames[0]["choices"][0]["delta"]["content"][0],
-            json!({
-                "type": "vendor_part",
-                "payload": { "keep": 1, "rows": [{ "keep_row": true }] }
-            })
-        );
-        assert_eq!(native_body["_monoize_top"], json!("drop"));
-    }
-
-    #[tokio::test]
-    async fn encode_chat_stream_emits_reasoning_content_when_summary_is_marked_for_openwebui() {
-        let (event_tx, event_rx) = mpsc::channel(16);
-        let (sse_tx, mut sse_rx) = mpsc::channel(16);
-
-        event_tx
-            .send(UrpStreamEvent::ResponseStart {
-                id: "resp_1".to_string(),
-                model: "gpt-5.4".to_string(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response start");
-        event_tx
-            .send(UrpStreamEvent::NodeDelta {
-                node_index: 0,
-                delta: crate::urp::NodeDelta::Reasoning {
-                    content: None,
-                    encrypted: None,
-                    summary: Some("brief summary".to_string()),
-                    source: Some("openrouter".to_string()),
-                },
-                usage: None,
-                extra_body: HashMap::from([
-                    (
-                        "format".to_string(),
-                        Value::String("openrouter".to_string()),
-                    ),
-                    ("openwebui_reasoning_content".to_string(), Value::Bool(true)),
-                ]),
-            })
-            .await
-            .expect("reasoning delta");
-        event_tx
-            .send(UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Stop),
-                usage: None,
-                output: Vec::new(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response done");
-        drop(event_tx);
-
-        encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-5.4", None, true)
-            .await
-            .expect("encode stream");
-
-        let mut text = String::new();
-        while let Some(event) = sse_rx.recv().await {
-            let debug = format!("{event:?}");
-            text.push_str(&debug);
+            if let Some(phase) = phase {
+                delta["phase"] = json!(phase);
+            }
+            delta
         }
-        assert!(text.contains("reasoning_content"));
-        assert!(text.contains("brief summary"));
-        assert!(text.contains("\\\"delta\\\":{\\\"reasoning_content\\\":\\\"brief summary\\\"}"));
-        assert!(!text.contains("data: {\"reasoning_content\":\"brief summary\"}"));
+        _ => json!({}),
+    }
+}
+
+async fn emit_chat_semantic_node(
+    tx: &mpsc::Sender<Event>,
+    id: &str,
+    created: i64,
+    model: &str,
+    node: &Node,
+) -> AppResult<()> {
+    let delta = crate::urp::encode::openai_chat::encode_assistant_chat_message_from_nodes(
+        std::slice::from_ref(node),
+    );
+    send_plain_sse_data(tx,json!({"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[{"index":0,"delta":delta,"finish_reason":null}]}).to_string()).await
+}
+
+async fn send_chat_text_chunk(
+    tx: &mpsc::Sender<Event>,
+    id: &str,
+    created: i64,
+    model: &str,
+    mut delta: Value,
+    content: &str,
+    patch: fn(&mut Value, &str),
+    max_frame_length: Option<usize>,
+    scores: Option<&[urp::TokenLogprob]>,
+) -> AppResult<()> {
+    let annotations = delta
+        .as_object_mut()
+        .and_then(|object| object.remove("annotations"));
+    if let Some(scores) = scores {
+        let field = if delta.get("refusal").is_some() {
+            "refusal"
+        } else {
+            "content"
+        };
+        let mut chunk = json!({"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[{"index":0,"delta":delta,"finish_reason":null,"logprobs":{field:urp::logprobs::encode_openai(scores)}}]});
+        patch(&mut chunk, content);
+        if max_frame_length.is_some_and(|limit| chunk.to_string().len() + 8 > limit) {
+            for (text, scores) in urp::logprobs::fragments(scores) {
+                let mut part = chunk.clone();
+                patch(&mut part, if content.is_empty() { "" } else { &text });
+                part["choices"][0]["logprobs"][field] = urp::logprobs::encode_openai(&scores);
+                send_plain_sse_data(tx, part.to_string()).await?;
+            }
+        } else {
+            send_plain_sse_data(tx, chunk.to_string()).await?;
+        }
+    } else {
+        send_chat_chunk_string(
+            tx,
+            id,
+            created,
+            model,
+            delta,
+            content,
+            patch,
+            max_frame_length,
+        )
+        .await?;
     }
 
-    // The decoder ends without a terminal when it fails -- idle timeout, transport error,
-    // or panic. Every completing path publishes `ResponseDone`, so a closed channel without
-    // one means the turn was cut short. A silent close is indistinguishable from a clean end
-    // for the client, which reports it as a stream that ended before completion.
+    if let Some(annotations) = annotations
+        .and_then(|value| value.as_array().cloned())
+        .filter(|values| !values.is_empty())
+    {
+        send_plain_sse_data(tx,json!({"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[{"index":0,"delta":{"annotations":annotations},"finish_reason":null}]}).to_string()).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod local_stream_compat_tests {
+    use super::*;
+
     #[tokio::test]
     async fn chat_encoder_emits_a_terminal_when_the_decoder_ends_without_one() {
-        let (event_tx, event_rx) = mpsc::channel(8);
-        let (sse_tx, mut sse_rx) = mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let (sse_tx, mut sse_rx) = mpsc::channel(64);
 
         event_tx
             .send(UrpStreamEvent::NodeStart {
                 node_index: 0,
                 header: urp::NodeHeader::Text {
+                    citations: Vec::new(),
+                    signature: None,
                     id: Some("msg_partial".to_string()),
                     role: urp::OrdinaryRole::Assistant,
                     phase: None,
@@ -1670,6 +1932,9 @@ mod tests {
             .send(UrpStreamEvent::NodeDelta {
                 node_index: 0,
                 delta: urp::NodeDelta::Text {
+                    citations: Vec::new(),
+                    signature: None,
+                    logprobs: None,
                     content: "partial answer".to_string(),
                 },
                 usage: None,
@@ -1680,9 +1945,11 @@ mod tests {
         // No ResponseDone: the decoder failed after producing content.
         drop(event_tx);
 
-        encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-5.4", None, false)
+        let error = encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-5.4", None, false)
             .await
-            .expect("encode stream");
+            .expect_err("missing terminal must fail the encoder stage");
+        assert_eq!(error.code, "upstream_stream_incomplete");
+        assert!(error.downstream_stream_terminal_sent);
 
         let mut text = String::new();
         while let Some(event) = sse_rx.recv().await {
@@ -1702,54 +1969,11 @@ mod tests {
         );
     }
 
-    async fn collect_chat_error_frame_text(mask_sensitive_info: bool) -> String {
-        let (event_tx, event_rx) = mpsc::channel(8);
-        let (sse_tx, mut sse_rx) = mpsc::channel(8);
-
-        event_tx
-            .send(UrpStreamEvent::Error {
-                code: Some("upstream_error".to_string()),
-                message:
-                    "decode failed for https://api.cloudflare.com/client/v4/accounts/abc123/ai"
-                        .to_string(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("error event");
-        drop(event_tx);
-
-        encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-5.4", None, mask_sensitive_info)
-            .await
-            .expect("encode stream");
-
-        let mut text = String::new();
-        while let Some(event) = sse_rx.recv().await {
-            text.push_str(&format!("{event:?}"));
-        }
-        text
-    }
-
-    // SAN-11 / SAN-CFG5 item 1: the mid-stream error frame masks the message
-    // only while `mask_sensitive_info` is enabled.
-    #[tokio::test]
-    async fn chat_stream_error_frame_masking_follows_runtime_setting() {
-        let masked = collect_chat_error_frame_text(true).await;
-        assert!(!masked.contains("cloudflare"), "{masked}");
-        assert!(masked.contains("https://***.com/***"), "{masked}");
-
-        let unmasked = collect_chat_error_frame_text(false).await;
-        assert!(unmasked.contains("api.cloudflare.com"), "{unmasked}");
-        assert!(unmasked.contains("abc123"), "{unmasked}");
-    }
-
-    // SAN-11a: quota-classified mid-stream errors collapse to the fixed
-    // generic text, drop the replayed upstream error object, and do so even
-    // when masking is disabled. Applies to every model, not a vendor subset.
     #[tokio::test]
     async fn chat_stream_quota_error_frame_uses_generic_text_and_drops_replay() {
         async fn collect_quota_error_frame(mask_sensitive_info: bool) -> String {
-            let (event_tx, event_rx) = mpsc::channel(8);
-            let (sse_tx, mut sse_rx) = mpsc::channel(8);
+            let (event_tx, event_rx) = mpsc::channel(64);
+            let (sse_tx, mut sse_rx) = mpsc::channel(64);
 
             event_tx
                 .send(UrpStreamEvent::Error {
@@ -1809,685 +2033,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_stream_emits_choice_level_logprobs_on_token_frame() {
+    async fn chat_failed_outcome_hides_quota_detail() {
         let (event_tx, event_rx) = mpsc::channel(8);
-        let (sse_tx, mut sse_rx) = mpsc::channel(8);
-        let frames = SseFrameCapture::new();
-
-        event_tx
-            .send(UrpStreamEvent::ResponseStart {
-                id: "resp_logprobs".to_string(),
-                model: "deepseek-chat".to_string(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .unwrap();
-        event_tx
-            .send(UrpStreamEvent::NodeDelta {
-                node_index: 0,
-                delta: NodeDelta::Text {
-                    content: "A".to_string(),
-                },
-                usage: None,
-                extra_body: HashMap::from([(
-                    CHAT_CHOICE_EXTRA_BODY_KEY.to_string(),
-                    json!({ "logprobs": { "content": [{ "token": "A", "logprob": -0.1 }] } }),
-                )]),
-            })
-            .await
-            .unwrap();
-        event_tx
-            .send(UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Stop),
-                usage: None,
-                output: Vec::new(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .unwrap();
+        let (sse_tx, mut sse_rx) = mpsc::channel(64);
+        let event: UrpStreamEvent = serde_json::from_value(json!({
+            "event": "response_done",
+            "outcome": {
+                "status": "failed",
+                "error": {
+                    "code": "rate_limit_error",
+                    "message": "5 hour quota exceeded for org_private",
+                    "provider_detail": "resets at a private time"
+                }
+            },
+            "output": []
+        }))
+        .unwrap();
+        event_tx.send(event).await.unwrap();
         drop(event_tx);
-
-        with_sse_capture(frames.clone(), async {
-            encode_urp_stream_as_chat(event_rx, sse_tx, "deepseek-chat", None, true)
-                .await
-                .unwrap();
-        })
-        .await;
-        while sse_rx.recv().await.is_some() {}
-
-        let frames = frames.captured_frames().await;
-        let json_frames = captured_chat_json_frames(&frames);
-        let logprobs_frame = json_frames
-            .iter()
-            .find(|frame| frame["choices"][0].get("logprobs").is_some())
-            .expect("choice-level logprobs frame");
-        assert_eq!(
-            logprobs_frame["choices"][0]["logprobs"]["content"][0]["token"],
-            json!("A")
-        );
-        assert_eq!(logprobs_frame["choices"][0]["delta"], json!({}));
-        assert!(
-            logprobs_frame["choices"][0]["delta"]
-                .get("logprobs")
-                .is_none()
-        );
-        assert_eq!(logprobs_frame["choices"][0]["finish_reason"], Value::Null);
-    }
-
-    #[tokio::test]
-    async fn synthetic_chat_stream_emits_reasoning_content_inside_delta() {
-        let (sse_tx, mut sse_rx) = mpsc::channel(16);
-        let response = urp::UrpResponse {
-            id: "resp_1".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: vec![urp::Node::Reasoning {
-                id: None,
-                content: Some("plain_reasoning".to_string()),
-                encrypted: Some(Value::String("enc_reasoning".to_string())),
-                summary: Some("brief summary".to_string()),
-                source: Some("openrouter".to_string()),
-                extra_body: HashMap::from([(
-                    "inject_reasoning_content".to_string(),
-                    Value::String("plain_reasoning".to_string()),
-                )]),
-            }],
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-            extra_body: HashMap::new(),
-        };
-
-        emit_synthetic_chat_stream("gpt-5.4", &response, None, sse_tx)
+        encode_urp_stream_as_chat(event_rx, sse_tx, "model", None, false)
             .await
-            .expect("emit synthetic chat stream");
-
-        let mut text = String::new();
+            .unwrap();
+        let mut wire = String::new();
         while let Some(event) = sse_rx.recv().await {
-            let debug = format!("{event:?}");
-            text.push_str(&debug);
+            wire.push_str(&format!("{event:?}"));
         }
-
-        assert!(text.contains("plain_reasoning"));
-        assert!(text.contains("\\\"delta\\\":{\\\"reasoning_content\\\":\\\"plain_reasoning\\\"}"));
-        assert!(!text.contains("data: {\"reasoning_content\":\"plain_reasoning\"}"));
-    }
-
-    #[tokio::test]
-    async fn synthetic_chat_stream_emits_finish_then_empty_choices_usage_then_done() {
-        let (sse_tx, mut sse_rx) = mpsc::channel(8);
-        let frames = SseFrameCapture::new();
-        let response = urp::UrpResponse {
-            id: "resp_usage".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: Vec::new(),
-            finish_reason: Some(FinishReason::Stop),
-            usage: Some(urp::Usage {
-                input_tokens: 12,
-                output_tokens: 8,
-                input_details: None,
-                output_details: None,
-                extra_body: HashMap::new(),
-            }),
-            extra_body: HashMap::new(),
-        };
-
-        with_sse_capture(frames.clone(), async {
-            emit_synthetic_chat_stream("gpt-5.4", &response, None, sse_tx)
-                .await
-                .expect("emit synthetic chat stream");
-        })
-        .await;
-        while sse_rx.recv().await.is_some() {}
-
-        let frames = frames.captured_frames().await;
-        assert_eq!(frames.len(), 3);
-        let finish: Value = serde_json::from_str(
-            frames[0]
-                .strip_prefix("data: ")
-                .and_then(|frame| frame.strip_suffix("\n\n"))
-                .expect("finish data frame"),
-        )
-        .expect("finish JSON");
-        let usage: Value = serde_json::from_str(
-            frames[1]
-                .strip_prefix("data: ")
-                .and_then(|frame| frame.strip_suffix("\n\n"))
-                .expect("usage data frame"),
-        )
-        .expect("usage JSON");
-
-        assert_eq!(finish["choices"][0]["finish_reason"], json!("stop"));
-        assert_eq!(finish["choices"][0]["delta"], json!({}));
-        assert_eq!(finish["usage"], Value::Null);
-        assert_eq!(usage["choices"], json!([]));
-        assert_eq!(usage["usage"]["prompt_tokens"], json!(12));
-        assert_eq!(usage["usage"]["completion_tokens"], json!(8));
-        for field in ["id", "object", "created", "model"] {
-            assert_eq!(usage[field], finish[field]);
-        }
-        assert_eq!(frames[2], "data: [DONE]\n\n");
-    }
-
-    #[tokio::test]
-    async fn chat_stream_terminal_usage_preserves_nested_unknown_details_and_typed_counters_win() {
-        let (event_tx, event_rx) = mpsc::channel(4);
-        let (sse_tx, mut sse_rx) = mpsc::channel(8);
-        let frames = SseFrameCapture::new();
-
-        event_tx
-            .send(UrpStreamEvent::ResponseStart {
-                id: "resp_nested_usage".to_string(),
-                model: "gpt-5.4".to_string(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response start");
-        event_tx
-            .send(UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Stop),
-                usage: Some(urp::Usage {
-                    input_tokens: 12,
-                    output_tokens: 8,
-                    input_details: Some(urp::InputDetails {
-                        cache_read_tokens: 3,
-                        ..urp::InputDetails::default()
-                    }),
-                    output_details: Some(urp::OutputDetails {
-                        reasoning_tokens: 5,
-                        ..urp::OutputDetails::default()
-                    }),
-                    extra_body: HashMap::from([
-                        (
-                            "prompt_tokens_details".to_string(),
-                            json!({
-                                "cached_tokens": 999,
-                                "future_prompt_detail": { "kind": "warm" },
-                                "_monoize_hidden": true
-                            }),
-                        ),
-                        (
-                            "completion_tokens_details".to_string(),
-                            json!({
-                                "reasoning_tokens": 999,
-                                "future_completion_detail": [1, 2]
-                            }),
-                        ),
-                    ]),
-                }),
-                output: Vec::new(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response done");
-        drop(event_tx);
-
-        with_sse_capture(frames.clone(), async {
-            encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-5.4", None, true)
-                .await
-                .expect("encode stream");
-        })
-        .await;
-        while sse_rx.recv().await.is_some() {}
-
-        let frames = frames.captured_frames().await;
-        let json_frames = captured_chat_json_frames(&frames);
-        let usage = json_frames
-            .iter()
-            .find(|frame| frame["choices"] == json!([]))
-            .and_then(|frame| frame.get("usage"))
-            .expect("terminal Chat usage frame");
-        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], json!(3));
-        assert_eq!(
-            usage["prompt_tokens_details"]["future_prompt_detail"],
-            json!({ "kind": "warm" })
-        );
         assert!(
-            usage["prompt_tokens_details"]
-                .get("_monoize_hidden")
-                .is_none()
-        );
-        assert_eq!(
-            usage["completion_tokens_details"]["reasoning_tokens"],
-            json!(5)
-        );
-        assert_eq!(
-            usage["completion_tokens_details"]["future_completion_detail"],
-            json!([1, 2])
-        );
-    }
-
-    #[tokio::test]
-    async fn encode_chat_stream_maps_live_signature_delta_to_reasoning_encrypted_detail() {
-        let (event_tx, event_rx) = mpsc::channel(16);
-        let (sse_tx, mut sse_rx) = mpsc::channel(16);
-
-        event_tx
-            .send(UrpStreamEvent::ResponseStart {
-                id: "resp_1".to_string(),
-                model: "gpt-5.4".to_string(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response start");
-        event_tx
-            .send(UrpStreamEvent::NodeDelta {
-                node_index: 0,
-                delta: crate::urp::NodeDelta::Reasoning {
-                    content: None,
-                    encrypted: Some(Value::String("live_sig".to_string())),
-                    summary: None,
-                    source: Some("openrouter".to_string()),
-                },
-                usage: None,
-                extra_body: HashMap::from([(
-                    "format".to_string(),
-                    Value::String("openrouter".to_string()),
-                )]),
-            })
-            .await
-            .expect("reasoning signature delta");
-        event_tx
-            .send(UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Stop),
-                usage: None,
-                output: Vec::new(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response done");
-        drop(event_tx);
-
-        encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-5.4", None, true)
-            .await
-            .expect("encode stream");
-
-        let mut text = String::new();
-        while let Some(event) = sse_rx.recv().await {
-            let debug = format!("{event:?}");
-            text.push_str(&debug);
-        }
-
-        assert!(text.contains("reasoning_details"));
-        assert!(text.contains("reasoning.encrypted"));
-        assert!(text.contains("live_sig"));
-        assert!(!text.contains("\"reasoning\":"));
-        assert!(!text.contains("\"signature\":"));
-    }
-
-    #[tokio::test]
-    async fn response_done_fallback_deduplicates_parallel_tools_by_node_index() {
-        let (event_tx, event_rx) = mpsc::channel(16);
-        let (sse_tx, mut sse_rx) = mpsc::channel(32);
-        let frames = SseFrameCapture::new();
-
-        event_tx
-            .send(UrpStreamEvent::ResponseStart {
-                id: "resp_tools".to_string(),
-                model: "gpt-5.4".to_string(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response start");
-        event_tx
-            .send(UrpStreamEvent::NodeStart {
-                node_index: 0,
-                header: NodeHeader::ToolCall {
-                    id: None,
-                    tool_type: urp::ToolCallType::Function,
-                    call_id: "call_a".to_string(),
-                    name: "tool_a".to_string(),
-                },
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("first tool start");
-        event_tx
-            .send(UrpStreamEvent::NodeDelta {
-                node_index: 0,
-                delta: NodeDelta::ToolCallArguments {
-                    arguments: "{\"a\":1}".to_string(),
-                },
-                usage: None,
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("first tool arguments");
-        event_tx
-            .send(UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Stop),
-                usage: None,
-                output: vec![
-                    Node::ToolCall {
-                        id: None,
-                        tool_type: urp::ToolCallType::Function,
-                        call_id: "call_a".to_string(),
-                        name: "tool_a".to_string(),
-                        arguments: "{\"a\":1}".to_string(),
-                        extra_body: HashMap::new(),
-                    },
-                    Node::ToolCall {
-                        id: None,
-                        tool_type: urp::ToolCallType::Function,
-                        call_id: "call_b".to_string(),
-                        name: "tool_b".to_string(),
-                        arguments: "{\"b\":2}".to_string(),
-                        extra_body: HashMap::new(),
-                    },
-                ],
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response done");
-        drop(event_tx);
-
-        with_sse_capture(frames.clone(), async {
-            encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-5.4", None, true)
-                .await
-                .expect("encode stream");
-        })
-        .await;
-        while sse_rx.recv().await.is_some() {}
-
-        let frames = frames.captured_frames().await;
-        let wire = frames.join("");
-        assert_eq!(wire.matches("call_a").count(), 1, "{wire}");
-        assert_eq!(wire.matches("call_b").count(), 1, "{wire}");
-        assert!(wire.contains("tool_a") && wire.contains("tool_b"), "{wire}");
-        let json_frames = captured_chat_json_frames(&frames);
-        assert_eq!(
-            json_frames
-                .iter()
-                .filter(|frame| frame["choices"][0]["finish_reason"].as_str() == Some("tool_calls"))
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn legacy_function_call_stream_replays_deprecated_shape_and_finish_reason() {
-        let (event_tx, event_rx) = mpsc::channel(16);
-        let (sse_tx, mut sse_rx) = mpsc::channel(32);
-        let frames = SseFrameCapture::new();
-        let legacy_extra = HashMap::from([(
-            urp::CHAT_LEGACY_FUNCTION_CALL_EXTRA_KEY.to_string(),
-            Value::Bool(true),
-        )]);
-
-        event_tx
-            .send(UrpStreamEvent::ResponseStart {
-                id: "resp_legacy".to_string(),
-                model: "gpt-4".to_string(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .unwrap();
-        event_tx
-            .send(UrpStreamEvent::NodeStart {
-                node_index: 0,
-                header: NodeHeader::ToolCall {
-                    id: None,
-                    tool_type: urp::ToolCallType::Function,
-                    call_id: "legacy_function:lookup".to_string(),
-                    name: "lookup".to_string(),
-                },
-                extra_body: legacy_extra.clone(),
-            })
-            .await
-            .unwrap();
-        for arguments in ["{\"q\":", "1}"] {
-            event_tx
-                .send(UrpStreamEvent::NodeDelta {
-                    node_index: 0,
-                    delta: NodeDelta::ToolCallArguments {
-                        arguments: arguments.to_string(),
-                    },
-                    usage: None,
-                    extra_body: HashMap::new(),
-                })
-                .await
-                .unwrap();
-        }
-        let node = Node::ToolCall {
-            id: None,
-            tool_type: urp::ToolCallType::Function,
-            call_id: "legacy_function:lookup".to_string(),
-            name: "lookup".to_string(),
-            arguments: "{\"q\":1}".to_string(),
-            extra_body: legacy_extra,
-        };
-        event_tx
-            .send(UrpStreamEvent::NodeDone {
-                node_index: 0,
-                node: node.clone(),
-                usage: None,
-                extra_body: HashMap::new(),
-            })
-            .await
-            .unwrap();
-        event_tx
-            .send(UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::ToolCalls),
-                usage: None,
-                output: vec![node],
-                extra_body: HashMap::new(),
-            })
-            .await
-            .unwrap();
-        drop(event_tx);
-
-        with_sse_capture(frames.clone(), async {
-            encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-4", None, true)
-                .await
-                .unwrap();
-        })
-        .await;
-        while sse_rx.recv().await.is_some() {}
-
-        let frames = frames.captured_frames().await;
-        let json_frames = captured_chat_json_frames(&frames);
-        assert!(
-            json_frames
-                .iter()
-                .all(|frame| !frame.to_string().contains("tool_calls"))
-        );
-        assert_eq!(
-            json_frames
-                .iter()
-                .find_map(|frame| frame["choices"][0]["delta"]["function_call"]["name"].as_str()),
-            Some("lookup")
-        );
-        let arguments = json_frames
-            .iter()
-            .filter_map(|frame| frame["choices"][0]["delta"]["function_call"]["arguments"].as_str())
-            .collect::<String>();
-        assert_eq!(arguments, "{\"q\":1}");
-        assert_eq!(
-            json_frames
-                .iter()
-                .filter(|frame| {
-                    frame["choices"][0]["finish_reason"].as_str() == Some("function_call")
-                })
-                .count(),
-            1
-        );
-        assert_eq!(
-            frames
-                .iter()
-                .filter(|frame| frame.contains("[DONE]"))
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn response_done_fallback_emits_later_terminal_only_reasoning_nodes() {
-        let (event_tx, event_rx) = mpsc::channel(16);
-        let (sse_tx, mut sse_rx) = mpsc::channel(32);
-        let frames = SseFrameCapture::new();
-        let server_detail = json!({
-            "type": "reasoning.server_tool_call",
-            "tool_name": "openrouter:fusion",
-            "arguments": "{\"q\":1}",
-            "result": "{\"ok\":true}",
-            "id": "server_1"
-        });
-
-        event_tx
-            .send(UrpStreamEvent::ResponseStart {
-                id: "resp_reasoning".to_string(),
-                model: "gpt-5.4".to_string(),
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response start");
-        event_tx
-            .send(UrpStreamEvent::NodeDelta {
-                node_index: 0,
-                delta: NodeDelta::Reasoning {
-                    content: Some("first reasoning".to_string()),
-                    encrypted: None,
-                    summary: None,
-                    source: Some("openrouter".to_string()),
-                },
-                usage: None,
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("first reasoning delta");
-        event_tx
-            .send(UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Stop),
-                usage: None,
-                output: vec![
-                    Node::Reasoning {
-                        id: None,
-                        content: Some("first reasoning".to_string()),
-                        encrypted: None,
-                        summary: None,
-                        source: Some("openrouter".to_string()),
-                        extra_body: HashMap::new(),
-                    },
-                    Node::Reasoning {
-                        id: None,
-                        content: None,
-                        encrypted: None,
-                        summary: Some("terminal summary".to_string()),
-                        source: Some("openrouter".to_string()),
-                        extra_body: HashMap::new(),
-                    },
-                    Node::Reasoning {
-                        id: Some("server_1".to_string()),
-                        content: None,
-                        encrypted: None,
-                        summary: None,
-                        source: Some("openrouter".to_string()),
-                        extra_body: HashMap::from([(
-                            urp::CHAT_REASONING_DETAIL_EXTRA_KEY.to_string(),
-                            server_detail.clone(),
-                        )]),
-                    },
-                ],
-                extra_body: HashMap::new(),
-            })
-            .await
-            .expect("response done");
-        drop(event_tx);
-
-        with_sse_capture(frames.clone(), async {
-            encode_urp_stream_as_chat(event_rx, sse_tx, "gpt-5.4", None, true)
-                .await
-                .expect("encode stream");
-        })
-        .await;
-        while sse_rx.recv().await.is_some() {}
-
-        let frames = frames.captured_frames().await;
-        let json_frames = captured_chat_json_frames(&frames);
-        let wire = frames.join("");
-        assert_eq!(wire.matches("first reasoning").count(), 1, "{wire}");
-        assert_eq!(wire.matches("terminal summary").count(), 1, "{wire}");
-        assert_eq!(
-            wire.matches("reasoning.server_tool_call").count(),
-            1,
+            wire.contains(crate::error_sanitize::GENERIC_QUOTA_TEXT),
             "{wire}"
         );
-        assert!(json_frames.iter().any(|frame| {
-            frame["choices"][0]["delta"]["reasoning_details"][0] == server_detail
-        }));
-    }
-
-    #[tokio::test]
-    async fn synthetic_chat_stream_preserves_content_array_tool_call_blocks() {
-        let response = decode_response(&json!({
-            "id": "chatcmpl_test",
-            "model": "gpt-5.4",
-            "choices": [{
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        { "type": "text", "text": "before tool" },
-                        { "type": "tool_call", "id": "call_1", "name": "lookup", "arguments": { "q": 1 } }
-                    ]
-                }
-            }]
-        }))
-        .expect("decode response");
-
-        let (sse_tx, mut sse_rx) = mpsc::channel(16);
-        emit_synthetic_chat_stream("gpt-5.4", &response, None, sse_tx)
-            .await
-            .expect("emit synthetic chat stream");
-
-        let mut text = String::new();
-        while let Some(event) = sse_rx.recv().await {
-            let debug = format!("{event:?}");
-            text.push_str(&debug);
-        }
-
-        assert!(text.contains("before tool"));
-        assert!(text.contains("tool_calls"));
-        assert!(text.contains("call_1"));
-        assert!(text.contains("lookup"));
-        assert!(text.contains("finish_reason"));
-    }
-
-    #[tokio::test]
-    async fn synthetic_chat_stream_preserves_content_array_tool_use_blocks() {
-        let response = decode_response(&json!({
-            "id": "chatcmpl_test",
-            "model": "gpt-5.4",
-            "choices": [{
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        { "type": "text", "text": "before tool" },
-                        { "type": "tool_use", "id": "call_1", "name": "lookup", "input": { "q": 1 } }
-                    ]
-                }
-            }]
-        }))
-        .expect("decode response");
-
-        let (sse_tx, mut sse_rx) = mpsc::channel(16);
-        emit_synthetic_chat_stream("gpt-5.4", &response, None, sse_tx)
-            .await
-            .expect("emit synthetic chat stream");
-
-        let mut text = String::new();
-        while let Some(event) = sse_rx.recv().await {
-            let debug = format!("{event:?}");
-            text.push_str(&debug);
-        }
-
-        assert!(text.contains("before tool"));
-        assert!(text.contains("tool_calls"));
-        assert!(text.contains("call_1"));
-        assert!(text.contains("lookup"));
-        assert!(text.contains("finish_reason"));
+        assert!(!wire.contains("org_private"), "{wire}");
+        assert!(!wire.contains("provider_detail"), "{wire}");
+        assert!(!wire.contains("resets at"), "{wire}");
     }
 }

@@ -486,6 +486,9 @@ async fn responses_reasoning_envelope_can_be_disabled_per_api_key() {
 #[tokio::test]
 async fn image_generations_collects_streamed_responses_image_output() {
     let ctx = setup().await;
+    ctx.state.monoize_runtime.write().await.global_transforms = serde_json::from_value(json!([
+        {"transform": "image_enable_openai_generation_tool", "enabled": true, "phase": "request", "config": {}}
+    ])).unwrap();
     let (status, body) = json_post(
         &ctx,
         "/v1/images/generations",
@@ -656,6 +659,9 @@ async fn responses_nonstream_dedupes_streamed_image_generation_item_against_comp
 #[tokio::test]
 async fn image_edits_forwards_base64_images_as_data_urls_to_responses_upstream() {
     let ctx = setup().await;
+    ctx.state.monoize_runtime.write().await.global_transforms = serde_json::from_value(json!([
+        {"transform": "image_enable_openai_generation_tool", "enabled": true, "phase": "request", "config": {}}
+    ])).unwrap();
     let boundary = "----monoize-edit-test";
     let png = base64::engine::general_purpose::STANDARD
         .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9p4N2VwAAAAASUVORK5CYII=")

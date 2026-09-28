@@ -572,7 +572,7 @@ async fn messages_streaming_does_not_duplicate_text_deltas_or_blocks() {
 #[tokio::test]
 async fn messages_streaming_plaintext_reasoning_to_summary_preserves_thinking_delta() {
     let ctx = setup().await;
-    let (upstream_addr, _, _) = start_upstream().await;
+    let (upstream_addr, _, upstream_bodies) = start_upstream().await;
     let base_url = format!("http://{upstream_addr}");
 
     let mut models = HashMap::new();
@@ -653,6 +653,7 @@ async fn messages_streaming_plaintext_reasoning_to_summary_preserves_thinking_de
             "model": "gpt-5-mini",
             "max_tokens": 64,
             "thinking": { "type": "enabled", "budget_tokens": 2048 },
+            "output_config": { "effort": "medium" },
             "messages": [{ "role": "user", "content": [{ "type": "text", "text": "stream with reasoning" }] }],
             "stream": true
         }),
@@ -663,6 +664,8 @@ async fn messages_streaming_plaintext_reasoning_to_summary_preserves_thinking_de
         .filter_map(|(_, data)| serde_json::from_str::<Value>(&data).ok())
         .collect();
 
+    let upstream = upstream_bodies.lock().unwrap().last().unwrap().1.clone();
+    assert_eq!(upstream["reasoning"]["effort"], json!("medium"), "{upstream}");
     let thinking_deltas: Vec<&str> = events
         .iter()
         .filter(|event| event["delta"]["type"].as_str() == Some("thinking_delta"))

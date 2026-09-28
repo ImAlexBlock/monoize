@@ -1,0 +1,34 @@
+---
+title: "角色：將助手圖片移到使用者訊息"
+description: 將助手圖片移到下一則使用者訊息。
+---
+
+## 作用
+
+此轉換將每張助手圖片移到下一則使用者訊息之前。如果後面沒有使用者訊息，則將圖片附加到末尾。圖片的角色改為 user，圖片來源和圖片順序維持不變。其他內容維持不變。
+
+## 使用時機
+
+當上游接受助手圖片欄位，卻忽略其中的圖片內容時，啟用此轉換。
+
+## 參考
+
+| 屬性 | 值 |
+| --- | --- |
+| Type ID | `role_assistant_image_to_user` |
+| 階段 | `request` |
+| 範圍 | Provider, Global, API key |
+
+## 設定
+
+此轉換沒有選項。使用空的 `config` 物件。
+
+```json
+{
+  "transform": "role_assistant_image_to_user",
+  "enabled": true,
+  "phase": "request",
+  "models": ["*"],
+  "config": {}
+}
+```

@@ -67,7 +67,11 @@ async fn responses_streaming_preserves_image_generation_partial_image_events() {
         .expect("native image_generation_call output item");
     assert_eq!(image["id"].as_str(), Some("ig_mock"));
     assert_eq!(image["output_format"].as_str(), Some("png"));
-    assert!(image["result"].as_str().is_some_and(|data| !data.is_empty()));
+    assert!(
+        image["result"]
+            .as_str()
+            .is_some_and(|data| !data.is_empty())
+    );
     assert!(!text.contains("output_image"), "{text}");
 }
 
@@ -93,8 +97,8 @@ async fn responses_streaming_native_image_generation_item_lifecycle_stays_top_le
 
     let resp = ctx.router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let text = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes())
-        .to_string();
+    let text =
+        String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
     let frames = parse_responses_sse_json(&text);
 
     let added = frames
@@ -120,12 +124,13 @@ async fn responses_streaming_native_image_generation_item_lifecycle_stays_top_le
         image_done[0].1["item"]["output_format"].as_str(),
         Some("webp")
     );
-    assert!(image_done[0].1["item"]["result"]
-        .as_str()
-        .is_some_and(|data| !data.is_empty()));
+    assert!(
+        image_done[0].1["item"]["result"]
+            .as_str()
+            .is_some_and(|data| !data.is_empty())
+    );
     assert!(!frames.iter().any(|(event, payload)| {
-        event.starts_with("response.content_part")
-            && payload["item_id"].as_str() == Some("ig_mock")
+        event.starts_with("response.content_part") && payload["item_id"].as_str() == Some("ig_mock")
     }));
 
     let completed = frames
@@ -297,7 +302,7 @@ async fn responses_streaming_uses_top_level_payload_fields_and_delta_ids() {
         text_delta.1["item_id"].as_str().is_some(),
         "text delta must include item_id"
     );
-    assert_eq!(text_delta.1["logprobs"], json!([]));
+    assert_eq!(text_delta.1["logprobs"], Value::Null);
 
     let reasoning_summary_delta = frames
         .iter()

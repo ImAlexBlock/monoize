@@ -18,6 +18,9 @@ mod routing_models;
 #[path = "api/billing_request_logs.rs"]
 mod billing_request_logs;
 
+#[path = "api/protocol_settlement.rs"]
+mod protocol_settlement;
+
 #[path = "api/upstream_response_model.rs"]
 mod upstream_response_model;
 

@@ -1236,7 +1236,7 @@ mod tests {
     use sea_orm::{ConnectionTrait, Value as SeaValue};
 
     pub(crate) async fn make_state() -> AppState {
-        load_state_with_runtime(RuntimeConfig {
+        let mut state = load_state_with_runtime(RuntimeConfig {
             listen: "127.0.0.1:0".to_string(),
             metrics_path: "/metrics".to_string(),
             database_dsn: "sqlite::memory:".to_string(),
@@ -1244,7 +1244,19 @@ mod tests {
             node: crate::node_config::NodeSettings::primary_default(),
         })
         .await
-        .expect("state loads")
+        .expect("state loads");
+        let store = crate::store_billing::exchange_rate::ExchangeRateStore::new(state.db_pool.clone());
+        store.persist(&crate::store_billing::exchange_rate::ExchangeRateSnapshot {
+            base: "USD".into(),
+            quote: "CNY".into(),
+            cny_per_usd: "7".into(),
+            source_updated_at: Utc::now(),
+            refreshed_at: Utc::now(),
+        }).await.expect("test exchange rate persists");
+        state.exchange_rate_service =
+            crate::store_billing::exchange_rate::ExchangeRateService::new_read_only(state.db_pool.clone())
+                .await.expect("test exchange rate loads");
+        state
     }
 
     fn token_rate(id: &str, usage_class: &str) -> DbBillingRateRecord {

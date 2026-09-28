@@ -237,6 +237,7 @@ async fn messages_nonstream_thinking_from_responses_upstream() {
             "model": "gpt-5-mini",
             "max_tokens": 64,
             "thinking": { "type": "enabled", "budget_tokens": 2048 },
+            "output_config": { "effort": "medium" },
             "messages": [{ "role": "user", "content": [{ "type": "text", "text": "show reasoning" }] }]
         }),
     )

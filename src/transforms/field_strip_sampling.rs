@@ -182,6 +182,12 @@ mod tests {
 
     fn request() -> UrpRequest {
         UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "kimi-test".to_string(),
             input: vec![Node::text(OrdinaryRole::User, "hi")],
             stream: Some(false),

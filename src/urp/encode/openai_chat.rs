@@ -1,6 +1,6 @@
 use crate::urp::encode::{
-    file_id_origin_matches, role_to_str, sanitize_provider_item_wire_body, text_parts,
-    tool_choice_to_chat_value, usage_input_details, usage_output_details,
+    role_to_str, sanitize_provider_item_wire_body, text_parts, tool_choice_to_chat_value,
+    usage_input_details, usage_output_details,
 };
 use crate::urp::internal_legacy_bridge::{Item, Part, Role, nodes_to_items};
 use crate::urp::stream_helpers::{reasoning_encrypted_detail_value, reasoning_text_detail_value};
@@ -9,9 +9,9 @@ use crate::urp::{
     CHAT_LEGACY_FUNCTION_DEFINITION_EXTRA_KEY, CHAT_LEGACY_FUNCTION_RESULT_EXTRA_KEY,
     CHAT_MESSAGE_AUDIO_EXTRA_KEY, CHAT_REASONING_CONFIG_EXTRA_KEY, CHAT_REASONING_DETAIL_EXTRA_KEY,
     CHAT_REASONING_SURFACE_EXTRA_KEY, CHAT_REASONING_SURFACE_REASONING_CONTENT,
-    CHAT_THINKING_CONFIG_EXTRA_KEY, FILE_ID_ORIGIN_OPENAI, FileSource, FinishReason, ImageSource,
-    Node, OrdinaryRole, ProviderProtocol, ResponseFormat, StopControl, ToolCallType, ToolChoice,
-    ToolDefinition, ToolResultContent, UrpRequest, UrpResponse, tool_call_arguments_for_wire,
+    CHAT_THINKING_CONFIG_EXTRA_KEY, FileSource, FinishReason, ImageSource, Node, OrdinaryRole,
+    ProviderProtocol, ResponseFormat, StopControl, ToolCallType, ToolChoice, ToolDefinition,
+    ToolResultContent, UrpRequest, UrpResponse, tool_call_arguments_for_wire,
 };
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -44,7 +44,7 @@ fn encode_chat_tool_call(
         ToolCallType::Custom => json!({
             "id": call_id,
             "type": "custom",
-            "custom": { "name": name, "input": tool_call_arguments_for_wire(arguments) }
+            "custom": { "name": name, "input": arguments }
         }),
     }
 }
@@ -97,7 +97,9 @@ fn encode_chat_content_part(part: &Part) -> Option<Value> {
             Some(block)
         }
         Part::Image {
-            source, extra_body, ..
+            metadata,
+            source,
+            extra_body,
         } => {
             let mut image = match source {
                 ImageSource::Url { url, detail } => {
@@ -111,38 +113,67 @@ fn encode_chat_content_part(part: &Part) -> Option<Value> {
             };
             if let Some(obj) = image.as_object_mut() {
                 merge_chat_wire_extra(obj, extra_body);
+                for key in ["detail", "filename", "media_type", "source"] {
+                    obj.remove(key);
+                }
+                let mut image_url = Map::new();
+                let detail = match source {
+                    ImageSource::Url { url, detail } => {
+                        image_url.insert("url".into(), json!(url));
+                        detail.as_ref()
+                    }
+                    ImageSource::Base64 { media_type, data } => {
+                        image_url.insert(
+                            "url".into(),
+                            json!(format!("data:{media_type};base64,{data}")),
+                        );
+                        metadata.detail.as_ref()
+                    }
+                    ImageSource::FileId { .. } => return None,
+                };
+                if let Some(detail) = detail {
+                    image_url.insert("detail".into(), json!(detail));
+                }
+                obj.insert("image_url".into(), Value::Object(image_url));
+                obj.insert("type".into(), json!("image_url"));
             }
             Some(image)
         }
         Part::File {
-            source, extra_body, ..
-        } => encode_chat_file_part(source, extra_body),
+            metadata,
+            source,
+            extra_body,
+        } => encode_chat_file_part(source, metadata, extra_body),
         Part::Audio {
             source, extra_body, ..
         } => encode_chat_audio_part(source, extra_body),
         Part::ProviderItem {
+            id,
+            item_type,
             origin_protocol,
             body,
             extra_body,
-            ..
-        } => encode_chat_provider_part(*origin_protocol, body, extra_body),
+        } => {
+            encode_chat_provider_part(*origin_protocol, id.as_deref(), item_type, body, extra_body)
+        }
         _ => None,
     }
 }
 
 fn encode_chat_file_part(
     source: &FileSource,
+    metadata: &crate::urp::MediaMetadata,
     extra_body: &HashMap<String, Value>,
 ) -> Option<Value> {
     let file = match source {
         FileSource::FileId { file_id }
-            if file_id_origin_matches(extra_body, FILE_ID_ORIGIN_OPENAI) =>
+            if crate::urp::media::resource_matches(metadata, ProviderProtocol::ChatCompletion) =>
         {
             json!({ "file_id": file_id })
         }
-        FileSource::Base64 { filename, data, .. } => {
-            let mut file = json!({ "file_data": data });
-            if let Some(filename) = filename {
+        FileSource::Base64 { media_type, data } => {
+            let mut file = json!({ "file_data": format!("data:{media_type};base64,{data}") });
+            if let Some(filename) = &metadata.filename {
                 file["filename"] = json!(filename);
             }
             file
@@ -152,9 +183,27 @@ fn encode_chat_file_part(
         | FileSource::Text { .. }
         | FileSource::Content { .. } => return None,
     };
-    let mut block = json!({ "type": "file", "file": file });
-    merge_chat_wire_extra(block.as_object_mut()?, extra_body);
-    Some(block)
+    let mut file = file;
+    if let Some(filename) = &metadata.filename {
+        file["filename"] = json!(filename);
+    }
+    let mut block = Map::new();
+    merge_chat_wire_extra(&mut block, extra_body);
+    for key in [
+        "filename",
+        "detail",
+        "media_type",
+        "source",
+        "file_url",
+        "url",
+        "file_id",
+        "file_data",
+    ] {
+        block.remove(key);
+    }
+    block.insert("type".into(), json!("file"));
+    block.insert("file".into(), file);
+    Some(Value::Object(block))
 }
 
 fn encode_chat_audio_part(
@@ -179,17 +228,41 @@ fn encode_chat_audio_part(
 
 fn encode_chat_provider_part(
     origin_protocol: ProviderProtocol,
+    id: Option<&str>,
+    item_type: &str,
     body: &Value,
     extra_body: &HashMap<String, Value>,
 ) -> Option<Value> {
     if origin_protocol != ProviderProtocol::ChatCompletion {
         return None;
     }
+    Some(chat_provider_item_wire_body(
+        id, item_type, body, extra_body,
+    ))
+}
+
+fn chat_provider_item_wire_body(
+    id: Option<&str>,
+    item_type: &str,
+    body: &Value,
+    extra_body: &HashMap<String, Value>,
+) -> Value {
     let mut part = sanitize_provider_item_wire_body(body);
     if let Some(obj) = part.as_object_mut() {
         merge_chat_wire_extra(obj, extra_body);
+        obj.remove("id");
+        obj.remove("type");
+        // Synthetic identities must not add fields absent from the native envelope.
+        if body.get("id").is_some()
+            && let Some(id) = id
+        {
+            obj.insert("id".into(), json!(id));
+        }
+        if body.get("type").is_some() && !item_type.is_empty() {
+            obj.insert("type".into(), json!(item_type));
+        }
     }
-    Some(part)
+    part
 }
 
 fn finalize_chat_message_content(m: &mut Map<String, Value>, content_parts: Vec<Value>) {
@@ -285,6 +358,30 @@ fn push_part_into_pending_chat_message(
     extra_body: &HashMap<String, Value>,
     part: &Part,
 ) {
+    if let Part::ProviderItem {
+        id,
+        item_type,
+        body,
+        extra_body,
+        origin_protocol: ProviderProtocol::ChatCompletion,
+        ..
+    } = part
+    {
+        if extra_body
+            .get(crate::urp::CHAT_MESSAGE_ITEM_EXTRA_KEY)
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            flush_pending_chat_message(pending, out);
+            out.push(chat_provider_item_wire_body(
+                id.as_deref(),
+                item_type,
+                body,
+                extra_body,
+            ));
+            return;
+        }
+    }
     let should_flush = pending
         .as_ref()
         .is_some_and(|existing| should_split_chat_message(existing, part));
@@ -303,7 +400,24 @@ fn push_part_into_pending_chat_message(
     });
 
     match part {
+        Part::Audio {
+            metadata,
+            source: _,
+            extra_body,
+        } if extra_body
+            .get(CHAT_MESSAGE_AUDIO_EXTRA_KEY)
+            .and_then(Value::as_bool)
+            == Some(true) =>
+        {
+            if let Some(id) = &metadata.reference_id {
+                entry
+                    .message_extra
+                    .insert("audio".into(), json!({ "id": id }));
+            }
+        }
         Part::ProviderItem {
+            id,
+            item_type,
             origin_protocol: ProviderProtocol::ChatCompletion,
             body,
             extra_body,
@@ -313,15 +427,30 @@ fn push_part_into_pending_chat_message(
             .and_then(Value::as_bool)
             == Some(true) =>
         {
-            entry
-                .message_extra
-                .insert("audio".to_string(), sanitize_provider_item_wire_body(body));
+            entry.message_extra.insert(
+                "audio".to_string(),
+                chat_provider_item_wire_body(id.as_deref(), item_type, body, extra_body),
+            );
         }
-        Part::Text { .. }
-        | Part::Image { .. }
-        | Part::Audio { .. }
-        | Part::File { .. }
-        | Part::ProviderItem { .. } => {
+        Part::Text { citations, .. } => {
+            if !citations.is_empty() {
+                entry
+                    .message_extra
+                    .entry("annotations".into())
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .expect("canonical annotations array")
+                    .extend(crate::urp::citations::encode(
+                        citations,
+                        crate::urp::ProviderProtocol::ChatCompletion,
+                        0,
+                    ));
+            }
+            if let Some(content) = encode_chat_content_part(part) {
+                entry.content_parts.push(content);
+            }
+        }
+        Part::Image { .. } | Part::Audio { .. } | Part::File { .. } | Part::ProviderItem { .. } => {
             if let Some(content) = encode_chat_content_part(part) {
                 entry.content_parts.push(content);
             }
@@ -362,6 +491,16 @@ fn push_part_into_pending_chat_message(
 }
 
 pub fn encode_request(req: &UrpRequest, upstream_model: &str) -> Value {
+    encode_request_checked(req, upstream_model)
+        .unwrap_or_else(|error| crate::urp::media::error_body(&error))
+}
+
+pub fn encode_request_checked(req: &UrpRequest, upstream_model: &str) -> Result<Value, String> {
+    let prepared = crate::urp::media::prepare_request(req, ProviderProtocol::ChatCompletion)?;
+    Ok(encode_request_prepared(&prepared, upstream_model))
+}
+
+fn encode_request_prepared(req: &UrpRequest, upstream_model: &str) -> Value {
     let request_items = nodes_to_items(&req.input);
     let mut body = json!({
         "model": upstream_model,
@@ -387,51 +526,60 @@ pub fn encode_request(req: &UrpRequest, upstream_model: &str) -> Value {
         obj.insert(key.to_string(), Value::from(max));
     }
     if let Some(reasoning) = &req.reasoning {
-        let deepseek_model = is_deepseek_model(upstream_model);
-        let raw_reasoning = reasoning
+        let native_reasoning = reasoning
             .extra_body
             .get(CHAT_REASONING_CONFIG_EXTRA_KEY)
-            .and_then(Value::as_object)
-            .cloned();
-        let raw_thinking = reasoning
+            .and_then(Value::as_object);
+        let native_thinking = reasoning
             .extra_body
             .get(CHAT_THINKING_CONFIG_EXTRA_KEY)
-            .cloned();
-        let had_raw_reasoning = raw_reasoning.is_some();
-        if let Some(mut raw_reasoning) = raw_reasoning {
-            if let Some(effort) = reasoning.effort.as_deref() {
-                raw_reasoning.remove("max_tokens");
-                raw_reasoning.insert(
-                    "effort".to_string(),
-                    Value::String(chat_wire_effort(effort).to_string()),
-                );
+            .and_then(Value::as_object);
+        let mut controls = native_reasoning.cloned().unwrap_or_default();
+        controls.retain(|key, _| {
+            !matches!(
+                key.as_str(),
+                "effort" | "summary" | "max_tokens" | "enabled"
+            )
+        });
+        let effort = if reasoning.disabled() {
+            Some("none")
+        } else {
+            reasoning.effort.as_deref()
+        };
+        if let Some(summary) = &reasoning.summary {
+            controls.insert("summary".into(), json!(summary));
+        }
+        if native_thinking.is_none() {
+            if let Some(budget) = reasoning.budget_tokens {
+                controls.insert("max_tokens".into(), json!(budget));
             }
-            if !(deepseek_model && reasoning.effort.is_some()) {
-                obj.insert("reasoning".to_string(), Value::Object(raw_reasoning));
+            if let Some(mode) = &reasoning.mode {
+                controls.insert("enabled".into(), json!(mode != "disabled"));
             }
         }
-        if let Some(raw_thinking) = raw_thinking {
-            obj.insert("thinking".to_string(), raw_thinking);
-        }
-        if let Some(effort) = reasoning.effort.as_deref() {
-            if deepseek_model {
-                let wire_effort = deepseek_wire_effort(effort);
-                if effort == "none" {
-                    obj.insert("thinking".to_string(), json!({ "type": "disabled" }));
-                    obj.remove("reasoning_effort");
-                } else {
-                    obj.insert("thinking".to_string(), json!({ "type": "enabled" }));
-                    obj.insert(
-                        "reasoning_effort".to_string(),
-                        Value::String(wire_effort.to_string()),
-                    );
-                }
-            } else if !had_raw_reasoning && effort != "none" {
-                obj.insert(
-                    "reasoning_effort".to_string(),
-                    Value::String(chat_wire_effort(effort).to_string()),
-                );
+        if native_reasoning.is_some() || !controls.is_empty() {
+            if let Some(effort) = effort {
+                controls.insert("effort".into(), json!(chat_wire_effort(effort)));
             }
+            obj.insert("reasoning".into(), Value::Object(controls));
+        } else if let Some(effort) = effort {
+            obj.insert("reasoning_effort".into(), json!(chat_wire_effort(effort)));
+        }
+        if let Some(native) = native_thinking {
+            let mut thinking = native.clone();
+            thinking.retain(|key, _| !matches!(key.as_str(), "type" | "budget_tokens" | "display"));
+            if reasoning.disabled() {
+                thinking.insert("type".into(), json!("disabled"));
+            } else if let Some(mode) = &reasoning.mode {
+                thinking.insert("type".into(), json!(mode));
+            }
+            if let Some(budget) = reasoning.budget_tokens {
+                thinking.insert("budget_tokens".into(), json!(budget));
+            }
+            if let Some(display) = &reasoning.display {
+                thinking.insert("display".into(), json!(display));
+            }
+            obj.insert("thinking".into(), Value::Object(thinking));
         }
     }
     if let Some(tools) = &req.tools {
@@ -497,10 +645,94 @@ pub fn encode_request(req: &UrpRequest, upstream_model: &str) -> Value {
         }
     }
 
+    crate::urp::logprobs::encode_request(
+        &mut body,
+        &req.logprobs,
+        crate::urp::ProviderProtocol::ChatCompletion,
+    );
+    crate::urp::sampling::encode_request(
+        &mut body,
+        &req.sampling,
+        crate::urp::ProviderProtocol::ChatCompletion,
+    );
     body
 }
 
 pub fn encode_response(resp: &UrpResponse, logical_model: &str) -> Value {
+    encode_response_checked(resp, logical_model)
+        .unwrap_or_else(|error| crate::urp::media::error_body(&error))
+}
+
+pub fn encode_response_checked(resp: &UrpResponse, logical_model: &str) -> Result<Value, String> {
+    if let Some(body) = resp
+        .outcome
+        .as_ref()
+        .and_then(|outcome| outcome.failure_body(false))
+    {
+        return Ok(body);
+    }
+    validate_response_nodes(&resp.output)?;
+    Ok(encode_response_validated(resp, logical_model))
+}
+
+pub(crate) fn validate_response_nodes(nodes: &[Node]) -> Result<(), String> {
+    for node in nodes {
+        match node {
+            Node::Image { .. } | Node::File { .. } => {
+                return Err(
+                    "Chat Completions responses cannot represent ordinary image or file output"
+                        .into(),
+                );
+            }
+            Node::Audio {
+                role: OrdinaryRole::Assistant,
+                source,
+                extra_body,
+                ..
+            } if extra_body
+                .get(CHAT_MESSAGE_AUDIO_EXTRA_KEY)
+                .and_then(Value::as_bool)
+                == Some(true)
+                && matches!(source, AudioSource::Base64 { .. }) => {}
+            Node::Audio { .. } => {
+                return Err(
+                    "Chat Completions responses require native message.audio for audio output"
+                        .into(),
+                );
+            }
+            Node::ToolResult { content, .. }
+                if content.iter().any(|part| {
+                    matches!(
+                        part,
+                        ToolResultContent::Image { .. } | ToolResultContent::File { .. }
+                    )
+                }) =>
+            {
+                return Err("Chat Completions responses cannot represent tool-result media".into());
+            }
+            Node::ProviderItem { item_type, .. }
+                if matches!(
+                    item_type.as_str(),
+                    "input_image"
+                        | "output_image"
+                        | "image_url"
+                        | "input_file"
+                        | "output_file"
+                        | "file"
+                        | "input_audio"
+                ) =>
+            {
+                return Err("Native response content cannot contain input-only media items".into());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn encode_response_validated(resp: &UrpResponse, logical_model: &str) -> Value {
+    let projected = crate::urp::tool_signature::project_response(resp);
+    let resp = &projected;
     let message = encode_assistant_chat_message_from_nodes(&resp.output);
     let has_legacy_function_call = resp.output.iter().any(|node| {
         matches!(
@@ -556,7 +788,49 @@ pub fn encode_response(resp: &UrpResponse, logical_model: &str) -> Value {
         }],
     });
 
+    let mut content_scores = Vec::new();
+    let mut refusal_scores = Vec::new();
+    for node in &resp.output {
+        match node {
+            Node::Text {
+                content, logprobs, ..
+            } => {
+                if let Some(scores) = crate::urp::logprobs::valid(logprobs, content) {
+                    content_scores.extend_from_slice(scores);
+                }
+            }
+            Node::Refusal {
+                content, logprobs, ..
+            } => {
+                if let Some(scores) = crate::urp::logprobs::valid(logprobs, content) {
+                    refusal_scores.extend_from_slice(scores);
+                }
+            }
+            _ => {}
+        }
+    }
+    let message = &result["choices"][0]["message"];
+    let content_scores = Some(content_scores);
+    let refusal_scores = Some(refusal_scores);
+    let content_scores = message
+        .get("content")
+        .and_then(Value::as_str)
+        .and_then(|text| crate::urp::logprobs::valid(&content_scores, text));
+    let refusal_scores = message
+        .get("refusal")
+        .and_then(Value::as_str)
+        .and_then(|text| crate::urp::logprobs::valid(&refusal_scores, text));
+    if content_scores.is_some_and(|v| !v.is_empty())
+        || refusal_scores.is_some_and(|v| !v.is_empty())
+    {
+        result["choices"][0]["logprobs"] = json!({
+            "content": content_scores.map(crate::urp::logprobs::encode_openai),
+            "refusal": refusal_scores.map(crate::urp::logprobs::encode_openai),
+        });
+    }
     if let Some(usage) = &resp.usage {
+        let aggregate = usage.accounting();
+        let usage = aggregate.as_ref();
         let input_details = usage_input_details(usage);
         let output_details = usage_output_details(usage);
         let mut usage_value = json!({
@@ -576,6 +850,14 @@ pub fn encode_response(resp: &UrpResponse, logical_model: &str) -> Value {
             }
         });
         merge_chat_usage_extra(&mut usage_value, &usage.extra_body);
+        crate::urp::usage::write_modality(
+            &mut usage_value["prompt_tokens_details"],
+            &input_details.modality_breakdown,
+        );
+        crate::urp::usage::write_modality(
+            &mut usage_value["completion_tokens_details"],
+            &output_details.modality_breakdown,
+        );
         result["usage"] = usage_value;
     }
 
@@ -590,7 +872,7 @@ pub fn encode_response(resp: &UrpResponse, logical_model: &str) -> Value {
             .and_then(Value::as_object_mut)
     {
         for (key, value) in choice_extra {
-            if !key.starts_with("_monoize_") {
+            if !key.starts_with("_monoize_") && key != "logprobs" {
                 choice.entry(key.clone()).or_insert_with(|| value.clone());
             }
         }
@@ -604,11 +886,13 @@ pub fn encode_response(resp: &UrpResponse, logical_model: &str) -> Value {
     result
 }
 
-fn encode_assistant_chat_message_from_nodes(nodes: &[Node]) -> Map<String, Value> {
+pub(crate) fn encode_assistant_chat_message_from_nodes(nodes: &[Node]) -> Map<String, Value> {
     let mut message = Map::new();
     message.insert("role".to_string(), Value::String("assistant".to_string()));
 
     let mut content_parts = Vec::new();
+    let mut text_offset = 0u64;
+    let mut text_count = 0usize;
     let mut tool_calls = Vec::new();
     let mut refusal: Option<String> = None;
     let mut reasoning_parts = Vec::new();
@@ -630,9 +914,25 @@ fn encode_assistant_chat_message_from_nodes(nodes: &[Node]) -> Map<String, Value
             Node::Text {
                 role: OrdinaryRole::Assistant,
                 content,
+                citations,
                 extra_body,
                 ..
             } => {
+                if text_count > 0 {
+                    text_offset += 2;
+                }
+                if !citations.is_empty() {
+                    message
+                        .entry("annotations".to_string())
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                        .unwrap()
+                        .extend(crate::urp::citations::encode(
+                            citations,
+                            crate::urp::ProviderProtocol::ChatCompletion,
+                            text_offset,
+                        ));
+                }
                 let mut block = json!({ "type": "text", "text": content });
                 if let Some(obj) = block.as_object_mut() {
                     merge_chat_wire_extra(obj, extra_body);
@@ -641,45 +941,31 @@ fn encode_assistant_chat_message_from_nodes(nodes: &[Node]) -> Map<String, Value
                     &mut message_extra,
                     assistant_message_extra_from_node(node),
                 );
+                text_offset += content.chars().count() as u64;
+                text_count += 1;
                 content_parts.push(block);
             }
-            Node::Image {
-                role: OrdinaryRole::Assistant,
+            Node::Audio {
+                metadata,
                 source,
                 extra_body,
                 ..
-            } => {
-                let mut image = match source {
-                    ImageSource::Url { url, detail } => {
-                        json!({ "type": "image_url", "image_url": { "url": url, "detail": detail } })
-                    }
-                    ImageSource::Base64 { media_type, data } => json!({
-                        "type": "image_url",
-                        "image_url": { "url": format!("data:{};base64,{}", media_type, data) }
-                    }),
-                    ImageSource::FileId { .. } => continue,
-                };
-                if let Some(obj) = image.as_object_mut() {
-                    merge_chat_wire_extra(obj, extra_body);
+            } if extra_body
+                .get(CHAT_MESSAGE_AUDIO_EXTRA_KEY)
+                .and_then(Value::as_bool)
+                == Some(true) =>
+            {
+                if let Some(audio) = encode_chat_generated_audio(metadata, source, extra_body) {
+                    message_extra.insert("audio".into(), audio);
                 }
-                merge_extra_preserving_existing(
-                    &mut message_extra,
-                    assistant_message_extra_from_node(node),
-                );
-                content_parts.push(image);
-            }
-            Node::File {
-                role: OrdinaryRole::Assistant,
-                ..
-            } => {
-                continue;
             }
             Node::Refusal { content, .. } => {
                 refusal.get_or_insert_with(|| content.clone());
             }
             Node::Reasoning { .. } => {
                 if let Node::Reasoning {
-                    id: _,
+                    metadata,
+                    id,
                     content,
                     encrypted,
                     summary,
@@ -688,7 +974,8 @@ fn encode_assistant_chat_message_from_nodes(nodes: &[Node]) -> Map<String, Value
                 } = node
                 {
                     reasoning_parts.push(Part::Reasoning {
-                        id: None,
+                        metadata: metadata.clone(),
+                        id: id.clone(),
                         content: content.clone(),
                         encrypted: encrypted.clone(),
                         summary: summary.clone(),
@@ -725,6 +1012,8 @@ fn encode_assistant_chat_message_from_nodes(nodes: &[Node]) -> Map<String, Value
                 }
             }
             Node::ProviderItem {
+                id,
+                item_type,
                 role: OrdinaryRole::Assistant,
                 origin_protocol: ProviderProtocol::ChatCompletion,
                 body,
@@ -735,16 +1024,27 @@ fn encode_assistant_chat_message_from_nodes(nodes: &[Node]) -> Map<String, Value
                 .and_then(Value::as_bool)
                 == Some(true) =>
             {
-                message_extra.insert("audio".to_string(), sanitize_provider_item_wire_body(body));
+                message_extra.insert(
+                    "audio".to_string(),
+                    chat_provider_item_wire_body(id.as_deref(), item_type, body, extra_body),
+                );
             }
             Node::ProviderItem {
+                id,
+                item_type,
                 role: OrdinaryRole::Assistant,
                 origin_protocol,
                 body,
                 extra_body,
                 ..
             } => {
-                if let Some(part) = encode_chat_provider_part(*origin_protocol, body, extra_body) {
+                if let Some(part) = encode_chat_provider_part(
+                    *origin_protocol,
+                    id.as_deref(),
+                    item_type,
+                    body,
+                    extra_body,
+                ) {
                     merge_extra_preserving_existing(
                         &mut message_extra,
                         assistant_message_extra_from_node(node),
@@ -770,7 +1070,10 @@ fn encode_assistant_chat_message_from_nodes(nodes: &[Node]) -> Map<String, Value
     insert_openrouter_reasoning_fields(&mut message, &reasoning_parts, true);
     merge_chat_wire_extra(&mut message, &message_extra);
     if !had_content_parts
-        && (message.contains_key("audio") || message.contains_key("function_call"))
+        && (message.contains_key("audio")
+            || message.contains_key("function_call")
+            || message.contains_key("tool_calls")
+            || message.contains_key("refusal"))
     {
         message.insert("content".to_string(), Value::Null);
     }
@@ -820,7 +1123,9 @@ fn encode_messages(messages: &[Item]) -> Vec<Value> {
     for item in messages {
         match item {
             Item::ToolResult {
+                id,
                 call_id,
+                name,
                 content,
                 extra_body,
                 ..
@@ -834,12 +1139,8 @@ fn encode_messages(messages: &[Item]) -> Vec<Value> {
                     .collect::<Vec<_>>()
                     .join("");
                 let mut m = Map::new();
-                if let Some(name) = extra_body
-                    .get(CHAT_LEGACY_FUNCTION_RESULT_EXTRA_KEY)
-                    .and_then(Value::as_str)
-                {
+                if extra_body.contains_key(CHAT_LEGACY_FUNCTION_RESULT_EXTRA_KEY) {
                     m.insert("role".to_string(), Value::String("function".to_string()));
-                    m.insert("name".to_string(), Value::String(name.to_string()));
                     m.insert("content".to_string(), Value::String(text));
                 } else {
                     m.insert("role".to_string(), Value::String("tool".to_string()));
@@ -847,6 +1148,14 @@ fn encode_messages(messages: &[Item]) -> Vec<Value> {
                     m.insert("tool_call_id".to_string(), Value::String(call_id.clone()));
                 }
                 merge_chat_wire_extra(&mut m, extra_body);
+                m.remove("id");
+                m.remove("name");
+                if let Some(id) = id {
+                    m.insert("id".to_string(), Value::String(id.clone()));
+                }
+                if let Some(name) = name {
+                    m.insert("name".to_string(), Value::String(name.clone()));
+                }
                 out.push(Value::Object(m));
             }
             Item::Message {
@@ -1028,6 +1337,7 @@ fn insert_openrouter_reasoning_fields(
 
     for part in parts {
         let Part::Reasoning {
+            metadata,
             id,
             content,
             encrypted,
@@ -1039,77 +1349,52 @@ fn insert_openrouter_reasoning_fields(
             continue;
         };
         let format = source.as_deref().filter(|format| !format.is_empty());
+        if metadata.chat_content && reasoning_content_value.is_none() {
+            reasoning_content_value = content.clone().or_else(|| summary.clone());
+        }
 
         if let Some(raw_detail) = extra_body
             .get(CHAT_REASONING_DETAIL_EXTRA_KEY)
             .and_then(Value::as_object)
         {
-            let mut detail = raw_detail.clone();
-            if let Some(id) = id.as_deref().filter(|id| !id.is_empty()) {
-                detail.insert("id".to_string(), Value::String(id.to_string()));
-            }
-            if let Some(format) = format {
-                detail.insert("format".to_string(), Value::String(format.to_string()));
-            }
-            match detail.get("type").and_then(Value::as_str) {
-                Some("reasoning.summary") => {
-                    if let Some(summary) = summary {
-                        if derive_scalar_aliases_from_raw_details
-                            && reasoning_summary_value.is_none()
-                            && !summary.is_empty()
-                        {
-                            reasoning_summary_value = Some(summary.clone());
-                        }
-                        detail.insert("summary".to_string(), Value::String(summary.clone()));
-                    }
+            details.extend(crate::urp::reasoning::chat_details(
+                content.as_deref(),
+                summary.as_deref(),
+                encrypted.as_ref(),
+                id.as_deref(),
+                format,
+                Some(raw_detail),
+            ));
+            if derive_scalar_aliases_from_raw_details {
+                if reasoning_value.is_none() {
+                    reasoning_value = content.clone();
                 }
-                Some("reasoning.text") => {
-                    if let Some(content) = content {
-                        if derive_scalar_aliases_from_raw_details
-                            && reasoning_value.is_none()
-                            && !content.is_empty()
-                        {
-                            reasoning_value = Some(content.clone());
-                        }
-                        detail.insert("text".to_string(), Value::String(content.clone()));
-                    }
+                if reasoning_summary_value.is_none() {
+                    reasoning_summary_value = summary.clone();
                 }
-                Some("reasoning.encrypted") => {
-                    if let Some(encrypted) = encrypted {
-                        detail.insert("data".to_string(), encrypted.clone());
-                    }
-                }
-                _ => {}
             }
-            details.push(Value::Object(detail));
+            if metadata.chat_content && reasoning_content_value.is_none() {
+                reasoning_content_value = content.clone().or_else(|| summary.clone());
+            }
             continue;
         }
 
-        if extra_body
+        let native_raw_surface = extra_body
             .get(CHAT_REASONING_SURFACE_EXTRA_KEY)
             .and_then(Value::as_str)
-            == Some(CHAT_REASONING_SURFACE_REASONING_CONTENT)
-        {
-            if reasoning_content_value.is_none() {
-                reasoning_content_value = content
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| summary.as_deref().filter(|value| !value.is_empty()))
-                    .map(str::to_string);
-            }
-            continue;
+            == Some(CHAT_REASONING_SURFACE_REASONING_CONTENT);
+        if native_raw_surface && reasoning_content_value.is_none() {
+            reasoning_content_value = content
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
         }
 
         if let Some(summary) = summary.as_deref().filter(|summary| !summary.is_empty()) {
             if reasoning_summary_value.is_none() {
                 reasoning_summary_value = Some(summary.to_string());
             }
-            if (extra_body
-                .get("openwebui_reasoning_content")
-                .and_then(Value::as_bool)
-                == Some(true))
-                && reasoning_content_value.is_none()
-            {
+            if metadata.chat_content && reasoning_content_value.is_none() {
                 reasoning_content_value = Some(summary.to_string());
             }
             details.push(json!({
@@ -1124,7 +1409,9 @@ fn insert_openrouter_reasoning_fields(
             }
         }
 
-        if let Some(content) = content.as_deref().filter(|content| !content.is_empty()) {
+        if !native_raw_surface
+            && let Some(content) = content.as_deref().filter(|content| !content.is_empty())
+        {
             if reasoning_value.is_none() {
                 reasoning_value = Some(content.to_string());
             }
@@ -1180,1564 +1467,44 @@ fn chat_wire_effort(effort: &str) -> &str {
     }
 }
 
-fn deepseek_wire_effort(effort: &str) -> &str {
-    match effort {
-        "none" | "minimal" | "minimum" | "low" | "medium" => "high",
-        "xhigh" | "max" => "max",
-        _ => "high",
-    }
-}
-
 fn finish_reason_to_chat(finish_reason: FinishReason) -> &'static str {
     match finish_reason {
         FinishReason::Stop => "stop",
-        FinishReason::Length => "length",
+        FinishReason::Length
+        | FinishReason::ContextLimit
+        | FinishReason::Paused
+        | FinishReason::Compaction => "length",
         FinishReason::ToolCalls => "tool_calls",
         FinishReason::ContentFilter => "content_filter",
         FinishReason::Other => "error",
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::urp::decode::openai_chat as decode_chat;
-    use crate::urp::decode::openai_responses as decode_responses;
-    use crate::urp::encode::{anthropic as encode_messages, openai_responses as encode_responses};
-    use crate::urp::internal_legacy_bridge::{items_to_nodes, nodes_to_items};
-    use crate::urp::{
-        CustomToolDefinition, FunctionDefinition, InputDetails, OutputDetails, UrpResponse, Usage,
+pub(crate) fn encode_chat_generated_audio(
+    metadata: &crate::urp::MediaMetadata,
+    source: &AudioSource,
+    extra_body: &HashMap<String, Value>,
+) -> Option<Value> {
+    let AudioSource::Base64 { data, .. } = source else {
+        return None;
     };
-    use std::collections::HashMap;
-
-    fn empty_map() -> HashMap<String, Value> {
-        HashMap::new()
-    }
-
-    fn base_request(messages: Vec<Item>) -> UrpRequest {
-        UrpRequest {
-            model: "logical-model".to_string(),
-            input: items_to_nodes(messages),
-            stream: None,
-            temperature: None,
-            top_p: None,
-            max_output_tokens: None,
-            reasoning: None,
-            tools: None,
-            tool_choice: None,
-            parallel_tool_calls: None,
-            stop: None,
-            verbosity: None,
-            response_format: None,
-            user: None,
-            extra_body: empty_map(),
+    let mut audio = Map::new();
+    for (key, value) in extra_body {
+        if !key.starts_with("_monoize_")
+            && !matches!(key.as_str(), "id" | "data" | "transcript" | "expires_at")
+        {
+            audio.insert(key.clone(), value.clone());
         }
     }
-
-    fn wire_items_of_type<'a>(body: &'a Value, key: &str, item_type: &str) -> Vec<&'a Value> {
-        body.get(key)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|item| item.get("type").and_then(Value::as_str) == Some(item_type))
-            .collect()
+    audio.insert("data".into(), json!(data));
+    if let Some(id) = &metadata.reference_id {
+        audio.insert("id".into(), json!(id));
     }
-
-    #[test]
-    fn chat_tool_definition_conflicts_prefer_semantic_fields() {
-        let mut request = base_request(vec![Item::text(Role::User, "use tools")]);
-        request.tools = Some(vec![
-            ToolDefinition {
-                tool_type: "function".to_string(),
-                name: None,
-                description: None,
-                function: Some(FunctionDefinition {
-                    name: "semantic_function".to_string(),
-                    description: Some("semantic function description".to_string()),
-                    parameters: Some(json!({
-                        "type": "object",
-                        "properties": { "query": { "type": "string" } }
-                    })),
-                    strict: Some(true),
-                    extra_body: HashMap::from([
-                        ("name".to_string(), json!("wrong_function_name")),
-                        (
-                            "description".to_string(),
-                            json!("wrong function description"),
-                        ),
-                        ("parameters".to_string(), json!({ "type": "array" })),
-                        ("strict".to_string(), json!(false)),
-                        ("x_function".to_string(), json!("kept")),
-                    ]),
-                }),
-                custom: None,
-                extra_body: HashMap::from([
-                    ("type".to_string(), json!("custom")),
-                    ("function".to_string(), json!({ "name": "wrong_wrapper" })),
-                    ("cache_control".to_string(), json!({ "type": "ephemeral" })),
-                ]),
-            },
-            ToolDefinition {
-                tool_type: "custom".to_string(),
-                name: None,
-                description: None,
-                function: None,
-                custom: Some(CustomToolDefinition {
-                    name: "semantic_custom".to_string(),
-                    description: Some("semantic custom description".to_string()),
-                    format: Some(json!({ "type": "text" })),
-                    extra_body: HashMap::from([
-                        ("name".to_string(), json!("wrong_custom_name")),
-                        ("description".to_string(), json!("wrong custom description")),
-                        ("format".to_string(), json!({ "type": "grammar" })),
-                        ("x_custom".to_string(), json!("kept")),
-                    ]),
-                }),
-                extra_body: HashMap::from([
-                    ("type".to_string(), json!("function")),
-                    ("custom".to_string(), json!({ "name": "wrong_wrapper" })),
-                    ("x_tool".to_string(), json!("kept")),
-                ]),
-            },
-        ]);
-
-        let encoded = encode_request(&request, "gpt-5.4");
-        let tools = encoded["tools"].as_array().expect("Chat tools");
-
-        assert_eq!(tools[0]["type"], json!("function"));
-        assert_eq!(tools[0]["function"]["name"], json!("semantic_function"));
-        assert_eq!(
-            tools[0]["function"]["description"],
-            json!("semantic function description")
-        );
-        assert_eq!(tools[0]["function"]["parameters"]["type"], json!("object"));
-        assert_eq!(tools[0]["function"]["strict"], json!(true));
-        assert_eq!(tools[0]["function"]["x_function"], json!("kept"));
-        assert_eq!(tools[0]["cache_control"], json!({ "type": "ephemeral" }));
-
-        assert_eq!(tools[1]["type"], json!("custom"));
-        assert_eq!(tools[1]["custom"]["name"], json!("semantic_custom"));
-        assert_eq!(
-            tools[1]["custom"]["description"],
-            json!("semantic custom description")
-        );
-        assert_eq!(tools[1]["custom"]["format"], json!({ "type": "text" }));
-        assert_eq!(tools[1]["custom"]["x_custom"], json!("kept"));
-        assert_eq!(tools[1]["x_tool"], json!("kept"));
+    if let Some(transcript) = &metadata.transcript {
+        audio.insert("transcript".into(), json!(transcript));
     }
-
-    #[test]
-    fn deprecated_chat_request_controls_normalize_cross_family_and_replay_by_provenance() {
-        let downstream = json!({
-            "model": "gpt-4-0613",
-            "messages": [{ "role": "user", "content": "look it up" }],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "modern_tool",
-                    "description": "modern descriptor",
-                    "parameters": { "type": "object" }
-                }
-            }],
-            "functions": [{
-                "name": "legacy_lookup",
-                "description": "legacy descriptor",
-                "parameters": {
-                    "properties": { "query": { "type": "string" } },
-                    "required": ["query"]
-                },
-                "strict": true,
-                "x_function": { "cache": "ephemeral" }
-            }],
-            "function_call": {
-                "name": "legacy_lookup",
-                "x_choice": "preserved"
-            }
-        });
-
-        let canonical = decode_chat::decode_request(&downstream).expect("decode legacy request");
-        let tools = canonical.tools.as_ref().expect("semantic tools");
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].function.as_ref().unwrap().name, "modern_tool");
-        let legacy = &tools[1];
-        assert_eq!(legacy.function.as_ref().unwrap().name, "legacy_lookup");
-        assert_eq!(
-            legacy.function.as_ref().unwrap().parameters,
-            Some(json!({
-                "type": "object",
-                "properties": { "query": { "type": "string" } },
-                "required": ["query"]
-            }))
-        );
-        assert_eq!(
-            legacy.function.as_ref().unwrap().extra_body["x_function"],
-            json!({ "cache": "ephemeral" })
-        );
-        assert_eq!(
-            legacy
-                .extra_body
-                .get(CHAT_LEGACY_FUNCTION_DEFINITION_EXTRA_KEY),
-            Some(&json!(true))
-        );
-        assert!(matches!(
-            canonical.tool_choice.as_ref(),
-            Some(ToolChoice::Specific(choice))
-                if choice == &json!({
-                    "type": "function",
-                    "function": { "name": "legacy_lookup" }
-                })
-        ));
-        assert_eq!(
-            canonical
-                .extra_body
-                .get(CHAT_LEGACY_FUNCTION_CHOICE_EXTRA_KEY),
-            Some(&json!({ "name": "legacy_lookup", "x_choice": "preserved" }))
-        );
-
-        let chat = encode_request(&canonical, "gpt-4-0613");
-        assert_eq!(chat["tools"].as_array().unwrap().len(), 1);
-        assert_eq!(chat["tools"][0]["function"]["name"], json!("modern_tool"));
-        assert_eq!(chat["functions"].as_array().unwrap().len(), 1);
-        assert_eq!(chat["functions"][0]["name"], json!("legacy_lookup"));
-        assert_eq!(
-            chat["functions"][0]["x_function"],
-            json!({ "cache": "ephemeral" })
-        );
-        assert!(chat["functions"][0].get("type").is_none());
-        assert_eq!(
-            chat["function_call"],
-            json!({ "name": "legacy_lookup", "x_choice": "preserved" })
-        );
-        assert!(chat.get("tool_choice").is_none());
-
-        let responses = encode_responses::encode_request(&canonical, "gpt-5.4");
-        let response_tools = responses["tools"].as_array().expect("Responses tools");
-        assert_eq!(response_tools.len(), 2);
-        assert_eq!(response_tools[1]["name"], json!("legacy_lookup"));
-        assert_eq!(
-            responses["tool_choice"],
-            json!({ "type": "function", "name": "legacy_lookup" })
-        );
-        assert!(responses.get("functions").is_none());
-        assert!(responses.get("function_call").is_none());
-
-        let messages = encode_messages::encode_request(&canonical, "claude-sonnet-4-6");
-        let message_tools = messages["tools"].as_array().expect("Messages tools");
-        assert_eq!(message_tools.len(), 2);
-        assert_eq!(message_tools[1]["name"], json!("legacy_lookup"));
-        assert_eq!(
-            messages["tool_choice"],
-            json!({ "type": "tool", "name": "legacy_lookup" })
-        );
-        let cross_family_wire = serde_json::to_string(&messages).unwrap();
-        assert!(!cross_family_wire.contains("_monoize_chat_legacy_function"));
-        assert!(!cross_family_wire.contains("function_call"));
-        assert!(!cross_family_wire.contains("\"functions\""));
+    if let Some(expires_at) = metadata.expires_at {
+        audio.insert("expires_at".into(), json!(expires_at));
     }
-
-    #[test]
-    fn modern_chat_tool_choice_wins_a_deprecated_choice_collision() {
-        let canonical = decode_chat::decode_request(&json!({
-            "model": "gpt-5.4",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "tool_choice": "auto",
-            "function_call": "none"
-        }))
-        .expect("decode colliding controls");
-
-        assert!(matches!(
-            canonical.tool_choice.as_ref(),
-            Some(ToolChoice::Mode(mode)) if mode == "auto"
-        ));
-        assert!(
-            !canonical
-                .extra_body
-                .contains_key(CHAT_LEGACY_FUNCTION_CHOICE_EXTRA_KEY)
-        );
-
-        let chat = encode_request(&canonical, "gpt-5.4");
-        assert_eq!(chat["tool_choice"], json!("auto"));
-        assert!(chat.get("function_call").is_none());
-    }
-
-    #[test]
-    fn chat_tool_choice_rejects_recursive_internal_key_spoofing() {
-        let canonical = decode_chat::decode_request(&json!({
-            "model": "gpt-5.4",
-            "messages": [{ "role": "user", "content": "use a tool" }],
-            "tool_choice": {
-                "type": "allowed_tools",
-                "_monoize_outer_spoof": true,
-                "allowed_tools": {
-                    "mode": "required",
-                    "_monoize_wrapper_spoof": true,
-                    "tools": [{
-                        "type": "function",
-                        "function": {
-                            "name": "lookup",
-                            "_monoize_inner_spoof": true
-                        }
-                    }]
-                }
-            }
-        }))
-        .expect("decode Chat request");
-        assert!(
-            !serde_json::to_string(canonical.tool_choice.as_ref().expect("tool choice"))
-                .expect("canonical JSON")
-                .contains("_monoize_")
-        );
-
-        let encoded = encode_request(&canonical, "gpt-5.4");
-        assert!(
-            !serde_json::to_string(&encoded["tool_choice"])
-                .expect("wire JSON")
-                .contains("_monoize_")
-        );
-    }
-
-    #[test]
-    fn deprecated_chat_function_call_mode_replays_without_tool_choice() {
-        let canonical = decode_chat::decode_request(&json!({
-            "model": "gpt-4-0613",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "function_call": "auto"
-        }))
-        .expect("decode legacy mode");
-        assert!(matches!(
-            canonical.tool_choice.as_ref(),
-            Some(ToolChoice::Mode(mode)) if mode == "auto"
-        ));
-
-        let chat = encode_request(&canonical, "gpt-4-0613");
-        assert_eq!(chat["function_call"], json!("auto"));
-        assert!(chat.get("tool_choice").is_none());
-    }
-
-    #[test]
-    fn custom_tool_call_lifecycle_round_trips_and_cross_maps_chat_responses() {
-        let chat = json!({
-            "model": "gpt-5.4",
-            "messages": [
-                { "role": "user", "content": "run the grammar" },
-                {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": "call_custom_1",
-                        "type": "custom",
-                        "custom": { "name": "grammar", "input": "SELECT 1" }
-                    }]
-                },
-                { "role": "tool", "tool_call_id": "call_custom_1", "content": "ok" }
-            ]
-        });
-        let canonical = decode_chat::decode_request(&chat).expect("decode Chat custom lifecycle");
-        assert!(canonical.input.iter().any(|node| matches!(
-            node,
-            Node::ToolCall { tool_type: ToolCallType::Custom, call_id, arguments, .. }
-                if call_id == "call_custom_1" && arguments == "SELECT 1"
-        )));
-        assert!(canonical.input.iter().any(|node| matches!(
-            node,
-            Node::ToolResult { tool_type: ToolCallType::Custom, call_id, .. }
-                if call_id == "call_custom_1"
-        )));
-
-        let chat_roundtrip = encode_request(&canonical, "gpt-5.4");
-        let roundtrip_call = chat_roundtrip["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find_map(|message| {
-                message["tool_calls"]
-                    .as_array()
-                    .and_then(|calls| calls.first())
-            })
-            .expect("same-Chat custom call");
-        assert_eq!(roundtrip_call["type"], json!("custom"));
-        assert_eq!(roundtrip_call["custom"]["name"], json!("grammar"));
-        assert_eq!(roundtrip_call["custom"]["input"], json!("SELECT 1"));
-
-        let responses_cross = encode_responses::encode_request(&canonical, "gpt-5.4");
-        assert_eq!(
-            wire_items_of_type(&responses_cross, "input", "custom_tool_call")[0]["input"],
-            json!("SELECT 1")
-        );
-        assert_eq!(
-            wire_items_of_type(&responses_cross, "input", "custom_tool_call_output")[0]["output"],
-            json!("ok")
-        );
-
-        let responses = json!({
-            "model": "gpt-5.4",
-            "input": [
-                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "run" }] },
-                { "type": "custom_tool_call", "id": "ctc_1", "call_id": "call_custom_2", "name": "grammar", "input": "SELECT 2" },
-                { "type": "custom_tool_call_output", "id": "ctco_1", "call_id": "call_custom_2", "output": "done" }
-            ]
-        });
-        let canonical = decode_responses::decode_request(&responses)
-            .expect("decode Responses custom lifecycle");
-        let responses_roundtrip = encode_responses::encode_request(&canonical, "gpt-5.4");
-        assert_eq!(
-            wire_items_of_type(&responses_roundtrip, "input", "custom_tool_call")[0]["input"],
-            json!("SELECT 2")
-        );
-        assert_eq!(
-            wire_items_of_type(&responses_roundtrip, "input", "custom_tool_call_output")[0]["output"],
-            json!("done")
-        );
-
-        let chat_cross = encode_request(&canonical, "gpt-5.4");
-        let custom_call = chat_cross["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find_map(|message| {
-                message["tool_calls"]
-                    .as_array()
-                    .and_then(|calls| calls.first())
-            })
-            .expect("Responses-to-Chat custom call");
-        assert_eq!(custom_call["type"], json!("custom"));
-        assert_eq!(custom_call["custom"]["input"], json!("SELECT 2"));
-        assert!(
-            chat_cross["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|message| {
-                    message["role"] == json!("tool")
-                        && message["tool_call_id"] == json!("call_custom_2")
-                        && message["content"] == json!("done")
-                })
-        );
-
-        let messages = encode_messages::encode_request(&canonical, "claude-sonnet-4-6");
-        let wire = serde_json::to_string(&messages).expect("Messages request JSON");
-        assert!(!wire.contains("tool_use"));
-        assert!(!wire.contains("tool_result"));
-        assert!(!wire.contains("SELECT 2"));
-    }
-
-    #[test]
-    fn chat_stream_options_force_usage_only_for_streaming_requests() {
-        let mut req = base_request(vec![Item::new_message(Role::User)]);
-
-        let absent = encode_request(&req, "gpt-5.4");
-        assert!(absent.get("stream_options").is_none());
-
-        req.stream = Some(false);
-        let non_stream = encode_request(&req, "gpt-5.4");
-        assert!(non_stream.get("stream_options").is_none());
-
-        req.stream = Some(true);
-        let stream = encode_request(&req, "gpt-5.4");
-        assert_eq!(stream["stream_options"]["include_usage"], json!(true));
-
-        req.extra_body.insert(
-            "stream_options".to_string(),
-            json!({"include_usage": false, "include_obfuscation": false}),
-        );
-        let explicit_false = encode_request(&req, "gpt-5.4");
-        assert_eq!(
-            explicit_false["stream_options"],
-            json!({"include_usage": true, "include_obfuscation": false})
-        );
-
-        req.extra_body
-            .insert("stream_options".to_string(), json!(false));
-        let invalid_object = encode_request(&req, "gpt-5.4");
-        assert_eq!(
-            invalid_object["stream_options"],
-            json!({"include_usage": true})
-        );
-    }
-
-    #[test]
-    fn deepseek_request_uses_current_thinking_and_token_controls() {
-        let mut req = base_request(vec![Item::new_message(Role::User)]);
-        req.max_output_tokens = Some(2048);
-        req.reasoning = Some(crate::urp::ReasoningConfig {
-            effort: Some("low".to_string()),
-            extra_body: empty_map(),
-        });
-
-        let enabled = encode_request(&req, "deepseek-v4");
-        assert_eq!(enabled["thinking"], json!({ "type": "enabled" }));
-        assert_eq!(enabled["reasoning_effort"], json!("high"));
-        assert_eq!(enabled["max_tokens"], json!(2048));
-        assert!(enabled.get("max_completion_tokens").is_none());
-
-        req.reasoning.as_mut().expect("reasoning").effort = Some("max".to_string());
-        let max = encode_request(&req, "deepseek-v4");
-        assert_eq!(max["reasoning_effort"], json!("max"));
-
-        req.reasoning.as_mut().expect("reasoning").effort = Some("none".to_string());
-        let disabled = encode_request(&req, "deepseek-v4");
-        assert_eq!(disabled["thinking"], json!({ "type": "disabled" }));
-        assert!(disabled.get("reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn native_reasoning_object_is_the_single_chat_effort_container() {
-        let req = decode_chat::decode_request(&json!({
-            "model": "openai/gpt-5.4",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "reasoning_effort": "high",
-            "reasoning": {
-                "effort": "low",
-                "max_tokens": 4096,
-                "exclude": true,
-                "vendor_flag": "keep"
-            }
-        }))
-        .expect("decode Chat request with native reasoning object");
-
-        let encoded = encode_request(&req, "openai/gpt-5.4");
-        assert_eq!(encoded["reasoning"]["effort"], json!("high"));
-        assert!(encoded["reasoning"].get("max_tokens").is_none());
-        assert_eq!(encoded["reasoning"]["exclude"], json!(true));
-        assert_eq!(encoded["reasoning"]["vendor_flag"], json!("keep"));
-        assert!(encoded.get("reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn deepseek_normalized_effort_overrides_conflicting_raw_thinking() {
-        let disabled = decode_chat::decode_request(&json!({
-            "model": "deepseek-v4",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "reasoning_effort": "none",
-            "thinking": { "type": "enabled", "vendor_flag": true }
-        }))
-        .expect("decode disabled DeepSeek request");
-        let disabled = encode_request(&disabled, "deepseek-v4");
-        assert_eq!(disabled["thinking"], json!({ "type": "disabled" }));
-        assert!(disabled.get("reasoning_effort").is_none());
-
-        let enabled = decode_chat::decode_request(&json!({
-            "model": "deepseek-v4",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "reasoning_effort": "high",
-            "reasoning": { "effort": "low", "vendor_flag": true },
-            "thinking": { "type": "disabled", "vendor_flag": true }
-        }))
-        .expect("decode enabled DeepSeek request");
-        let enabled = encode_request(&enabled, "deepseek-v4");
-        assert_eq!(enabled["thinking"], json!({ "type": "enabled" }));
-        assert_eq!(enabled["reasoning_effort"], json!("high"));
-        assert!(enabled.get("reasoning").is_none());
-
-        let raw_only = decode_chat::decode_request(&json!({
-            "model": "deepseek-v4",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "thinking": { "type": "enabled", "vendor_flag": true }
-        }))
-        .expect("decode raw-only DeepSeek request");
-        let raw_only = encode_request(&raw_only, "deepseek-v4");
-        assert_eq!(
-            raw_only["thinking"],
-            json!({ "type": "enabled", "vendor_flag": true })
-        );
-        assert!(raw_only.get("reasoning_effort").is_none());
-
-        let raw_reasoning_only = decode_chat::decode_request(&json!({
-            "model": "deepseek-v4",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "reasoning": { "summary": "detailed", "vendor_flag": true }
-        }))
-        .expect("decode raw-reasoning-only DeepSeek request");
-        let raw_reasoning_only = encode_request(&raw_reasoning_only, "deepseek-v4");
-        assert_eq!(
-            raw_reasoning_only["reasoning"],
-            json!({ "summary": "detailed", "vendor_flag": true })
-        );
-        assert!(raw_reasoning_only.get("thinking").is_none());
-        assert!(raw_reasoning_only.get("reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn deepseek_tool_loop_replays_reasoning_content_without_openrouter_aliases() {
-        let downstream = json!({
-            "model": "deepseek-v4",
-            "messages": [
-                { "role": "user", "content": "lookup" },
-                {
-                    "role": "assistant",
-                    "content": null,
-                    "reasoning_content": "private tool reasoning",
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "type": "function",
-                        "function": { "name": "lookup", "arguments": "{}" }
-                    }]
-                },
-                { "role": "tool", "tool_call_id": "call_1", "content": "ok" }
-            ]
-        });
-
-        let decoded = decode_chat::decode_request(&downstream).expect("decode DeepSeek history");
-        let encoded = encode_request(&decoded, "deepseek-v4");
-        let assistant = encoded["messages"]
-            .as_array()
-            .expect("messages")
-            .iter()
-            .find(|message| message.get("tool_calls").is_some())
-            .expect("assistant tool-call message");
-
-        assert_eq!(
-            assistant["reasoning_content"],
-            json!("private tool reasoning")
-        );
-        assert!(assistant.get("reasoning").is_none());
-        assert!(assistant.get("reasoning_details").is_none());
-    }
-
-    #[test]
-    fn openai_chat_custom_tool_round_trips() {
-        let downstream = json!({
-            "model": "gpt-5.4",
-            "messages": [{ "role": "user", "content": "use the grammar" }],
-            "tools": [{
-                "type": "custom",
-                "custom": {
-                    "name": "freeform_nested",
-                    "description": "Nested custom tool",
-                    "format": {
-                        "type": "grammar",
-                        "grammar": {
-                            "syntax": "lark",
-                            "definition": "start: /[a-z]+/"
-                        }
-                    },
-                    "x_custom": 7
-                },
-                "cache_control": { "type": "ephemeral" }
-            }]
-        });
-
-        let decoded = decode_chat::decode_request(&downstream).expect("decode chat request");
-        let decoded_tools = decoded.tools.as_ref().expect("tools decoded");
-        let decoded_custom = decoded_tools[0].custom.as_ref().expect("custom IR");
-        assert_eq!(decoded_custom.name, "freeform_nested");
-        assert_eq!(decoded_custom.extra_body.get("x_custom"), Some(&json!(7)));
-        assert_eq!(
-            decoded_tools[0].extra_body.get("cache_control"),
-            Some(&json!({ "type": "ephemeral" }))
-        );
-
-        let encoded = encode_request(&decoded, "gpt-5.4");
-        let encoded_tools = encoded["tools"].as_array().expect("encoded tools");
-        assert_eq!(encoded_tools.len(), 1);
-
-        let tool = encoded_tools[0].as_object().expect("tool object");
-        assert_eq!(tool.get("type"), Some(&json!("custom")));
-        assert!(tool.get("name").is_none());
-        assert_eq!(
-            tool.get("cache_control"),
-            Some(&json!({ "type": "ephemeral" }))
-        );
-        assert!(tool.get("x_custom").is_none());
-
-        let custom = tool
-            .get("custom")
-            .and_then(Value::as_object)
-            .expect("nested custom object");
-        assert_eq!(custom.get("name"), Some(&json!("freeform_nested")));
-        assert_eq!(
-            custom.get("description"),
-            Some(&json!("Nested custom tool"))
-        );
-        assert_eq!(custom.get("x_custom"), Some(&json!(7)));
-        assert_eq!(
-            custom.get("format"),
-            Some(&json!({
-                "type": "grammar",
-                "grammar": {
-                    "syntax": "lark",
-                    "definition": "start: /[a-z]+/"
-                }
-            }))
-        );
-    }
-
-    #[test]
-    fn openai_chat_unsupported_builtin_tool_is_not_blindly_emitted() {
-        let downstream = json!({
-            "model": "gpt-5.4",
-            "messages": [{ "role": "user", "content": "search if allowed" }],
-            "tools": [
-                {
-                    "type": "file_search",
-                    "name": "docs_search",
-                    "vector_store_ids": ["vs_1"]
-                },
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "lookup",
-                        "description": "Lookup docs",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": { "type": "string" }
-                            }
-                        }
-                    }
-                }
-            ]
-        });
-
-        let decoded = decode_chat::decode_request(&downstream).expect("decode chat request");
-        assert_eq!(decoded.tools.as_ref().expect("decoded tools").len(), 2);
-
-        let encoded = encode_request(&decoded, "gpt-5.4");
-        let encoded_tools = encoded["tools"].as_array().expect("encoded tools");
-        assert_eq!(encoded_tools.len(), 1);
-        assert!(
-            encoded_tools
-                .iter()
-                .all(|tool| { tool.get("type").and_then(Value::as_str) != Some("file_search") })
-        );
-        assert_eq!(encoded_tools[0]["type"], json!("function"));
-        assert_eq!(encoded_tools[0]["function"]["name"], json!("lookup"));
-    }
-
-    #[test]
-    fn keeps_array_content_when_single_text_block_has_extra_fields() {
-        let mut part_extra = HashMap::new();
-        part_extra.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
-
-        let req = base_request(vec![Item::Message {
-            id: None,
-            role: Role::User,
-            parts: vec![Part::Text {
-                content: "hello".to_string(),
-                extra_body: part_extra,
-            }],
-            extra_body: empty_map(),
-        }]);
-
-        let encoded = encode_request(&req, "claude-haiku-4.5");
-        let msg = encoded["messages"][0].as_object().expect("message object");
-        let content = msg.get("content").expect("content present");
-        let block = content
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|v| v.as_object())
-            .expect("content should remain block array");
-
-        assert_eq!(block.get("type"), Some(&Value::String("text".to_string())));
-        assert_eq!(block.get("text"), Some(&Value::String("hello".to_string())));
-        assert_eq!(
-            block.get("cache_control"),
-            Some(&json!({ "type": "ephemeral" }))
-        );
-    }
-
-    #[test]
-    fn still_collapses_single_plain_text_block_to_string() {
-        let req = base_request(vec![Item::Message {
-            id: None,
-            role: Role::User,
-            parts: vec![Part::Text {
-                content: "hello".to_string(),
-                extra_body: empty_map(),
-            }],
-            extra_body: empty_map(),
-        }]);
-
-        let encoded = encode_request(&req, "claude-haiku-4.5");
-        assert_eq!(
-            encoded["messages"][0]["content"],
-            Value::String("hello".to_string())
-        );
-    }
-
-    #[test]
-    fn chat_unknown_content_part_round_trips_only_for_chat_protocol() {
-        let downstream = json!({
-            "model": "gpt-5.4",
-            "messages": [{
-                "role": "user",
-                "content": [{
-                    "type": "vendor_part",
-                    "payload": { "x": 1 }
-                }]
-            }]
-        });
-
-        let decoded = decode_chat::decode_request(&downstream).expect("decode chat request");
-        assert!(matches!(
-            &decoded.input[0],
-            Node::ProviderItem {
-                origin_protocol: ProviderProtocol::ChatCompletion,
-                role: OrdinaryRole::User,
-                item_type,
-                body,
-                ..
-            } if item_type == "vendor_part"
-                && body == &downstream["messages"][0]["content"][0]
-        ));
-
-        let encoded = encode_request(&decoded, "gpt-5.4");
-        assert_eq!(
-            encoded["messages"][0]["content"][0],
-            downstream["messages"][0]["content"][0]
-        );
-    }
-
-    #[test]
-    fn chat_provider_part_filters_nested_internal_metadata_on_wire() {
-        let downstream = json!({
-            "model": "gpt-5.4",
-            "messages": [{
-                "role": "user",
-                "content": [{
-                    "type": "vendor_part",
-                    "payload": {
-                        "keep": 1,
-                        "_monoize_nested": "drop",
-                        "rows": [{ "keep_row": true, "_monoize_row": "drop" }]
-                    },
-                    "_monoize_top": "drop"
-                }]
-            }]
-        });
-
-        let decoded = decode_chat::decode_request(&downstream).expect("decode chat request");
-        let encoded = encode_request(&decoded, "gpt-5.4");
-
-        assert_eq!(
-            encoded["messages"][0]["content"][0],
-            json!({
-                "type": "vendor_part",
-                "payload": { "keep": 1, "rows": [{ "keep_row": true }] }
-            })
-        );
-        assert!(matches!(
-            &decoded.input[0],
-            Node::ProviderItem { body, .. } if body == &downstream["messages"][0]["content"][0]
-        ));
-    }
-
-    #[test]
-    fn chat_encoder_ignores_cross_protocol_provider_item_without_textifying() {
-        let req = UrpRequest {
-            model: "logical-model".to_string(),
-            input: vec![Node::ProviderItem {
-                id: Some("cmp_1".to_string()),
-                origin_protocol: ProviderProtocol::Responses,
-                role: OrdinaryRole::User,
-                item_type: "compaction".to_string(),
-                body: json!({
-                    "type": "compaction",
-                    "encrypted_content": "opaque"
-                }),
-                extra_body: empty_map(),
-            }],
-            stream: None,
-            temperature: None,
-            top_p: None,
-            max_output_tokens: None,
-            reasoning: None,
-            tools: None,
-            tool_choice: None,
-            parallel_tool_calls: None,
-            stop: None,
-            verbosity: None,
-            response_format: None,
-            user: None,
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_request(&req, "gpt-5.4");
-        let wire = serde_json::to_string(&encoded).expect("chat json");
-        assert_eq!(encoded["messages"], json!([]));
-        assert!(!wire.contains("compaction"));
-        assert!(!wire.contains("opaque"));
-    }
-
-    #[test]
-    fn preserves_assistant_content_and_tool_calls_in_one_message() {
-        let req = base_request(vec![Item::Message {
-            id: None,
-            role: Role::Assistant,
-            parts: vec![
-                Part::Text {
-                    content: "prep".to_string(),
-                    extra_body: empty_map(),
-                },
-                Part::ToolCall {
-                    id: None,
-                    tool_type: ToolCallType::Function,
-                    call_id: "call_1".to_string(),
-                    name: "tool".to_string(),
-                    arguments: "{}".to_string(),
-                    extra_body: empty_map(),
-                },
-                Part::Text {
-                    content: "answer".to_string(),
-                    extra_body: empty_map(),
-                },
-            ],
-            extra_body: empty_map(),
-        }]);
-
-        let encoded = encode_request(&req, "gpt-5.4");
-        let messages = encoded["messages"].as_array().expect("messages array");
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], json!("assistant"));
-        assert_eq!(
-            messages[0]["tool_calls"][0]["function"]["name"],
-            json!("tool")
-        );
-        assert_eq!(messages[0]["content"], json!("prep"));
-        assert_eq!(messages[1]["role"], json!("assistant"));
-        assert_eq!(messages[1]["content"], json!("answer"));
-    }
-
-    #[test]
-    fn encodes_tool_result_items_as_tool_messages_with_text_only_content() {
-        let req = base_request(vec![Item::ToolResult {
-            id: None,
-            tool_type: ToolCallType::Function,
-            call_id: "call_1".to_string(),
-            is_error: false,
-            content: vec![
-                ToolResultContent::Text {
-                    text: "hello".to_string(),
-                    extra_body: HashMap::new(),
-                },
-                ToolResultContent::Image {
-                    source: ImageSource::Url {
-                        url: "https://example.com/image.png".to_string(),
-                        detail: None,
-                    },
-                    extra_body: HashMap::new(),
-                },
-                ToolResultContent::Text {
-                    text: " world".to_string(),
-                    extra_body: HashMap::new(),
-                },
-            ],
-            extra_body: HashMap::from([("provider_field".to_string(), json!(true))]),
-        }]);
-
-        let encoded = encode_request(&req, "gpt-5.4");
-        let msg = encoded["messages"][0].as_object().expect("message object");
-
-        assert_eq!(msg.get("role"), Some(&json!("tool")));
-        assert_eq!(msg.get("tool_call_id"), Some(&json!("call_1")));
-        assert_eq!(msg.get("content"), Some(&json!("hello world")));
-        assert_eq!(msg.get("provider_field"), Some(&json!(true)));
-    }
-
-    #[test]
-    fn chat_usage_round_trips_all_typed_usage_fields_without_extra_leakage() {
-        let mut usage_extra = HashMap::new();
-        usage_extra.insert("provider_specific".to_string(), json!(true));
-        let response = UrpResponse {
-            id: "chatcmpl_usage".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: items_to_nodes(vec![Item::new_message(Role::Assistant)]),
-            finish_reason: Some(FinishReason::Stop),
-            usage: Some(Usage {
-                input_tokens: 20,
-                output_tokens: 10,
-                input_details: Some(InputDetails {
-                    standard_tokens: 0,
-                    cache_read_tokens: 1,
-                    cache_read_modality_breakdown: None,
-                    cache_creation_tokens: 2,
-                    cache_creation_5m_tokens: 0,
-                    cache_creation_1h_tokens: 0,
-                    tool_prompt_tokens: 3,
-                    modality_breakdown: None,
-                }),
-                output_details: Some(OutputDetails {
-                    standard_tokens: 0,
-                    reasoning_tokens: 4,
-                    accepted_prediction_tokens: 5,
-                    rejected_prediction_tokens: 6,
-                    modality_breakdown: None,
-                }),
-                extra_body: usage_extra,
-            }),
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        assert_eq!(
-            encoded["usage"]["prompt_tokens_details"]["cached_tokens"],
-            json!(1)
-        );
-        assert_eq!(
-            encoded["usage"]["prompt_tokens_details"]["cache_creation_tokens"],
-            json!(2)
-        );
-        assert_eq!(
-            encoded["usage"]["prompt_tokens_details"]["tool_prompt_tokens"],
-            json!(3)
-        );
-        assert_eq!(
-            encoded["usage"]["completion_tokens_details"]["reasoning_tokens"],
-            json!(4)
-        );
-        assert_eq!(
-            encoded["usage"]["completion_tokens_details"]["accepted_prediction_tokens"],
-            json!(5)
-        );
-        assert_eq!(
-            encoded["usage"]["completion_tokens_details"]["rejected_prediction_tokens"],
-            json!(6)
-        );
-
-        let decoded = decode_chat::decode_response(&encoded).expect("decode response");
-        let decoded_usage = decoded.usage.expect("usage should decode");
-        let input = decoded_usage.input_details.expect("input details");
-        let output = decoded_usage.output_details.expect("output details");
-        assert_eq!(input.cache_read_tokens, 1);
-        assert_eq!(input.cache_creation_tokens, 2);
-        assert_eq!(input.tool_prompt_tokens, 3);
-        assert_eq!(output.reasoning_tokens, 4);
-        assert_eq!(output.accepted_prediction_tokens, 5);
-        assert_eq!(output.rejected_prediction_tokens, 6);
-        assert!(
-            !decoded_usage
-                .extra_body
-                .contains_key("prompt_tokens_details")
-        );
-        assert!(
-            !decoded_usage
-                .extra_body
-                .contains_key("completion_tokens_details")
-        );
-        assert_eq!(
-            decoded_usage.extra_body.get("provider_specific"),
-            Some(&json!(true))
-        );
-    }
-
-    #[test]
-    fn chat_usage_nested_extra_preserves_siblings_and_typed_counters_win() {
-        let response = UrpResponse {
-            id: "chatcmpl_nested_usage".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: Vec::new(),
-            finish_reason: Some(FinishReason::Stop),
-            usage: Some(Usage {
-                input_tokens: 12,
-                output_tokens: 8,
-                input_details: Some(InputDetails {
-                    cache_read_tokens: 3,
-                    ..InputDetails::default()
-                }),
-                output_details: Some(OutputDetails {
-                    reasoning_tokens: 5,
-                    ..OutputDetails::default()
-                }),
-                extra_body: HashMap::from([
-                    (
-                        "prompt_tokens_details".to_string(),
-                        json!({
-                            "cached_tokens": 999,
-                            "vendor_prompt_detail": { "kind": "warm" },
-                            "_monoize_hidden": true
-                        }),
-                    ),
-                    (
-                        "completion_tokens_details".to_string(),
-                        json!({
-                            "reasoning_tokens": 999,
-                            "vendor_completion_detail": [1, 2]
-                        }),
-                    ),
-                ]),
-            }),
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        assert_eq!(
-            encoded["usage"]["prompt_tokens_details"],
-            json!({
-                "cached_tokens": 3,
-                "cache_write_tokens": 0,
-                "cache_creation_tokens": 0,
-                "tool_prompt_tokens": 0,
-                "vendor_prompt_detail": { "kind": "warm" }
-            })
-        );
-        assert_eq!(
-            encoded["usage"]["completion_tokens_details"],
-            json!({
-                "reasoning_tokens": 5,
-                "accepted_prediction_tokens": 0,
-                "rejected_prediction_tokens": 0,
-                "vendor_completion_detail": [1, 2]
-            })
-        );
-    }
-
-    #[test]
-    fn encode_response_merges_multiple_assistant_segments_into_one_chat_message() {
-        let response = UrpResponse {
-            id: "chatcmpl_segments".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: items_to_nodes(vec![
-                Item::Message {
-                    id: None,
-                    role: Role::Assistant,
-                    parts: vec![Part::Text {
-                        content: "prep".to_string(),
-                        extra_body: empty_map(),
-                    }],
-                    extra_body: HashMap::from([("phase".to_string(), json!("analysis"))]),
-                },
-                Item::Message {
-                    id: None,
-                    role: Role::Assistant,
-                    parts: vec![Part::ToolCall {
-                        id: None,
-                        tool_type: ToolCallType::Function,
-                        call_id: "call_1".to_string(),
-                        name: "tool".to_string(),
-                        arguments: "{}".to_string(),
-                        extra_body: empty_map(),
-                    }],
-                    extra_body: empty_map(),
-                },
-                Item::Message {
-                    id: None,
-                    role: Role::Assistant,
-                    parts: vec![
-                        Part::Reasoning {
-                            id: None,
-                            content: Some("think".to_string()),
-                            encrypted: Some(json!("sig_1")),
-                            summary: None,
-                            source: None,
-                            extra_body: empty_map(),
-                        },
-                        Part::Text {
-                            content: "answer".to_string(),
-                            extra_body: empty_map(),
-                        },
-                    ],
-                    extra_body: HashMap::from([("segment".to_string(), json!(3))]),
-                },
-            ]),
-            finish_reason: Some(FinishReason::ToolCalls),
-            usage: None,
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        let message = encoded["choices"][0]["message"]
-            .as_object()
-            .expect("chat message object");
-        assert_eq!(message.get("content"), Some(&json!("prep\n\nanswer")));
-        assert_eq!(message["tool_calls"][0]["function"]["name"], json!("tool"));
-        assert_eq!(message["reasoning"], json!("think"));
-        assert_eq!(
-            message["reasoning_details"][1]["type"],
-            json!("reasoning.encrypted")
-        );
-        assert_eq!(message["reasoning_details"][1]["data"], json!("sig_1"));
-        assert_eq!(message.get("phase"), Some(&json!("analysis")));
-        assert_eq!(message.get("segment"), Some(&json!(3)));
-    }
-
-    #[test]
-    fn encode_response_keeps_chat_message_content_as_string_when_text_parts_have_phase() {
-        let response = UrpResponse {
-            id: "chatcmpl_phase_string".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: items_to_nodes(vec![Item::Message {
-                id: None,
-                role: Role::Assistant,
-                parts: vec![
-                    Part::Text {
-                        content: "analysis".to_string(),
-                        extra_body: HashMap::from([("phase".to_string(), json!("commentary"))]),
-                    },
-                    Part::Text {
-                        content: "final".to_string(),
-                        extra_body: HashMap::from([("phase".to_string(), json!("final_answer"))]),
-                    },
-                ],
-                extra_body: empty_map(),
-            }]),
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        assert_eq!(
-            encoded["choices"][0]["message"]["content"],
-            json!("analysis\n\nfinal")
-        );
-        assert!(encoded["choices"][0]["message"]["content"].is_string());
-    }
-
-    #[test]
-    fn chat_response_round_trip_preserves_reasoning_summary_and_signature() {
-        let response = UrpResponse {
-            id: "chatcmpl_roundtrip_reasoning".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: items_to_nodes(vec![Item::Message {
-                id: None,
-                role: Role::Assistant,
-                parts: vec![Part::Reasoning {
-                    id: None,
-                    content: Some("full reasoning".to_string()),
-                    encrypted: Some(json!("sig_1")),
-                    summary: Some("brief summary".to_string()),
-                    source: Some("openrouter".to_string()),
-                    extra_body: empty_map(),
-                }],
-                extra_body: empty_map(),
-            }]),
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        let decoded = decode_chat::decode_response(&encoded).expect("decode response");
-        let decoded_outputs = nodes_to_items(&decoded.output);
-        let Item::Message { parts, .. } = decoded_outputs.first().expect("assistant output") else {
-            panic!("expected assistant output");
-        };
-
-        assert!(parts.iter().any(|part| matches!(
-            part,
-            Part::Reasoning {
-                summary: Some(summary),
-                ..
-            } if summary == "brief summary"
-        )));
-        assert!(parts.iter().any(|part| matches!(
-            part,
-            Part::Reasoning {
-                content: Some(content),
-                ..
-            } if content == "full reasoning"
-        )));
-        assert!(parts.iter().any(|part| matches!(
-            part,
-            Part::Reasoning {
-                encrypted: Some(Value::String(sig)),
-                ..
-            } if sig == "sig_1"
-        )));
-        let message = &encoded["choices"][0]["message"];
-        assert_eq!(message["reasoning"], json!("full reasoning"));
-        assert_eq!(
-            message["reasoning_details"][0]["format"],
-            json!("openrouter")
-        );
-        assert_eq!(
-            message["reasoning_details"][1]["format"],
-            json!("openrouter")
-        );
-        assert_eq!(
-            message["reasoning_details"][2]["format"],
-            json!("openrouter")
-        );
-        assert!(message["reasoning_details"][1].get("signature").is_none());
-    }
-
-    #[test]
-    fn chat_response_uses_summary_as_reasoning_alias_when_text_is_absent() {
-        let response = UrpResponse {
-            id: "chatcmpl_summary_alias".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: items_to_nodes(vec![Item::Message {
-                id: None,
-                role: Role::Assistant,
-                parts: vec![Part::Reasoning {
-                    id: None,
-                    content: None,
-                    encrypted: Some(json!("sig_only_summary")),
-                    summary: Some("brief summary only".to_string()),
-                    source: Some("openrouter".to_string()),
-                    extra_body: empty_map(),
-                }],
-                extra_body: empty_map(),
-            }]),
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        let message = &encoded["choices"][0]["message"];
-        assert_eq!(message["reasoning"], json!("brief summary only"));
-        let details = message["reasoning_details"]
-            .as_array()
-            .expect("details array");
-        assert!(details.iter().any(|detail| {
-            detail["type"].as_str() == Some("reasoning.summary")
-                && detail["summary"].as_str() == Some("brief summary only")
-        }));
-        assert!(details.iter().any(|detail| {
-            detail["type"].as_str() == Some("reasoning.encrypted")
-                && detail["data"].as_str() == Some("sig_only_summary")
-        }));
-    }
-
-    #[test]
-    fn merge_assistant_chat_messages_preserves_reasoning_details_across_segments() {
-        let response = UrpResponse {
-            id: "chatcmpl_merge_reasoning_parts".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: items_to_nodes(vec![
-                Item::Message {
-                    id: None,
-                    role: Role::Assistant,
-                    parts: vec![Part::Reasoning {
-                        id: None,
-                        content: Some("segment reasoning".to_string()),
-                        encrypted: None,
-                        summary: None,
-                        source: None,
-                        extra_body: empty_map(),
-                    }],
-                    extra_body: empty_map(),
-                },
-                Item::Message {
-                    id: None,
-                    role: Role::Assistant,
-                    parts: vec![Part::Reasoning {
-                        id: None,
-                        content: None,
-                        encrypted: Some(json!("sig_merged")),
-                        summary: None,
-                        source: None,
-                        extra_body: empty_map(),
-                    }],
-                    extra_body: empty_map(),
-                },
-            ]),
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        let message = &encoded["choices"][0]["message"];
-        assert_eq!(message["reasoning"], json!("segment reasoning"));
-        let details = message["reasoning_details"]
-            .as_array()
-            .expect("reasoning details");
-        assert!(details.iter().any(|detail| {
-            detail["type"].as_str() == Some("reasoning.text")
-                && detail["text"].as_str() == Some("segment reasoning")
-        }));
-        assert!(details.iter().any(|detail| {
-            detail["type"].as_str() == Some("reasoning.encrypted")
-                && detail["data"].as_str() == Some("sig_merged")
-        }));
-    }
-
-    #[test]
-    fn chat_response_keeps_encrypted_reasoning_from_multiple_segments() {
-        let response = UrpResponse {
-            id: "chatcmpl_multi_encrypted".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: items_to_nodes(vec![
-                Item::Message {
-                    id: None,
-                    role: Role::Assistant,
-                    parts: vec![Part::Reasoning {
-                        id: None,
-                        content: Some("segment reasoning".to_string()),
-                        encrypted: Some(json!("sig_first")),
-                        summary: None,
-                        source: Some("openrouter".to_string()),
-                        extra_body: empty_map(),
-                    }],
-                    extra_body: empty_map(),
-                },
-                Item::Message {
-                    id: None,
-                    role: Role::Assistant,
-                    parts: vec![Part::Reasoning {
-                        id: None,
-                        content: None,
-                        encrypted: Some(json!("sig_second")),
-                        summary: None,
-                        source: Some("openrouter".to_string()),
-                        extra_body: empty_map(),
-                    }],
-                    extra_body: empty_map(),
-                },
-            ]),
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        let details = encoded["choices"][0]["message"]["reasoning_details"]
-            .as_array()
-            .expect("reasoning details");
-
-        let encrypted = details
-            .iter()
-            .filter(|detail| detail["type"].as_str() == Some("reasoning.encrypted"))
-            .collect::<Vec<_>>();
-
-        assert_eq!(encrypted.len(), 2);
-        assert!(encrypted.iter().any(|detail| {
-            detail["data"].as_str() == Some("sig_first")
-                && detail["format"].as_str() == Some("openrouter")
-        }));
-        assert!(encrypted.iter().any(|detail| {
-            detail["data"].as_str() == Some("sig_second")
-                && detail["format"].as_str() == Some("openrouter")
-        }));
-    }
-
-    #[test]
-    fn chat_response_emits_reasoning_content_when_openwebui_transform_marks_summary() {
-        let response = UrpResponse {
-            id: "chatcmpl_reasoning_content".to_string(),
-            model: "gpt-5.4".to_string(),
-            created_at: None,
-            output: items_to_nodes(vec![Item::Message {
-                id: None,
-                role: Role::Assistant,
-                parts: vec![Part::Reasoning {
-                    id: None,
-                    content: Some("full reasoning".to_string()),
-                    encrypted: None,
-                    summary: Some("brief summary".to_string()),
-                    source: None,
-                    extra_body: HashMap::from([(
-                        "openwebui_reasoning_content".to_string(),
-                        json!(true),
-                    )]),
-                }],
-                extra_body: empty_map(),
-            }]),
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-            extra_body: empty_map(),
-        };
-
-        let encoded = encode_response(&response, "gpt-5.4");
-        let message = &encoded["choices"][0]["message"];
-        assert_eq!(message["reasoning_content"].as_str(), Some("brief summary"));
-        assert_eq!(
-            message["reasoning_details"][0]["type"].as_str(),
-            Some("reasoning.summary")
-        );
-    }
-
-    #[test]
-    fn round_trip_real_upstream_gpt5_chat_payload_keeps_encrypted_reasoning() {
-        let upstream = json!({
-            "id": "resp_real_shape",
-            "object": "chat.completion",
-            "created": 1773667800i64,
-            "model": "gpt-5.4-2026-03-05",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "One valid combination is 8 packs of pencils and 4 packs of pens.",
-                    "reasoning": "plain reasoning",
-                    "reasoning_content": "plain reasoning",
-                    "reasoning_details": [
-                        {
-                            "type": "reasoning.text",
-                            "text": "plain reasoning"
-                        },
-                        {
-                            "type": "reasoning.encrypted",
-                            "data": "opaque_sig_payload"
-                        }
-                    ],
-                    "reasoning_opaque": "opaque_sig_payload"
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 52,
-                "completion_tokens": 287,
-                "total_tokens": 339,
-                "prompt_tokens_details": { "cached_tokens": 0 },
-                "completion_tokens_details": { "reasoning_tokens": 210 }
-            }
-        });
-
-        let decoded = decode_chat::decode_response(&upstream).expect("decode response");
-        let reencoded = encode_response(&decoded, "gpt-5.4");
-        assert_eq!(reencoded["created"], json!(1773667800i64));
-        assert_eq!(
-            reencoded["choices"][0]["message"]["reasoning"],
-            json!("plain reasoning")
-        );
-        let details = reencoded["choices"][0]["message"]["reasoning_details"]
-            .as_array()
-            .expect("reasoning details array");
-
-        assert!(details.iter().any(|detail| {
-            detail["type"].as_str() == Some("reasoning.text")
-                && detail["text"].as_str() == Some("plain reasoning")
-        }));
-        assert!(details.iter().any(|detail| {
-            detail["type"].as_str() == Some("reasoning.encrypted")
-                && detail["data"].as_str() == Some("opaque_sig_payload")
-        }));
-    }
-
-    #[test]
-    fn deepseek_insufficient_system_resource_round_trips_with_choice_extras() {
-        let upstream = json!({
-            "id": "chatcmpl_deepseek",
-            "object": "chat.completion",
-            "created": 1773667800i64,
-            "model": "deepseek-v4",
-            "choices": [{
-                "index": 0,
-                "message": { "role": "assistant", "content": "partial" },
-                "finish_reason": "insufficient_system_resource",
-                "native_finish_reason": "insufficient_system_resource",
-                "provider_marker": "deepseek"
-            }]
-        });
-
-        let decoded = decode_chat::decode_response(&upstream).expect("decode response");
-        let reencoded = encode_response(&decoded, "deepseek-v4");
-
-        assert_eq!(
-            reencoded["choices"][0]["finish_reason"],
-            json!("insufficient_system_resource")
-        );
-        assert_eq!(
-            reencoded["choices"][0]["native_finish_reason"],
-            json!("insufficient_system_resource")
-        );
-        assert_eq!(
-            reencoded["choices"][0]["provider_marker"],
-            json!("deepseek")
-        );
-        assert!(reencoded.get(CHAT_NATIVE_FINISH_REASON_EXTRA_KEY).is_none());
-        assert!(reencoded.get(CHAT_CHOICE_EXTRA_BODY_KEY).is_none());
-    }
+    Some(Value::Object(audio))
 }

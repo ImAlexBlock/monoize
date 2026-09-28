@@ -116,19 +116,16 @@ fn extract_reasoning_content(content: &Option<String>, summary: &Option<String>)
 }
 
 fn mark_node(node: &mut Node) {
-    let Node::Reasoning {
+    if let Node::Reasoning {
         content,
-        encrypted,
         summary,
-        extra_body,
+        metadata,
         ..
     } = node
-    else {
-        return;
-    };
-    let _ = encrypted;
-    if let Some(value) = extract_reasoning_content(content, summary) {
-        extra_body.insert("inject_reasoning_content".to_string(), Value::String(value));
+    {
+        if extract_reasoning_content(content, summary).is_some() {
+            metadata.chat_content = true;
+        }
     }
 }
 
@@ -138,34 +135,17 @@ fn mark_stream(event: &mut UrpStreamEvent) {
             delta:
                 NodeDelta::Reasoning {
                     content,
-                    encrypted,
                     summary,
+                    metadata,
                     ..
                 },
-            extra_body,
             ..
         } => {
-            let _ = encrypted;
-            if let Some(value) = extract_reasoning_content(content, summary) {
-                extra_body.insert("inject_reasoning_content".to_string(), Value::String(value));
+            if extract_reasoning_content(content, summary).is_some() {
+                metadata.chat_content = true;
             }
         }
-        UrpStreamEvent::NodeDone { node, .. } => {
-            let Node::Reasoning {
-                content,
-                encrypted,
-                summary,
-                extra_body,
-                ..
-            } = node
-            else {
-                return;
-            };
-            let _ = encrypted;
-            if let Some(value) = extract_reasoning_content(content, summary) {
-                extra_body.insert("inject_reasoning_content".to_string(), Value::String(value));
-            }
-        }
+        UrpStreamEvent::NodeDone { node, .. } => mark_node(node),
         UrpStreamEvent::ResponseDone { output, .. } => {
             for node in output {
                 mark_node(node);
@@ -184,7 +164,8 @@ mod tests {
     use super::*;
     use crate::image_transform_cache::ImageTransformCache;
     use crate::transforms::TransformRuntimeContext;
-    use crate::urp::internal_legacy_bridge::{Item, Part, items_to_nodes, nodes_to_items};
+    use crate::transforms::test_fixtures::items_to_nodes;
+    use crate::urp::internal_legacy_bridge::{Item, Part, nodes_to_items};
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -212,6 +193,8 @@ mod tests {
         let mut event = UrpStreamEvent::NodeDelta {
             node_index: 0,
             delta: NodeDelta::Reasoning {
+                metadata: Default::default(),
+
                 content: Some("plaintext_reasoning".to_string()),
                 encrypted: Some(Value::String("encrypted_data".to_string())),
                 summary: Some("summary_text".to_string()),
@@ -231,13 +214,22 @@ mod tests {
             .await
             .expect("apply");
 
-        let UrpStreamEvent::NodeDelta { extra_body, .. } = event else {
+        let UrpStreamEvent::NodeDelta {
+            delta:
+                NodeDelta::Reasoning {
+                    metadata,
+                    content,
+                    summary,
+                    ..
+                },
+            ..
+        } = event
+        else {
             panic!("expected delta");
         };
+        assert!(metadata.chat_content);
         assert_eq!(
-            extra_body
-                .get("inject_reasoning_content")
-                .and_then(Value::as_str),
+            extract_reasoning_content(&content, &summary).as_deref(),
             Some("plaintext_reasoning"),
             "should prefer plaintext content over summary and ignore encrypted"
         );
@@ -252,6 +244,8 @@ mod tests {
         let mut event = UrpStreamEvent::NodeDelta {
             node_index: 0,
             delta: NodeDelta::Reasoning {
+                metadata: Default::default(),
+
                 content: None,
                 encrypted: None,
                 summary: Some("summary_fallback".to_string()),
@@ -271,13 +265,22 @@ mod tests {
             .await
             .expect("apply");
 
-        let UrpStreamEvent::NodeDelta { extra_body, .. } = event else {
+        let UrpStreamEvent::NodeDelta {
+            delta:
+                NodeDelta::Reasoning {
+                    metadata,
+                    content,
+                    summary,
+                    ..
+                },
+            ..
+        } = event
+        else {
             panic!("expected delta");
         };
+        assert!(metadata.chat_content);
         assert_eq!(
-            extra_body
-                .get("inject_reasoning_content")
-                .and_then(Value::as_str),
+            extract_reasoning_content(&content, &summary).as_deref(),
             Some("summary_fallback"),
             "should fall back to summary when plaintext content is absent"
         );
@@ -292,6 +295,8 @@ mod tests {
         let mut event = UrpStreamEvent::NodeDelta {
             node_index: 0,
             delta: NodeDelta::Reasoning {
+                metadata: Default::default(),
+
                 content: None,
                 encrypted: Some(Value::String("encrypted_only".to_string())),
                 summary: None,
@@ -311,13 +316,21 @@ mod tests {
             .await
             .expect("apply");
 
-        let UrpStreamEvent::NodeDelta { extra_body, .. } = event else {
+        let UrpStreamEvent::NodeDelta {
+            delta:
+                NodeDelta::Reasoning {
+                    metadata,
+                    content,
+                    summary,
+                    ..
+                },
+            ..
+        } = event
+        else {
             panic!("expected delta");
         };
-        assert!(
-            !extra_body.contains_key("inject_reasoning_content"),
-            "should not inject encrypted-only reasoning content"
-        );
+        assert!(!metadata.chat_content);
+        assert!(extract_reasoning_content(&content, &summary).is_none());
     }
 
     #[tokio::test]
@@ -327,6 +340,8 @@ mod tests {
         let cfg = transform.parse_config(json!({})).expect("config");
         let mut state = transform.init_state();
         let mut resp = crate::urp::UrpResponse {
+            outcome: Default::default(),
+
             id: "resp_1".to_string(),
             model: "test".to_string(),
             created_at: None,
@@ -334,6 +349,8 @@ mod tests {
                 id: None,
                 role: crate::urp::internal_legacy_bridge::Role::Assistant,
                 parts: vec![Part::Reasoning {
+                    metadata: Default::default(),
+
                     content: Some("plain_resp".to_string()),
                     encrypted: Some(Value::String("enc_resp".to_string())),
                     summary: Some("sum_resp".to_string()),
@@ -362,13 +379,18 @@ mod tests {
         let Item::Message { parts, .. } = &outputs[0] else {
             panic!("expected message");
         };
-        let Part::Reasoning { extra_body, .. } = &parts[0] else {
+        let Part::Reasoning {
+            metadata,
+            content,
+            summary,
+            ..
+        } = &parts[0]
+        else {
             panic!("expected reasoning");
         };
+        assert!(metadata.chat_content);
         assert_eq!(
-            extra_body
-                .get("inject_reasoning_content")
-                .and_then(Value::as_str),
+            extract_reasoning_content(&content, &summary).as_deref(),
             Some("plain_resp"),
         );
     }

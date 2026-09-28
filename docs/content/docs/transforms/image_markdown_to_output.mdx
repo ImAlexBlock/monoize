@@ -3,6 +3,8 @@ title: "Image: Markdown to image nodes"
 description: Convert Markdown image syntax in assistant text into real image nodes.
 ---
 
+Text without extracted images keeps its metadata. After extraction, citations shift to the retained text; citations that overlap removed Markdown are dropped. Original-text signatures and token scores are cleared. Streams with text metadata can wait until the text block finishes before emitting its buffered deltas.
+
 ## What it does
 
 This transform extracts Markdown image blocks, for example `![alt](url)`, from assistant text and converts them into ordinary assistant image nodes. It is the inverse of `image_output_to_markdown`.

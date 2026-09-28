@@ -53,6 +53,9 @@ pub async fn create_image_generation(
     let extra_body = build_extra_body(obj, &["prompt", "model", "n", "max_multiplier"]);
 
     let inputs = vec![urp::Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
         id: None,
         role: urp::OrdinaryRole::User,
         content: prompt,
@@ -210,6 +213,9 @@ pub async fn create_image_edit(
 
     let mut inputs = Vec::new();
     inputs.push(urp::Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
         id: None,
         role: urp::OrdinaryRole::User,
         content: prompt,
@@ -217,6 +223,7 @@ pub async fn create_image_edit(
         extra_body: HashMap::new(),
     });
     inputs.push(urp::Node::Image {
+            metadata: Default::default(),
         id: None,
         role: urp::OrdinaryRole::User,
         source: urp::ImageSource::Base64 {
@@ -227,6 +234,7 @@ pub async fn create_image_edit(
     });
     for (extra_media_type, extra_b64) in extra_images {
         inputs.push(urp::Node::Image {
+            metadata: Default::default(),
             id: None,
             role: urp::OrdinaryRole::User,
             source: urp::ImageSource::Base64 {
@@ -238,7 +246,8 @@ pub async fn create_image_edit(
     }
     if let Some((mask_media_type, mask_b64)) = mask_data {
         inputs.push(urp::Node::Image {
-            id: Some("__monoize_image_api_mask".to_string()),
+            metadata: urp::MediaMetadata { image_mask: true, ..Default::default() },
+            id: None,
             role: urp::OrdinaryRole::User,
             source: urp::ImageSource::Base64 {
                 media_type: mask_media_type,
@@ -376,6 +385,12 @@ async fn fan_out_subrequests(
     request_ip: Option<String>,
     client_session_id: Option<String>,
 ) -> Vec<Result<(urp::UrpResponse, String), AppError>> {
+    let mut extra_body = extra_body.clone();
+    extra_body.remove("context");
+    let image_generation = match urp::ImageGenerationOptions::take_from_extra(&mut extra_body) {
+        Ok(options) => options,
+        Err(message) => return vec![Err(AppError::new(StatusCode::BAD_REQUEST, "invalid_request", message))],
+    };
     let mut join_set = tokio::task::JoinSet::new();
     let mut task_contexts = HashMap::new();
 
@@ -383,6 +398,11 @@ async fn fan_out_subrequests(
         let state = state.clone();
         let auth = auth.clone();
         let req = urp::UrpRequest {
+            context: Default::default(),
+            image_generation: Some(image_generation.clone()),
+            instructions_format: Default::default(),
+            sampling: Default::default(),
+            logprobs: Default::default(),
             model: model.to_string(),
             input: input.to_vec(),
             stream: Some(false),
@@ -845,12 +865,14 @@ async fn execute_stream_collected_image_typed(
                         while let Some(event) = transformed_rx.recv().await {
                             match event {
                                 crate::urp::UrpStreamEvent::ResponseDone {
+                                    outcome,
                                     finish_reason,
                                     usage,
                                     output,
                                     extra_body,
                                 } => {
                                     final_response = Some(urp::UrpResponse {
+                                        outcome,
                                         id: extra_body
                                             .get("id")
                                             .and_then(|value| value.as_str())
@@ -1448,6 +1470,7 @@ mod tests {
 
     fn response(output: Vec<urp::Node>) -> urp::UrpResponse {
         urp::UrpResponse {
+            outcome: Default::default(),
             id: "resp_test".to_string(),
             model: "image-test".to_string(),
             created_at: None,
@@ -1461,6 +1484,7 @@ mod tests {
     #[test]
     fn image_subrequest_validation_accepts_an_image() {
         let resp = response(vec![urp::Node::Image {
+            metadata: Default::default(),
             id: None,
             role: urp::OrdinaryRole::Assistant,
             source: urp::ImageSource::Url {
@@ -1476,6 +1500,9 @@ mod tests {
     #[test]
     fn image_subrequest_validation_returns_the_typed_conversion_error() {
         let resp = response(vec![urp::Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
             id: None,
             role: urp::OrdinaryRole::Assistant,
             content: "generation refused".to_string(),

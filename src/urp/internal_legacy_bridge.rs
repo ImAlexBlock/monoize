@@ -43,26 +43,40 @@ impl Role {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Part {
     Text {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        logprobs: Option<Vec<super::TokenLogprob>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        citations: Vec<crate::urp::Citation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<Value>,
         content: String,
         #[serde(flatten)]
         extra_body: HashMap<String, Value>,
     },
     Image {
+        #[serde(default)]
+        metadata: super::MediaMetadata,
         source: ImageSource,
         #[serde(flatten)]
         extra_body: HashMap<String, Value>,
     },
     Audio {
+        #[serde(default)]
+        metadata: super::MediaMetadata,
         source: AudioSource,
         #[serde(flatten)]
         extra_body: HashMap<String, Value>,
     },
     File {
+        #[serde(default)]
+        metadata: super::MediaMetadata,
         source: FileSource,
         #[serde(flatten)]
         extra_body: HashMap<String, Value>,
     },
     Reasoning {
+        #[serde(default)]
+        metadata: super::ReasoningMetadata,
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +91,10 @@ pub enum Part {
         extra_body: HashMap<String, Value>,
     },
     ToolCall {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(default)]
@@ -88,6 +106,8 @@ pub enum Part {
         extra_body: HashMap<String, Value>,
     },
     Refusal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        logprobs: Option<Vec<super::TokenLogprob>>,
         content: String,
         #[serde(flatten)]
         extra_body: HashMap<String, Value>,
@@ -115,6 +135,10 @@ pub enum Item {
         extra_body: HashMap<String, Value>,
     },
     ToolResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(default)]
@@ -128,65 +152,68 @@ pub enum Item {
     },
 }
 
-#[cfg(test)]
-impl Item {
-    pub fn new_message(role: Role) -> Self {
-        Item::Message {
-            id: None,
-            role,
-            parts: Vec::new(),
-            extra_body: HashMap::new(),
-        }
-    }
-
-    pub fn text(role: Role, content: impl Into<String>) -> Self {
-        Item::Message {
-            id: None,
-            role,
-            parts: vec![Part::Text {
-                content: content.into(),
-                extra_body: HashMap::new(),
-            }],
-            extra_body: HashMap::new(),
-        }
-    }
-}
-
 impl Part {
     pub fn into_node(self, role: OrdinaryRole) -> Node {
         match self {
             Part::Text {
+                logprobs,
+                signature,
+                citations,
                 content,
+                mut extra_body,
+            } => {
+                let phase = extra_body
+                    .remove("phase")
+                    .and_then(|value| value.as_str().map(str::to_string));
+                Node::Text {
+                    logprobs,
+                    signature,
+                    citations,
+                    id: None,
+                    role,
+                    phase,
+                    content,
+                    extra_body,
+                }
+            }
+            Part::Image {
+                metadata,
+                source,
                 extra_body,
-            } => Node::Text {
-                id: None,
-                role,
-                phase: extra_body
-                    .get("phase")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                content,
-                extra_body,
-            },
-            Part::Image { source, extra_body } => Node::Image {
+            } => Node::Image {
+                metadata,
+
                 id: None,
                 role,
                 source,
                 extra_body,
             },
-            Part::Audio { source, extra_body } => Node::Audio {
+            Part::Audio {
+                metadata,
+                source,
+                extra_body,
+            } => Node::Audio {
+                metadata,
+
                 id: None,
                 role,
                 source,
                 extra_body,
             },
-            Part::File { source, extra_body } => Node::File {
+            Part::File {
+                metadata,
+                source,
+                extra_body,
+            } => Node::File {
+                metadata,
+
                 id: None,
                 role,
                 source,
                 extra_body,
             },
             Part::Reasoning {
+                metadata,
                 id,
                 content,
                 encrypted,
@@ -194,6 +221,7 @@ impl Part {
                 source,
                 extra_body,
             } => Node::Reasoning {
+                metadata: metadata.clone(),
                 id,
                 content,
                 encrypted,
@@ -202,13 +230,19 @@ impl Part {
                 extra_body,
             },
             Part::ToolCall {
+                namespace,
+                signature,
                 id,
                 tool_type,
                 call_id,
                 name,
                 arguments,
                 extra_body,
+                ..
             } => Node::ToolCall {
+                namespace,
+                signature,
+
                 id,
                 tool_type,
                 call_id,
@@ -217,9 +251,11 @@ impl Part {
                 extra_body,
             },
             Part::Refusal {
+                logprobs,
                 content,
                 extra_body,
             } => Node::Refusal {
+                logprobs,
                 id: None,
                 content,
                 extra_body,
@@ -242,58 +278,7 @@ impl Part {
     }
 }
 
-impl Item {
-    #[cfg(test)]
-    pub fn into_nodes(self) -> Vec<Node> {
-        match self {
-            Item::Message {
-                id,
-                role,
-                parts,
-                extra_body,
-            } => {
-                let ordinary_role = role.to_ordinary().unwrap_or(OrdinaryRole::User);
-                let mut nodes = Vec::new();
-                if !extra_body.is_empty() && !parts.is_empty() {
-                    nodes.push(Node::NextDownstreamEnvelopeExtra { extra_body });
-                }
-                nodes.extend(parts.into_iter().enumerate().map(|(idx, p)| {
-                    let mut node = p.into_node(ordinary_role);
-                    if idx == 0 && node.id().is_none() {
-                        node.set_id(id.clone());
-                    }
-                    node
-                }));
-                nodes
-            }
-            Item::ToolResult {
-                id,
-                tool_type,
-                call_id,
-                is_error,
-                content,
-                extra_body,
-            } => {
-                vec![Node::ToolResult {
-                    id,
-                    tool_type,
-                    call_id,
-                    is_error,
-                    content,
-                    extra_body,
-                }]
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-pub fn items_to_nodes(items: Vec<Item>) -> Vec<Node> {
-    items
-        .into_iter()
-        .flat_map(|item| item.into_nodes())
-        .collect()
-}
+impl Item {}
 
 pub fn nodes_to_items(nodes: &[Node]) -> Vec<Item> {
     let mut items = Vec::new();
@@ -308,12 +293,15 @@ pub fn nodes_to_items(nodes: &[Node]) -> Vec<Item> {
     for node in nodes {
         match node {
             Node::ToolResult {
+                namespace,
+                name,
                 id,
                 tool_type,
                 call_id,
                 is_error,
                 content,
                 extra_body,
+                ..
             } => {
                 if !current_parts.is_empty() {
                     items.push(Item::Message {
@@ -332,6 +320,9 @@ pub fn nodes_to_items(nodes: &[Node]) -> Vec<Item> {
                     merged_extra.entry(key).or_insert(value);
                 }
                 items.push(Item::ToolResult {
+                    namespace: namespace.clone(),
+                    name: name.clone(),
+
                     id: id.clone(),
                     tool_type: *tool_type,
                     call_id: call_id.clone(),
@@ -446,39 +437,62 @@ fn bridge_zone_should_flush(current: Option<BridgeZone>, next: BridgeZone) -> bo
 fn node_to_part(node: &Node) -> Part {
     match node {
         Node::Text {
+            logprobs,
+            signature,
+            citations,
             content,
             phase,
             extra_body,
             ..
         } => {
             let mut extra_body = extra_body.clone();
+            extra_body.remove("phase");
             if let Some(phase) = phase {
                 extra_body.insert("phase".to_string(), Value::String(phase.clone()));
             }
             Part::Text {
+                logprobs: logprobs.clone(),
+                signature: signature.clone(),
+                citations: citations.clone(),
                 content: content.clone(),
                 extra_body,
             }
         }
         Node::Image {
-            source, extra_body, ..
+            metadata,
+            source,
+            extra_body,
+            ..
         } => Part::Image {
+            metadata: metadata.clone(),
+
             source: source.clone(),
             extra_body: extra_body.clone(),
         },
         Node::Audio {
-            source, extra_body, ..
+            metadata,
+            source,
+            extra_body,
+            ..
         } => Part::Audio {
+            metadata: metadata.clone(),
+
             source: source.clone(),
             extra_body: extra_body.clone(),
         },
         Node::File {
-            source, extra_body, ..
+            metadata,
+            source,
+            extra_body,
+            ..
         } => Part::File {
+            metadata: metadata.clone(),
+
             source: source.clone(),
             extra_body: extra_body.clone(),
         },
         Node::Reasoning {
+            metadata,
             id,
             content,
             encrypted,
@@ -486,6 +500,7 @@ fn node_to_part(node: &Node) -> Part {
             source,
             extra_body,
         } => Part::Reasoning {
+            metadata: metadata.clone(),
             id: id.clone(),
             content: content.clone(),
             encrypted: encrypted.clone(),
@@ -494,13 +509,19 @@ fn node_to_part(node: &Node) -> Part {
             extra_body: extra_body.clone(),
         },
         Node::ToolCall {
+            namespace,
+            signature,
             id,
             tool_type,
             call_id,
             name,
             arguments,
             extra_body,
+            ..
         } => Part::ToolCall {
+            namespace: namespace.clone(),
+            signature: signature.clone(),
+
             id: id.clone(),
             tool_type: *tool_type,
             call_id: call_id.clone(),
@@ -509,10 +530,12 @@ fn node_to_part(node: &Node) -> Part {
             extra_body: extra_body.clone(),
         },
         Node::Refusal {
+            logprobs,
             content,
             extra_body,
             ..
         } => Part::Refusal {
+            logprobs: logprobs.clone(),
             content: content.clone(),
             extra_body: extra_body.clone(),
         },
@@ -531,6 +554,9 @@ fn node_to_part(node: &Node) -> Part {
             extra_body: extra_body.clone(),
         },
         Node::ToolResult { .. } | Node::NextDownstreamEnvelopeExtra { .. } => Part::Text {
+            logprobs: None,
+            signature: None,
+            citations: Vec::new(),
             content: String::new(),
             extra_body: HashMap::new(),
         },
@@ -553,56 +579,90 @@ fn is_internal_marker(key: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod canonical_bridge_tests {
     use super::*;
+    use crate::urp::{MediaMetadata, ToolCallType};
     use serde_json::json;
 
-    #[test]
-    fn message_boundary_filters_internal_markers_but_keeps_reasoning_part_state() {
-        let raw_detail = json!({
-            "type": "reasoning.text",
-            "text": "preserve me",
-            "future": true
-        });
-        let nodes = vec![Node::Reasoning {
-            id: Some("reasoning_1".to_string()),
-            content: Some("preserve me".to_string()),
-            encrypted: None,
-            summary: None,
-            source: Some("openrouter".to_string()),
-            extra_body: HashMap::from([
-                (
-                    "_monoize_chat_reasoning_detail".to_string(),
-                    raw_detail.clone(),
-                ),
-                (
-                    "_monoize_chat_reasoning_surface".to_string(),
-                    json!("reasoning"),
-                ),
-                ("provider_message_field".to_string(), json!(true)),
-            ]),
-        }];
+    fn bridge(node: Node) -> Node {
+        let items = nodes_to_items(std::slice::from_ref(&node));
+        let Item::Message { parts, .. } = &items[0] else {
+            panic!("ordinary node expected");
+        };
+        parts[0].clone().into_node(OrdinaryRole::Assistant)
+    }
 
-        let items = nodes_to_items(&nodes);
-        let Item::Message {
-            parts, extra_body, ..
-        } = &items[0]
-        else {
-            panic!("expected message item");
+    #[test]
+    fn phase_is_single_owned_and_deletion_is_authoritative() {
+        for phase in [None, Some("current".to_string())] {
+            let node = Node::Text {
+                logprobs: None,
+                id: None,
+                role: OrdinaryRole::Assistant,
+                content: "answer".into(),
+                phase: phase.clone(),
+                signature: Some(json!("sig")),
+                citations: vec![crate::urp::Citation::decode(
+                    json!({"url":"https://example.com"}),
+                    ProviderProtocol::Responses,
+                )],
+                extra_body: HashMap::from([("phase".into(), json!("stale"))]),
+            };
+            let Node::Text {
+                logprobs: _,
+                phase: actual,
+                extra_body,
+                citations,
+                signature,
+                ..
+            } = bridge(node)
+            else {
+                panic!()
+            };
+            assert_eq!(actual, phase);
+            assert!(!extra_body.contains_key("phase"));
+            assert_eq!(citations.len(), 1);
+            assert_eq!(signature, Some(json!("sig")));
+        }
+    }
+
+    #[test]
+    fn tool_and_media_typed_fields_survive_bridge_and_stripping() {
+        let metadata = MediaMetadata {
+            reference_id: Some("audio_ref".into()),
+            signature: Some(json!("signature")),
+            media_type: Some("audio/wav".into()),
+            transcript: Some("Hello".into()),
+            expires_at: Some(42),
+            ..Default::default()
         };
-        assert!(extra_body.is_empty());
-        assert!(extra_body.keys().all(|key| !key.starts_with("_monoize_")));
-        let Part::Reasoning {
-            extra_body: part_extra,
-            ..
-        } = &parts[0]
-        else {
-            panic!("expected reasoning part");
-        };
-        assert_eq!(
-            part_extra.get("_monoize_chat_reasoning_detail"),
-            Some(&raw_detail)
-        );
-        assert_eq!(part_extra.get("provider_message_field"), Some(&json!(true)));
+        let nodes = vec![
+            Node::ToolCall {
+                id: None,
+                tool_type: ToolCallType::Function,
+                call_id: "call".into(),
+                name: "run".into(),
+                namespace: Some("tools".into()),
+                signature: Some(json!("signature")),
+                arguments: "{}".into(),
+                extra_body: HashMap::new(),
+            },
+            Node::Audio {
+                id: None,
+                role: OrdinaryRole::Assistant,
+                source: AudioSource::Base64 {
+                    media_type: "audio/wav".into(),
+                    data: "YQ==".into(),
+                },
+                metadata,
+                extra_body: HashMap::new(),
+            },
+        ];
+        for node in nodes {
+            assert_eq!(bridge(node.clone()), node);
+            let mut stripped = vec![node.clone()];
+            crate::urp::strip_nested_extra_body(&mut stripped);
+            assert_eq!(stripped, vec![node]);
+        }
     }
 }

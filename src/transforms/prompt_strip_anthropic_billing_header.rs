@@ -156,6 +156,12 @@ mod tests {
         let cfg = transform.parse_config(json!({})).expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-test".to_string(),
             input: vec![
                 Node::text(
@@ -209,6 +215,12 @@ mod tests {
         let cfg = transform.parse_config(json!({})).expect("config");
         let mut state = transform.init_state();
         let mut req = UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-test".to_string(),
             input: vec![Node::text(
                 OrdinaryRole::System,

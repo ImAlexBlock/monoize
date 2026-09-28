@@ -17,6 +17,70 @@ fn receiver_event_stream(rx: mpsc::Receiver<Event>) -> ForwardEventStream {
         .map(event_ok as fn(Event) -> Result<Event, std::convert::Infallible>)
 }
 
+#[cfg(test)]
+#[path = "stream_terminal_tests.rs"]
+mod stream_terminal_tests;
+
+async fn emit_stream_error_if_needed(
+    downstream: DownstreamProtocol,
+    err: &AppError,
+    tx: &mpsc::Sender<Event>,
+    capture_frames: Option<&crate::request_capture::SseFrameCapture>,
+) {
+    if err.downstream_stream_terminal_sent {
+        return;
+    }
+    let (event_name, body) = match downstream {
+        DownstreamProtocol::Responses => (Some("error"), responses_stream_error_json(1, err)),
+        DownstreamProtocol::ChatCompletions => (None, openai_error_json(err)),
+        DownstreamProtocol::AnthropicMessages => (
+            Some("error"),
+            json!({"type": "error", "error": {"type": err.code, "message": err.message}}),
+        ),
+    };
+    let data = body.to_string();
+    let event = match event_name {
+        Some(name) => Event::default().event(name).data(&data),
+        None => Event::default().data(&data),
+    };
+    if let Some(frames) = capture_frames {
+        frames
+            .record(match event_name {
+                Some(name) => format!("event: {name}\ndata: {data}\n\n"),
+                None => format!("data: {data}\n\n"),
+            })
+            .await;
+    }
+    if tx.send(event).await.is_err() {
+        return;
+    }
+    if matches!(
+        downstream,
+        DownstreamProtocol::ChatCompletions | DownstreamProtocol::Responses
+    ) {
+        if let Some(frames) = capture_frames {
+            frames.record("data: [DONE]\n\n".to_string()).await;
+        }
+        let _ = tx.send(Event::default().data("[DONE]")).await;
+    }
+}
+
+fn combine_stream_stage_results(results: [AppResult<()>; 4]) -> AppResult<()> {
+    // Channel closure may be caused by an earlier stage; preserve its diagnostic once the
+    // encoder has sent the fallback terminal, while preventing any duplicate terminal frames.
+    if let Some(marked) = results.iter().filter_map(|result| result.as_ref().err())
+        .find(|err| err.downstream_stream_terminal_sent) {
+        if marked.code == "upstream_stream_incomplete" {
+            if let Some(original) = results.iter().filter_map(|result| result.as_ref().err()).next() {
+                return Err(original.clone().with_downstream_stream_terminal_sent(true));
+            }
+        }
+        return Err(marked.clone());
+    }
+    for result in results { result?; }
+    Ok(())
+}
+
 fn estimated_tokens_from_utf8_bytes(bytes: u64) -> u64 {
     bytes.div_ceil(4)
 }
@@ -37,8 +101,10 @@ async fn retain_decoded_terminal_output(
     mut rx: mpsc::Receiver<urp::UrpStreamEvent>,
     tx: mpsc::Sender<urp::UrpStreamEvent>,
     terminal_output: Arc<Mutex<Vec<urp::Node>>>,
+    aliases: HashMap<String, urp::ToolIdentity>,
 ) -> AppResult<()> {
-    while let Some(event) = rx.recv().await {
+    while let Some(mut event) = rx.recv().await {
+        restore_tool_namespace_event(&mut event, &aliases);
         if let urp::UrpStreamEvent::ResponseDone { output, .. } = &event {
             *terminal_output.lock().await = output.clone();
         }
@@ -287,10 +353,11 @@ pub(super) async fn forward_stream_typed(
     // Preserve the suffix-normalized request so each per-attempt iteration can
     // re-derive the transformed request from a pristine base (see the matching
     // comment in `execute_nonstream_typed`).
-    let original_req = req.clone();
+    let mut original_req = req.clone();
     let logical_model = req.model.clone();
     let routing_stub = build_routing_stub(&req, max_multiplier);
     let mut attempts = build_monoize_attempts(&state, &routing_stub, &auth).await?;
+    bind_media_request_routes(&mut original_req, &mut attempts)?;
     attach_client_session_id(&mut attempts, client_session_id, Some(&req));
     let funding_scope = ensure_balance_before_forward_for_attempts(
         &state,
@@ -717,7 +784,7 @@ pub(super) async fn forward_stream_typed(
                             req.reasoning.as_ref().and_then(|r| r.effort.clone());
                         let tried_providers_for_log = tried_providers;
                         let capture_session = capture.session.clone();
-                        let pending_request_log_guard_for_stream = pending_request_log_guard;
+                    let pending_request_log_guard_for_stream = pending_request_log_guard;
                         let funding_scope_for_owner = funding_scope.clone();
                         let downstream_gone_for_log = downstream_gone.clone();
                         tokio::spawn(async move {
@@ -828,13 +895,7 @@ pub(super) async fn forward_stream_typed(
                                         reasoning_effort_for_log,
                                         tried_providers_for_log,
                                     );
-                                    if matches!(
-                                        downstream,
-                                        DownstreamProtocol::ChatCompletions
-                                            | DownstreamProtocol::Responses
-                                    ) {
-                                        let _ = tx_err.send(Event::default().data("[DONE]")).await;
-                                    }
+                                    emit_stream_error_if_needed(downstream, &err, &tx_err, None).await;
                                     if let Some(session) = capture_session.as_ref() {
                                         session.persist_with_result(None, true).await;
                                     }
@@ -1052,6 +1113,7 @@ pub(super) async fn forward_stream_typed(
                                 req_attempt.model.clone(),
                             )
                         });
+                    let namespace_aliases = tool_namespace_aliases(&req_attempt);
                     let pending_request_log_guard_for_stream = pending_request_log_guard;
                     let funding_scope_for_owner = funding_scope.clone();
                     let downstream_gone_for_log = downstream_gone.clone();
@@ -1090,7 +1152,7 @@ pub(super) async fn forward_stream_typed(
                                         decoded_rx,
                                         metered_tx,
                                         terminal_output,
-                                    )
+                                        namespace_aliases,                                    )
                                     .await
                                 })
                             };
@@ -1141,35 +1203,12 @@ pub(super) async fn forward_stream_typed(
                                 transform_handle,
                                 encode_handle
                             );
-                            decode_result
-                                .unwrap_or_else(|e| {
-                                    Err(AppError::new(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        "task_panic",
-                                        e.to_string(),
-                                    ))
-                                })
-                                .and(retain_output_result.unwrap_or_else(|e| {
-                                    Err(AppError::new(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        "task_panic",
-                                        e.to_string(),
-                                    ))
-                                }))
-                                .and(transform_result.unwrap_or_else(|e| {
-                                    Err(AppError::new(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        "task_panic",
-                                        e.to_string(),
-                                    ))
-                                }))
-                                .and(encode_result.unwrap_or_else(|e| {
-                                    Err(AppError::new(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        "task_panic",
-                                        e.to_string(),
-                                    ))
-                                }))
+                            combine_stream_stage_results([
+                                decode_result.unwrap_or_else(|e| Err(AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "task_panic", e.to_string()))),
+                                retain_output_result.unwrap_or_else(|e| Err(AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "task_panic", e.to_string()))),
+                                transform_result.unwrap_or_else(|e| Err(AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "task_panic", e.to_string()))),
+                                encode_result.unwrap_or_else(|e| Err(AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "task_panic", e.to_string()))),
+                            ])
                         };
                         let stream_result = if let Some(frames) = capture_frames_for_task.clone() {
                             crate::request_capture::with_sse_capture(frames, stream_future).await
@@ -1214,6 +1253,7 @@ pub(super) async fn forward_stream_typed(
                                     );
                                     (
                                         Some(urp::Usage {
+            iterations: Default::default(),
                                             input_tokens: estimated_input_tokens,
                                             output_tokens: estimated_output_tokens,
                                             input_details: None,
@@ -1330,62 +1370,7 @@ pub(super) async fn forward_stream_typed(
                                 tried_providers_for_log,
                             );
 
-                            let error_json = openai_error_json(err);
-                            match downstream {
-                                DownstreamProtocol::Responses => {
-                                    let responses_error = responses_stream_error_json(1, err);
-                                    if let Some(frames) = capture_frames_for_task.as_ref() {
-                                        frames
-                                            .record(format!(
-                                                "event: error\ndata: {}\n\n",
-                                                responses_error
-                                            ))
-                                            .await;
-                                    }
-                                    let _ = tx_err
-                                        .send(
-                                            Event::default()
-                                                .event("error")
-                                                .data(responses_error.to_string()),
-                                        )
-                                        .await;
-                                }
-                                DownstreamProtocol::ChatCompletions => {
-                                    if let Some(frames) = capture_frames_for_task.as_ref() {
-                                        frames.record(format!("data: {}\n\n", error_json)).await;
-                                    }
-                                    let _ = tx_err
-                                        .send(Event::default().data(error_json.to_string()))
-                                        .await;
-                                }
-                                DownstreamProtocol::AnthropicMessages => {
-                                    let anthropic_error = json!({"type": "error", "error": {"type": err.code, "message": err.message}});
-                                    if let Some(frames) = capture_frames_for_task.as_ref() {
-                                        frames
-                                            .record(format!(
-                                                "event: error\ndata: {}\n\n",
-                                                anthropic_error
-                                            ))
-                                            .await;
-                                    }
-                                    let _ = tx_err
-                                        .send(
-                                            Event::default()
-                                                .event("error")
-                                                .data(anthropic_error.to_string()),
-                                        )
-                                        .await;
-                                }
-                            }
-                            if matches!(
-                                downstream,
-                                DownstreamProtocol::ChatCompletions | DownstreamProtocol::Responses
-                            ) {
-                                if let Some(frames) = capture_frames_for_task.as_ref() {
-                                    frames.record("data: [DONE]\n\n".to_string()).await;
-                                }
-                                let _ = tx_err.send(Event::default().data("[DONE]")).await;
-                            }
+                            emit_stream_error_if_needed(downstream, err, &tx_err, capture_frames_for_task.as_ref()).await;
                             if let Some(session) = capture_session.as_ref() {
                                 let frames = if let Some(frames) = capture_frames_for_task.as_ref()
                                 {
@@ -1848,8 +1833,11 @@ mod tests {
             input_rx,
             output_tx,
             retained.clone(),
-        ));
+            HashMap::new(),        ));
         let nodes = vec![urp::Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
             id: None,
             role: urp::OrdinaryRole::Assistant,
             content: "拒绝".to_string(),
@@ -1859,6 +1847,7 @@ mod tests {
 
         input_tx
             .send(urp::UrpStreamEvent::ResponseDone {
+            outcome: Default::default(),
                 finish_reason: None,
                 usage: None,
                 output: nodes.clone(),

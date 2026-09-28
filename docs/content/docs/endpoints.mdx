@@ -17,6 +17,18 @@ Every endpoint below also exists under the `/api` prefix, for example `/api/v1/c
 
 Any endpoint can reach any upstream type. For example, a client can call `/v1/messages` while the route serves the model through a `chat_completion` Channel. Monoize converts the protocol in both directions.
 
+## Protocol conversion
+
+Use Responses tool namespaces when tools share a name. Monoize preserves tool identity when the selected Channel uses Chat Completions, Messages, or Gemini.
+
+Supply file bytes or a public URL when switching providers. Private file references require one matching Provider, Channel, and credential scope.
+
+Keep image masks with their source images. Image transforms preserve mask dimensions and transparency.
+
+Expect an explicit error when the target protocol cannot represent response media. Streaming failures produce an error terminal instead of a successful completion.
+
+Gemini conversion preserves supported sampling controls, citations, tool signatures, and token details. Protocol-specific fields remain limited to compatible destinations.
+
 ## List models
 
 ```bash
@@ -90,6 +102,8 @@ curl http://localhost:8080/v1/embeddings \
 ```
 
 ## Images
+
+For a Responses Channel, configure `image_enable_openai_generation_tool` before calling the Images endpoints. Requests without the required tool return an error before dispatch.
 
 Generation:
 

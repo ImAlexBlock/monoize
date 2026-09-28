@@ -3,10 +3,7 @@ use crate::transforms::{
     NoState, Phase, Transform, TransformConfig, TransformEntry, TransformError,
     TransformRuntimeContext, TransformScope, TransformState, UrpData,
 };
-use crate::urp::{
-    FILE_ID_ORIGIN_EXTRA_KEY, FILE_ID_ORIGIN_OPENAI, FileSource, ImageSource, Node,
-    ToolResultContent, UrpRequest,
-};
+use crate::urp::{FileSource, ImageSource, Node, ProviderProtocol, ToolResultContent, UrpRequest};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -241,27 +238,24 @@ fn is_eligible_responses_tool_result_content(content: &ToolResultContent) -> boo
     match content {
         ToolResultContent::Text { .. } => true,
         ToolResultContent::Image {
-            source, extra_body, ..
+            source, metadata, ..
         } => match source {
             ImageSource::Url { .. } | ImageSource::Base64 { .. } => true,
-            ImageSource::FileId { .. } => file_id_origin_is_openai(extra_body),
+            ImageSource::FileId { .. } => {
+                crate::urp::media::resource_matches(metadata, ProviderProtocol::Responses)
+            }
         },
         ToolResultContent::File {
-            source, extra_body, ..
+            source, metadata, ..
         } => match source {
             FileSource::Url { .. } | FileSource::Base64 { .. } => true,
-            FileSource::FileId { .. } => file_id_origin_is_openai(extra_body),
+            FileSource::FileId { .. } => {
+                crate::urp::media::resource_matches(metadata, ProviderProtocol::Responses)
+            }
             FileSource::Text { .. } | FileSource::Content { .. } => false,
         },
         ToolResultContent::ProviderItem { .. } => false,
     }
-}
-
-fn file_id_origin_is_openai(extra_body: &HashMap<String, Value>) -> bool {
-    extra_body
-        .get(FILE_ID_ORIGIN_EXTRA_KEY)
-        .and_then(Value::as_str)
-        == Some(FILE_ID_ORIGIN_OPENAI)
 }
 
 fn node_extra_body(node: &Node) -> &HashMap<String, Value> {
@@ -320,10 +314,19 @@ mod tests {
 
     fn request_with_parallel_tool_results() -> UrpRequest {
         UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "gpt-5.6-sol".to_string(),
             input: vec![
                 Node::text(OrdinaryRole::User, "look up both"),
                 Node::ToolCall {
+                    namespace: Default::default(),
+                    signature: Default::default(),
+
                     id: Some("fc_a".to_string()),
                     tool_type: ToolCallType::Function,
                     call_id: "call_a".to_string(),
@@ -332,6 +335,9 @@ mod tests {
                     extra_body: HashMap::new(),
                 },
                 Node::ToolCall {
+                    namespace: Default::default(),
+                    signature: Default::default(),
+
                     id: Some("fc_b".to_string()),
                     tool_type: ToolCallType::Function,
                     call_id: "call_b".to_string(),
@@ -340,6 +346,10 @@ mod tests {
                     extra_body: HashMap::new(),
                 },
                 Node::ToolResult {
+                    name: Default::default(),
+                    namespace: Default::default(),
+                    signature: Default::default(),
+
                     id: Some("fco_a".to_string()),
                     tool_type: ToolCallType::Function,
                     call_id: "call_a".to_string(),
@@ -351,6 +361,10 @@ mod tests {
                     extra_body: HashMap::new(),
                 },
                 Node::ToolResult {
+                    name: Default::default(),
+                    namespace: Default::default(),
+                    signature: Default::default(),
+
                     id: Some("fco_b".to_string()),
                     tool_type: ToolCallType::Function,
                     call_id: "call_b".to_string(),
@@ -381,6 +395,9 @@ mod tests {
     fn append_tool_turn(req: &mut UrpRequest, suffix: &str) {
         let call_id = format!("call_{suffix}");
         req.input.push(Node::ToolCall {
+            namespace: Default::default(),
+            signature: Default::default(),
+
             id: Some(format!("fc_{suffix}")),
             tool_type: ToolCallType::Function,
             call_id: call_id.clone(),
@@ -389,6 +406,10 @@ mod tests {
             extra_body: HashMap::new(),
         });
         req.input.push(Node::ToolResult {
+            name: Default::default(),
+            namespace: Default::default(),
+            signature: Default::default(),
+
             id: Some(format!("fco_{suffix}")),
             tool_type: ToolCallType::Function,
             call_id,

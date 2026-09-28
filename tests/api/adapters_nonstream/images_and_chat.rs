@@ -308,7 +308,9 @@ async fn chat_file_and_audio_inputs_round_trip_and_map_only_to_supported_targets
     .await;
     assert_eq!(status, StatusCode::OK);
     let chat_upstream = last_captured_body(&chat_ctx, "chat");
-    assert_eq!(chat_upstream["messages"][0]["content"], chat_content);
+    let mut expected_chat_content = chat_content;
+    expected_chat_content[2]["file"]["file_data"] = json!("data:text/plain;base64,ZmlsZQ==");
+    assert_eq!(chat_upstream["messages"][0]["content"], expected_chat_content);
 
     let responses_ctx = setup().await;
     let (status, _) = json_post(
@@ -333,7 +335,15 @@ async fn chat_file_and_audio_inputs_round_trip_and_map_only_to_supported_targets
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(responses_ctx.captured_bodies.lock().unwrap().is_empty());
+    let (status, body) = json_post(&responses_ctx, "/v1/chat/completions", json!({
+        "model":"gpt-5-mini", "messages":[{"role":"user", "content":[
+            {"type":"file", "file":{"file_id":"file_openai_1"}},
+            {"type":"file", "file":{"file_data":"ZmlsZQ==", "filename":"note.txt"}}
+        ]}]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     let responses_upstream = last_captured_body(&responses_ctx, "responses");
     let content = responses_upstream["input"]
         .as_array()
@@ -348,7 +358,7 @@ async fn chat_file_and_audio_inputs_round_trip_and_map_only_to_supported_targets
             json!({ "type": "input_file", "file_id": "file_openai_1" }),
             json!({
                 "type": "input_file",
-                "file_data": "ZmlsZQ==",
+                "file_data": "data:text/plain;base64,ZmlsZQ==",
                 "filename": "note.txt"
             })
         ]

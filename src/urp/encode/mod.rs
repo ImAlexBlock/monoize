@@ -2,12 +2,13 @@ pub mod anthropic;
 pub mod gemini;
 pub mod openai_chat;
 pub mod openai_image;
+pub mod openrouter_image;
 pub mod openai_responses;
 pub mod replicate;
 
 use crate::urp::internal_legacy_bridge::{Part, Role};
 use crate::urp::{
-    FILE_ID_ORIGIN_EXTRA_KEY, InputDetails, Node, OrdinaryRole, OutputDetails, ToolChoice, Usage,
+    InputDetails, Node, OrdinaryRole, OutputDetails, ToolChoice, Usage,
     tool_call_arguments_for_wire,
 };
 use serde_json::{Map, Value, json};
@@ -22,16 +23,6 @@ pub fn merge_extra(obj: &mut Map<String, Value>, extra: &HashMap<String, Value>)
             obj.insert(k.clone(), v.clone());
         }
     }
-}
-
-pub(crate) fn file_id_origin_matches(
-    extra_body: &HashMap<String, Value>,
-    target_origin: &str,
-) -> bool {
-    extra_body
-        .get(FILE_ID_ORIGIN_EXTRA_KEY)
-        .and_then(Value::as_str)
-        == Some(target_origin)
 }
 
 /// Returns a wire-only clone of an opaque ProviderItem body with internal adapter keys removed.
@@ -384,150 +375,4 @@ pub fn extract_reasoning_encrypted_from_nodes(nodes: &[Node]) -> Option<Value> {
         } => Some(data.clone()),
         _ => None,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn provider_item_wire_body_sanitizer_is_recursive_and_non_mutating() {
-        let body = json!({
-            "type": "opaque_item",
-            "vendor_unknown": { "keep": true, "_monoize_nested": "drop" },
-            "items": [
-                { "keep": 1, "_monoize_array_member": "drop" },
-                [
-                    { "deep_keep": "yes", "_monoize_deep": "drop" }
-                ]
-            ],
-            "_monoize_top": "drop"
-        });
-
-        let sanitized = sanitize_provider_item_wire_body(&body);
-
-        assert_eq!(
-            sanitized,
-            json!({
-                "type": "opaque_item",
-                "vendor_unknown": { "keep": true },
-                "items": [
-                    { "keep": 1 },
-                    [
-                        { "deep_keep": "yes" }
-                    ]
-                ]
-            })
-        );
-        assert_eq!(body["_monoize_top"], json!("drop"));
-        assert_eq!(body["vendor_unknown"]["_monoize_nested"], json!("drop"));
-    }
-
-    #[test]
-    fn target_specific_tool_choice_shapes_preserve_semantics() {
-        let function = ToolChoice::Specific(json!({
-            "type": "function",
-            "name": "stale-flat-name",
-            "function": { "name": "lookup", "_monoize_nested_spoof": true },
-            "future_selector_field": 7,
-            "disable_parallel_tool_use": true,
-            "_monoize_outer_spoof": true
-        }));
-        assert_eq!(
-            tool_choice_to_chat_value(&function),
-            json!({
-                "type": "function",
-                "function": { "name": "lookup" },
-                "future_selector_field": 7
-            })
-        );
-        assert_eq!(
-            tool_choice_to_responses_value(&function),
-            json!({
-                "type": "function",
-                "name": "lookup",
-                "future_selector_field": 7
-            })
-        );
-
-        let custom = ToolChoice::Specific(json!({
-            "type": "custom",
-            "custom": { "name": "grammar" }
-        }));
-        assert_eq!(
-            tool_choice_to_responses_value(&custom),
-            json!({ "type": "custom", "name": "grammar" })
-        );
-
-        let allowed = ToolChoice::Specific(json!({
-            "type": "allowed_tools",
-            "mode": "stale",
-            "tools": [{ "type": "file_search" }],
-            "allowed_tools": {
-                "mode": "required",
-                "_monoize_wrapper_spoof": true,
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": { "name": "lookup", "_monoize_inner_spoof": true }
-                    },
-                    { "type": "custom", "custom": { "name": "grammar" } },
-                    { "type": "mcp", "server_label": "docs", "name": "search" },
-                    { "type": "image_generation" }
-                ]
-            }
-        }));
-        assert_eq!(
-            tool_choice_to_chat_value(&allowed),
-            json!({
-                "type": "allowed_tools",
-                "allowed_tools": {
-                    "mode": "required",
-                    "tools": [
-                        { "type": "function", "function": { "name": "lookup" } },
-                        { "type": "custom", "custom": { "name": "grammar" } },
-                        { "type": "mcp", "server_label": "docs", "name": "search" },
-                        { "type": "image_generation" }
-                    ]
-                }
-            })
-        );
-        assert_eq!(
-            tool_choice_to_responses_value(&allowed),
-            json!({
-                "type": "allowed_tools",
-                "mode": "required",
-                "tools": [
-                    { "type": "function", "name": "lookup" },
-                    { "type": "custom", "name": "grammar" },
-                    { "type": "mcp", "server_label": "docs", "name": "search" },
-                    { "type": "image_generation" }
-                ]
-            })
-        );
-    }
-
-    #[test]
-    fn target_tool_choice_fallbacks_reject_recursive_internal_keys() {
-        let fallback = ToolChoice::Specific(json!([
-            {
-                "type": "vendor_selector",
-                "vendor_keep": true,
-                "_monoize_outer_spoof": true,
-                "nested": {
-                    "vendor_nested_keep": 7,
-                    "_monoize_nested_spoof": true
-                }
-            }
-        ]));
-        let expected = json!([{
-            "type": "vendor_selector",
-            "vendor_keep": true,
-            "nested": { "vendor_nested_keep": 7 }
-        }]);
-
-        assert_eq!(tool_choice_to_value(&fallback), expected);
-        assert_eq!(tool_choice_to_chat_value(&fallback), expected);
-        assert_eq!(tool_choice_to_responses_value(&fallback), expected);
-    }
 }

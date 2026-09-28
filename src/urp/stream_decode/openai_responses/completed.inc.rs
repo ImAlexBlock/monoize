@@ -1,9 +1,102 @@
-#[cfg(test)]
-fn item_extra_body_from_item(item: &Item) -> HashMap<String, Value> {
-    match item {
-        Item::Message { extra_body, .. } | Item::ToolResult { extra_body, .. } => {
-            extra_body.clone()
+fn accumulate_message_content_event(
+    event_name: &str,
+    data: &Value,
+    index_state: &mut ResponsesStreamIndexState,
+) {
+    if !matches!(
+        event_name,
+        "response.output_text.delta"
+            | "response.output_text.done"
+            | "response.refusal.delta"
+            | "response.refusal.done"
+            | "response.output_text.annotation.added"
+    ) {
+        return;
+    }
+    let output_index = data
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let content_index = data
+        .get("content_index")
+        .or_else(|| data.get("part_index"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let item_id = stable_message_item_id_for_output(index_state, output_index);
+    let state = output_state_for(index_state, output_index);
+    let citations: Vec<_> = state
+        .text_citations
+        .iter()
+        .filter(|((part, _), _)| *part == content_index)
+        .map(|(_, annotation)| annotation.clone())
+        .collect();
+    let is_refusal = event_name.starts_with("response.refusal.");
+    let node = state.content_nodes.entry(content_index).or_insert_with(|| {
+        if is_refusal {
+            Node::Refusal {
+                logprobs: None,
+                id: Some(item_id.clone()),
+                content: String::new(),
+                extra_body: HashMap::new(),
+            }
+        } else {
+            Node::Text {
+                logprobs: None,
+                id: Some(item_id.clone()),
+                role: state
+                    .role
+                    .unwrap_or(Role::Assistant)
+                    .to_ordinary()
+                    .unwrap_or(OrdinaryRole::Assistant),
+                content: String::new(),
+                phase: state.message_phase.clone(),
+                signature: None,
+                citations: Vec::new(),
+                extra_body: HashMap::new(),
+            }
         }
+    });
+    match node {
+        Node::Text {
+            logprobs,
+            content,
+            citations: stored_citations,
+            phase,
+            ..
+        } => {
+            if event_name == "response.output_text.delta" {
+                content.push_str(output_text_delta_content(data));
+                crate::urp::logprobs::append(
+                    logprobs,
+                    &crate::urp::logprobs::decode(data.get("logprobs")),
+                );
+            } else if event_name == "response.output_text.done" {
+                if let Some(text) = data.get("text").and_then(Value::as_str) {
+                    *content = text.to_owned();
+                }
+                if let Some(scores) = crate::urp::logprobs::decode(data.get("logprobs")) {
+                    *logprobs = Some(scores);
+                }
+            }
+            if let Some(value) = data.get("phase").and_then(Value::as_str) {
+                *phase = Some(value.to_owned());
+            }
+            *stored_citations = citations;
+        }
+        Node::Refusal {
+            logprobs, content, ..
+        } if is_refusal => {
+            if event_name == "response.refusal.delta" {
+                content.push_str(
+                    data.get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                );
+            } else if let Some(text) = data.get("refusal").and_then(Value::as_str) {
+                *content = text.to_owned();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -11,6 +104,78 @@ fn outputs_have_tool_calls(items: &[Node]) -> bool {
     items
         .iter()
         .any(|item| matches!(item, Node::ToolCall { .. }))
+}
+
+fn accumulate_text_annotations(
+    event_name: &str,
+    data: &Value,
+    index_state: &mut ResponsesStreamIndexState,
+) {
+    let Some(output_index) = data.get("output_index").and_then(Value::as_u64) else {
+        return;
+    };
+    let state = output_state_for(index_state, output_index);
+    let content_index = data
+        .get("content_index")
+        .or_else(|| data.get("part_index"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if event_name == "response.output_text.annotation.added" {
+        if let Some(annotation) = data.get("annotation") {
+            let annotation_index = data
+                .get("annotation_index")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| {
+                    state
+                        .text_citations
+                        .keys()
+                        .filter(|(part, _)| *part == content_index)
+                        .count() as u64
+                });
+            state.text_citations.insert(
+                (content_index, annotation_index),
+                crate::urp::Citation::decode(
+                    annotation.clone(),
+                    crate::urp::ProviderProtocol::Responses,
+                ),
+            );
+        }
+    }
+    let mut add_part = |part: &Value, part_index: u64| {
+        if let Some(annotations) = part.get("annotations").and_then(Value::as_array) {
+            for (annotation_index, annotation) in annotations.iter().enumerate() {
+                state.text_citations.insert(
+                    (part_index, annotation_index as u64),
+                    crate::urp::Citation::decode(
+                        annotation.clone(),
+                        crate::urp::ProviderProtocol::Responses,
+                    ),
+                );
+            }
+        }
+    };
+    if matches!(
+        event_name,
+        "response.content_part.added" | "response.content_part.done"
+    ) {
+        if let Some(part) = data.get("part") {
+            add_part(part, content_index);
+        }
+    }
+    if matches!(
+        event_name,
+        "response.output_item.added" | "response.output_item.done"
+    ) {
+        if let Some(parts) = data
+            .get("item")
+            .and_then(|item| item.get("content"))
+            .and_then(Value::as_array)
+        {
+            for (part_index, part) in parts.iter().enumerate() {
+                add_part(part, part_index as u64);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,6 +279,12 @@ fn append_reasoning_summary_delta(
     }
 }
 
+fn replace_nonempty_tool_arguments(current: &mut String, snapshot: &str) {
+    if !snapshot.is_empty() {
+        *current = snapshot.to_string();
+    }
+}
+
 fn complete_reasoning_text(slot: &mut AccumulatedReasoningSlot, text: &str) {
     if !text.is_empty() && slot.content.is_empty() {
         slot.content = text.to_string();
@@ -176,6 +347,7 @@ fn build_accumulated_output_entries(
     call_order: &[String],
     calls: &HashMap<String, (ToolCallType, String, String)>,
     call_ids_by_output_index: &HashMap<u64, String>,
+    index_state: &ResponsesStreamIndexState,
 ) -> Vec<AccumulatedOutputEntry> {
     #[derive(Clone, Debug)]
     enum FallbackOutputKind {
@@ -246,16 +418,29 @@ fn build_accumulated_output_entries(
                                 .map(|s| s.to_string())
                         })
                 });
+                let mut nodes = Vec::new();
+                if let Some(state) = index_state.output_state_by_index.get(&output_index)
+                    && state.control_emitted
+                {
+                    let mut extra_body = state.item_extra_body.clone();
+                    for key in ["encrypted_content", "summary", "id"] {
+                        extra_body.remove(key);
+                    }
+                    nodes.push(Node::NextDownstreamEnvelopeExtra { extra_body });
+                }
+                nodes.push(Node::Reasoning {
+                    metadata: Default::default(),
+
+                    id,
+                    content: (!slot.content.is_empty()).then(|| slot.content.clone()),
+                    summary: slot.summary_text(),
+                    encrypted: slot.encrypted.clone(),
+                    source: slot.source.clone(),
+                    extra_body: slot.extra_body.clone(),
+                });
                 entries.push(AccumulatedOutputEntry {
                     output_index,
-                    nodes: vec![Node::Reasoning {
-                        id,
-                        content: (!slot.content.is_empty()).then(|| slot.content.clone()),
-                        summary: slot.summary_text(),
-                        encrypted: slot.encrypted.clone(),
-                        source: slot.source.clone(),
-                        extra_body: slot.extra_body.clone(),
-                    }],
+                    nodes,
                 });
             }
             FallbackOutputKind::Text(output_index) => {
@@ -265,25 +450,25 @@ fn build_accumulated_output_entries(
                 if output_text.is_empty() {
                     continue;
                 }
-                let mut text_extra_body = HashMap::new();
-                if let Some(phase) = message_phases_by_output_index.get(&output_index) {
-                    text_extra_body.insert("phase".to_string(), json!(phase));
-                }
                 let mut item_extra_body = message_item_extra_by_output_index
                     .get(&output_index)
                     .cloned()
                     .unwrap_or_default();
-                if let Some(phase) = text_extra_body.get("phase") {
-                    item_extra_body
-                        .entry("phase".to_string())
-                        .or_insert_with(|| phase.clone());
+                if let Some(state) = index_state.output_state_by_index.get(&output_index) {
+                    for (key, value) in &state.item_extra_body {
+                        item_extra_body
+                            .entry(key.clone())
+                            .or_insert_with(|| value.clone());
+                    }
                 }
                 let message_id = item_extra_body
-                    .get("id")
+                    .remove("id")
+                    .as_ref()
                     .and_then(Value::as_str)
                     .map(|s| s.to_string())
                     .or_else(|| item_ids_by_output_index.get(&output_index).cloned())
                     .or_else(|| Some(crate::urp::synthetic_message_id()));
+                item_extra_body.remove("phase");
                 entries.push(AccumulatedOutputEntry {
                     output_index,
                     nodes: vec![
@@ -291,14 +476,19 @@ fn build_accumulated_output_entries(
                             extra_body: item_extra_body,
                         },
                         Node::Text {
+                            logprobs: None,
+                            citations: index_state
+                                .output_state_by_index
+                                .get(&output_index)
+                                .map(|state| state.text_citations.values().cloned().collect())
+                                .unwrap_or_default(),
+                            signature: None,
+
                             id: message_id,
                             role: OrdinaryRole::Assistant,
                             content: output_text.clone(),
-                            phase: text_extra_body
-                                .get("phase")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
-                            extra_body: text_extra_body,
+                            phase: message_phases_by_output_index.get(&output_index).cloned(),
+                            extra_body: HashMap::new(),
                         },
                     ],
                 });
@@ -308,6 +498,8 @@ fn build_accumulated_output_entries(
                     entries.push(AccumulatedOutputEntry {
                         output_index,
                         nodes: vec![Node::ToolCall {
+                            namespace: None,
+                            signature: None,
                             id: Some(crate::urp::synthetic_tool_call_id()),
                             tool_type: *tool_type,
                             call_id: call_id.clone(),
@@ -321,80 +513,29 @@ fn build_accumulated_output_entries(
         }
     }
 
+    for (output_index, state) in &index_state.output_state_by_index {
+        if state.content_nodes.is_empty() {
+            continue;
+        }
+        entries.retain(|entry| entry.output_index != *output_index);
+        let mut nodes = Vec::new();
+        if !state.item_extra_body.is_empty() {
+            nodes.push(Node::NextDownstreamEnvelopeExtra {
+                extra_body: state.item_extra_body.clone(),
+            });
+        }
+        nodes.extend(state.content_nodes.values().cloned());
+        entries.push(AccumulatedOutputEntry {
+            output_index: *output_index,
+            nodes,
+        });
+    }
+    entries.sort_by_key(|entry| entry.output_index);
     entries
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-fn build_accumulated_output_nodes_from_reasoning_slots(
-    reasoning_by_output_index: &HashMap<u64, AccumulatedReasoningSlot>,
-    output_texts_by_output_index: &HashMap<u64, String>,
-    message_phases_by_output_index: &HashMap<u64, String>,
-    message_item_extra_by_output_index: &HashMap<u64, HashMap<String, Value>>,
-    item_ids_by_output_index: &HashMap<u64, String>,
-    call_order: &[String],
-    calls: &HashMap<String, (ToolCallType, String, String)>,
-    call_ids_by_output_index: &HashMap<u64, String>,
-) -> Vec<Node> {
-    build_accumulated_output_entries(
-        reasoning_by_output_index,
-        output_texts_by_output_index,
-        message_phases_by_output_index,
-        message_item_extra_by_output_index,
-        item_ids_by_output_index,
-        call_order,
-        calls,
-        call_ids_by_output_index,
-    )
-    .into_iter()
-    .flat_map(|entry| entry.nodes)
-    .collect()
-}
-
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-fn build_accumulated_output_nodes(
-    reasoning_text: &str,
-    reasoning_summary_text: &str,
-    reasoning_sig: &str,
-    reasoning_source: Option<&str>,
-    reasoning_output_index: Option<u64>,
-    output_texts_by_output_index: &HashMap<u64, String>,
-    message_phases_by_output_index: &HashMap<u64, String>,
-    message_item_extra_by_output_index: &HashMap<u64, HashMap<String, Value>>,
-    item_ids_by_output_index: &HashMap<u64, String>,
-    call_order: &[String],
-    calls: &HashMap<String, (ToolCallType, String, String)>,
-    call_ids_by_output_index: &HashMap<u64, String>,
-) -> Vec<Node> {
-    let mut reasoning_by_output_index = HashMap::new();
-    if !reasoning_text.is_empty() || !reasoning_summary_text.is_empty() || !reasoning_sig.is_empty()
-    {
-        let output_index = reasoning_output_index.unwrap_or(0);
-        reasoning_by_output_index.insert(
-            output_index,
-            AccumulatedReasoningSlot {
-                id: item_ids_by_output_index.get(&output_index).cloned(),
-                content: reasoning_text.to_string(),
-                summary: reasoning_summary_text.to_string(),
-                summary_parts: BTreeMap::new(),
-                encrypted: (!reasoning_sig.is_empty()).then(|| Value::String(reasoning_sig.to_string())),
-                source: reasoning_source.map(str::to_string),
-                extra_body: HashMap::new(),
-            },
-        );
-    }
-    build_accumulated_output_nodes_from_reasoning_slots(
-        &reasoning_by_output_index,
-        output_texts_by_output_index,
-        message_phases_by_output_index,
-        message_item_extra_by_output_index,
-        item_ids_by_output_index,
-        call_order,
-        calls,
-        call_ids_by_output_index,
-    )
-}
 
 fn output_index_for_call_id(
     call_ids_by_output_index: &HashMap<u64, String>,
@@ -406,6 +547,20 @@ fn output_index_for_call_id(
 }
 
 fn item_extra_body_from_value(item: &Value) -> HashMap<String, Value> {
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some(
+            "message"
+                | "reasoning"
+                | "function_call"
+                | "custom_tool_call"
+                | "function_call_output"
+                | "custom_tool_call_output"
+                | "image_generation_call"
+        )
+    ) {
+        return HashMap::new();
+    }
     let mut extra_body = split_known_fields(
         item.clone(),
         &[
@@ -414,9 +569,14 @@ fn item_extra_body_from_value(item: &Value) -> HashMap<String, Value> {
             "content",
             "call_id",
             "id",
+            "phase",
             "output",
             "name",
             "arguments",
+            "namespace",
+            "input",
+            "result",
+            "output_format",
         ],
     );
     if let Some(native_body) = native_image_generation_call_body(item) {
@@ -429,17 +589,55 @@ fn item_extra_body_from_value(item: &Value) -> HashMap<String, Value> {
 }
 
 fn part_extra_body_from_value(part: &Value) -> HashMap<String, Value> {
+    if let Some(obj) = part.as_object()
+        && let Ok(Some(media)) = crate::urp::decode::parse_compatible_media_part(obj)
+    {
+        return match media {
+            Part::Image { extra_body, .. }
+            | Part::File { extra_body, .. }
+            | Part::Audio { extra_body, .. } => extra_body,
+            _ => unreachable!(),
+        };
+    }
+    if !matches!(
+        part.get("type").and_then(Value::as_str),
+        Some(
+            "input_text"
+                | "output_text"
+                | "text"
+                | "refusal"
+                | "reasoning_text"
+                | "reasoning"
+                | "function_call"
+                | "custom_tool_call"
+                | "function_call_output"
+                | "custom_tool_call_output"
+                | "image_generation_call"
+                | "input_image"
+                | "output_image"
+                | "input_file"
+                | "output_file"
+        )
+    ) {
+        return HashMap::new();
+    }
     let mut extra_body = split_known_fields(
         part.clone(),
         &[
             "type",
+            "id",
             "content",
             "text",
             "summary",
             "refusal",
+            "annotations",
             "call_id",
             "name",
             "arguments",
+            "namespace",
+            "input",
+            "result",
+            "output_format",
             "source",
             "encrypted_content",
         ],

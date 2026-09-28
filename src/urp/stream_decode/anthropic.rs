@@ -1,4 +1,4 @@
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::handlers::usage::{
     mark_stream_ttfb_if_needed, record_cumulative_stream_usage_snapshot,
     record_observed_upstream_response_model, record_stream_done_sentinel,
@@ -7,8 +7,8 @@ use crate::handlers::usage::{
 };
 use crate::handlers::{StreamRuntimeMetrics, StreamTerminalError, UrpRequest as HandlerUrpRequest};
 use crate::urp::{
-    FinishReason, InputDetails, MESSAGES_STREAM_START_USAGE_EXTRA_KEY, Node, NodeDelta, NodeHeader,
-    OrdinaryRole, OutputDetails, ProviderProtocol, ToolCallType, UrpStreamEvent, Usage,
+    FinishReason, InputDetails, Node, NodeDelta, NodeHeader, OrdinaryRole, OutputDetails,
+    ProviderProtocol, ToolCallType, UrpStreamEvent, Usage,
 };
 use axum::http::StatusCode;
 use eventsource_stream::Eventsource;
@@ -17,9 +17,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
-
-const MESSAGES_PROVIDER_ITEM_START_BODY_EXTRA_KEY: &str =
-    "_monoize_messages_provider_item_start_body";
 
 #[derive(Debug, Default)]
 struct AnthropicMessagesStreamState {
@@ -38,6 +35,7 @@ struct AnthropicMessagesStreamState {
 
 #[derive(Debug, Default)]
 struct AnthropicStreamUsageAccumulator {
+    iterations: Option<Vec<crate::urp::UsageIteration>>,
     saw_usage: bool,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
@@ -63,6 +61,10 @@ impl AnthropicStreamUsageAccumulator {
             })?
             .as_object()?;
         self.saw_usage = true;
+        if usage.contains_key("iterations") {
+            self.iterations =
+                crate::urp::usage::decode_messages_iterations(usage.get("iterations"));
+        }
 
         replace_numeric_counter(
             usage,
@@ -156,6 +158,7 @@ impl AnthropicStreamUsageAccumulator {
         }
 
         const KNOWN_USAGE_KEYS: &[&str] = &[
+            "iterations",
             "input_tokens",
             "prompt_tokens",
             "output_tokens",
@@ -214,6 +217,7 @@ impl AnthropicStreamUsageAccumulator {
             || cache_creation_1h_tokens > 0
             || tool_prompt_tokens > 0)
             .then_some(InputDetails {
+                tool_prompt_modality_breakdown: None,
                 standard_tokens: 0,
                 cache_read_tokens,
                 cache_read_modality_breakdown: None,
@@ -235,6 +239,7 @@ impl AnthropicStreamUsageAccumulator {
             });
 
         Some(Usage {
+            iterations: self.iterations.clone(),
             input_tokens: wire_input_tokens
                 .saturating_add(cache_read_tokens)
                 .saturating_add(cache_creation_tokens),
@@ -285,19 +290,25 @@ struct ActiveNodeState {
 
 #[derive(Debug, Clone)]
 enum ActiveNodeKind {
+    Complete(Node),
     Text {
+        citations: Vec<crate::urp::Citation>,
         content: String,
         phase: Option<String>,
     },
     Reasoning {
+        metadata: crate::urp::ReasoningMetadata,
         summary: String,
         encrypted: String,
     },
     ToolCall {
+        namespace: Option<String>,
+        tool_type: ToolCallType,
         call_id: String,
         name: String,
         arguments: String,
         replace_on_next_delta: bool,
+        custom_input_decoder: Option<CustomToolInputDecoder>,
     },
     ProviderItem {
         id: Option<String>,
@@ -305,6 +316,291 @@ enum ActiveNodeKind {
         body: Value,
         input_json: ProviderItemInputJsonAccumulator,
     },
+}
+
+#[derive(Debug, Clone)]
+struct CustomToolInputDecoder {
+    phase: CustomToolInputPhase,
+    string_decoder: JsonStringDecoder,
+    key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomToolInputPhase {
+    Start,
+    KeyStart,
+    Key,
+    Colon,
+    ValueStart,
+    Value,
+    Tail,
+    Done,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JsonStringDecoder {
+    escape: JsonStringEscape,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum JsonStringEscape {
+    #[default]
+    None,
+    Escape,
+    Unicode {
+        value: u16,
+        digits: u8,
+    },
+    HighSurrogateSlash {
+        high: u16,
+    },
+    HighSurrogateU {
+        high: u16,
+    },
+    LowSurrogate {
+        high: u16,
+        value: u16,
+        digits: u8,
+    },
+}
+
+enum JsonStringStep {
+    Continue,
+    Emit(char),
+    End,
+}
+
+impl JsonStringDecoder {
+    fn push(&mut self, character: char) -> Result<JsonStringStep, String> {
+        let escape = std::mem::take(&mut self.escape);
+        match escape {
+            JsonStringEscape::None => match character {
+                '"' => Ok(JsonStringStep::End),
+                '\\' => {
+                    self.escape = JsonStringEscape::Escape;
+                    Ok(JsonStringStep::Continue)
+                }
+                character if (character as u32) < 0x20 => {
+                    Err("custom tool input contains an unescaped control character".to_string())
+                }
+                character => Ok(JsonStringStep::Emit(character)),
+            },
+            JsonStringEscape::Escape => {
+                let decoded = match character {
+                    '"' => '"',
+                    '\\' => '\\',
+                    '/' => '/',
+                    'b' => '\u{0008}',
+                    'f' => '\u{000c}',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    'u' => {
+                        self.escape = JsonStringEscape::Unicode {
+                            value: 0,
+                            digits: 0,
+                        };
+                        return Ok(JsonStringStep::Continue);
+                    }
+                    _ => {
+                        return Err("custom tool input contains an invalid JSON escape".to_string());
+                    }
+                };
+                Ok(JsonStringStep::Emit(decoded))
+            }
+            JsonStringEscape::Unicode { value, digits } => {
+                let digit = json_hex_digit(character)?;
+                let value = (value << 4) | digit;
+                let digits = digits + 1;
+                if digits < 4 {
+                    self.escape = JsonStringEscape::Unicode { value, digits };
+                    return Ok(JsonStringStep::Continue);
+                }
+                if (0xd800..=0xdbff).contains(&value) {
+                    self.escape = JsonStringEscape::HighSurrogateSlash { high: value };
+                    return Ok(JsonStringStep::Continue);
+                }
+                if (0xdc00..=0xdfff).contains(&value) {
+                    return Err("custom tool input contains an unmatched low surrogate".to_string());
+                }
+                char::from_u32(value as u32)
+                    .map(JsonStringStep::Emit)
+                    .ok_or_else(|| {
+                        "custom tool input contains an invalid Unicode escape".to_string()
+                    })
+            }
+            JsonStringEscape::HighSurrogateSlash { high } => {
+                if character != '\\' {
+                    return Err(
+                        "custom tool input high surrogate is not followed by a low surrogate"
+                            .to_string(),
+                    );
+                }
+                self.escape = JsonStringEscape::HighSurrogateU { high };
+                Ok(JsonStringStep::Continue)
+            }
+            JsonStringEscape::HighSurrogateU { high } => {
+                if character != 'u' {
+                    return Err(
+                        "custom tool input high surrogate is not followed by a low surrogate"
+                            .to_string(),
+                    );
+                }
+                self.escape = JsonStringEscape::LowSurrogate {
+                    high,
+                    value: 0,
+                    digits: 0,
+                };
+                Ok(JsonStringStep::Continue)
+            }
+            JsonStringEscape::LowSurrogate {
+                high,
+                value,
+                digits,
+            } => {
+                let digit = json_hex_digit(character)?;
+                let value = (value << 4) | digit;
+                let digits = digits + 1;
+                if digits < 4 {
+                    self.escape = JsonStringEscape::LowSurrogate {
+                        high,
+                        value,
+                        digits,
+                    };
+                    return Ok(JsonStringStep::Continue);
+                }
+                if !(0xdc00..=0xdfff).contains(&value) {
+                    return Err(
+                        "custom tool input high surrogate is not followed by a low surrogate"
+                            .to_string(),
+                    );
+                }
+                let scalar = 0x10000 + (((high as u32) - 0xd800) << 10) + ((value as u32) - 0xdc00);
+                char::from_u32(scalar)
+                    .map(JsonStringStep::Emit)
+                    .ok_or_else(|| {
+                        "custom tool input contains an invalid surrogate pair".to_string()
+                    })
+            }
+        }
+    }
+}
+
+fn json_hex_digit(character: char) -> Result<u16, String> {
+    character
+        .to_digit(16)
+        .map(|digit| digit as u16)
+        .ok_or_else(|| "custom tool input contains an invalid Unicode escape".to_string())
+}
+
+impl CustomToolInputDecoder {
+    fn new() -> Self {
+        Self {
+            phase: CustomToolInputPhase::Start,
+            string_decoder: JsonStringDecoder::default(),
+            key: String::new(),
+        }
+    }
+
+    fn push_fragment(&mut self, fragment: &str) -> Result<String, String> {
+        let mut decoded = String::new();
+        for character in fragment.chars() {
+            match self.phase {
+                CustomToolInputPhase::Start => {
+                    if json_whitespace(character) {
+                        continue;
+                    }
+                    if character != '{' {
+                        return Err("custom tool input wrapper must be a JSON object".to_string());
+                    }
+                    self.phase = CustomToolInputPhase::KeyStart;
+                }
+                CustomToolInputPhase::KeyStart => {
+                    if json_whitespace(character) {
+                        continue;
+                    }
+                    if character != '"' {
+                        return Err(
+                            "custom tool input wrapper must contain the input field".to_string()
+                        );
+                    }
+                    self.string_decoder = JsonStringDecoder::default();
+                    self.key.clear();
+                    self.phase = CustomToolInputPhase::Key;
+                }
+                CustomToolInputPhase::Key => match self.string_decoder.push(character)? {
+                    JsonStringStep::Continue => {}
+                    JsonStringStep::Emit(character) => self.key.push(character),
+                    JsonStringStep::End => {
+                        if self.key != "input" {
+                            return Err(
+                                "custom tool input wrapper field must be named input".to_string()
+                            );
+                        }
+                        self.phase = CustomToolInputPhase::Colon;
+                    }
+                },
+                CustomToolInputPhase::Colon => {
+                    if json_whitespace(character) {
+                        continue;
+                    }
+                    if character != ':' {
+                        return Err(
+                            "custom tool input wrapper is missing the input separator".to_string()
+                        );
+                    }
+                    self.phase = CustomToolInputPhase::ValueStart;
+                }
+                CustomToolInputPhase::ValueStart => {
+                    if json_whitespace(character) {
+                        continue;
+                    }
+                    if character != '"' {
+                        return Err("custom tool input must be a JSON string".to_string());
+                    }
+                    self.string_decoder = JsonStringDecoder::default();
+                    self.phase = CustomToolInputPhase::Value;
+                }
+                CustomToolInputPhase::Value => match self.string_decoder.push(character)? {
+                    JsonStringStep::Continue => {}
+                    JsonStringStep::Emit(character) => decoded.push(character),
+                    JsonStringStep::End => self.phase = CustomToolInputPhase::Tail,
+                },
+                CustomToolInputPhase::Tail => {
+                    if json_whitespace(character) {
+                        continue;
+                    }
+                    if character != '}' {
+                        return Err(
+                            "custom tool input wrapper must contain only the input field"
+                                .to_string(),
+                        );
+                    }
+                    self.phase = CustomToolInputPhase::Done;
+                }
+                CustomToolInputPhase::Done => {
+                    if !json_whitespace(character) {
+                        return Err(
+                            "custom tool input wrapper has data after the JSON object".to_string()
+                        );
+                    }
+                }
+            }
+        }
+        Ok(decoded)
+    }
+
+    fn finish(&self) -> Result<(), String> {
+        if self.phase == CustomToolInputPhase::Done {
+            Ok(())
+        } else {
+            Err("custom tool input wrapper ended before the JSON object was complete".to_string())
+        }
+    }
+}
+
+fn json_whitespace(character: char) -> bool {
+    matches!(character, ' ' | '\n' | '\r' | '\t')
 }
 
 #[derive(Debug, Clone)]
@@ -354,28 +650,20 @@ pub(crate) async fn stream_messages_to_urp_events(
     let mut state = AnthropicMessagesStreamState::default();
     let mut explicit_terminal_event: Option<&'static str> = None;
     let mut downstream_closed = false;
+    let mut response_started = false;
 
     let idle_timeout = std::time::Duration::from_millis(idle_timeout_ms.max(1));
     let mut stream = upstream_resp.bytes_stream().eventsource();
-    loop {
-        let next = match tokio::time::timeout(idle_timeout, stream.next()).await {
-            Ok(next) => next,
-            Err(_) => {
-                // The downstream status was committed as 200 before the first frame, so an
-                // idle timeout can only be reported on the wire. Returning an error here
-                // without a terminal would close the stream with no explanation.
-                emit_messages_terminal_protocol_error(
-                    &tx,
-                    &runtime_metrics,
-                    "upstream_idle_timeout",
-                    format!("upstream stream idle for {idle_timeout_ms}ms without data"),
-                    HashMap::new(),
-                )
-                .await;
-                return Ok(());
-            }
-        };
-        let Some(ev) = next else { break };
+    while let Some(ev) = tokio::time::timeout(idle_timeout, stream.next())
+        .await
+        .map_err(|_| {
+            AppError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_idle_timeout",
+                format!("upstream stream idle for {idle_timeout_ms}ms without data"),
+            )
+        })?
+    {
         let ev = match ev {
             Ok(event) => event,
             Err(error) => {
@@ -421,13 +709,63 @@ pub(crate) async fn stream_messages_to_urp_events(
         let cumulative_usage = state.usage.merge_event(&data_val);
         record_cumulative_stream_usage_snapshot(&runtime_metrics, cumulative_usage).await;
 
-        let event_type = data_val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        // Once the terminal delta was seen, only further usage corrections
-        // (merged above) and message_stop matter; a chatty upstream cannot
-        // append content or errors past the terminal.
-        if state.saw_terminal_delta && !matches!(event_type, "message_stop" | "message_delta") {
+        let event_type = data_val.get("type").and_then(Value::as_str).unwrap_or("");
+        // Terminal content may be followed by cumulative usage corrections.
+        // Only usage and stop fields can change after the terminal delta.
+        if state.saw_terminal_delta && !matches!(event_type, "message_delta" | "message_stop") {
             continue;
         }
+        if (event_type == "message_start" && response_started)
+            || (matches!(
+                event_type,
+                "content_block_start"
+                    | "content_block_delta"
+                    | "content_block_stop"
+                    | "message_delta"
+                    | "message_stop"
+            ) && !response_started)
+        {
+            emit_messages_terminal_protocol_error(
+                &tx,
+                &runtime_metrics,
+                "messages_invalid_message_lifecycle",
+                format!("{event_type} occurred outside its message lifecycle"),
+                HashMap::new(),
+            )
+            .await;
+            return Ok(());
+        }
+        if matches!(
+            event_type,
+            "content_block_start" | "content_block_delta" | "content_block_stop"
+        ) {
+            let wire_index = data_val
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| u32::try_from(index).ok());
+            let valid = wire_index.is_some_and(|index| {
+                if event_type == "content_block_start" {
+                    !state.wire_to_node_index.contains_key(&index)
+                } else {
+                    state
+                        .wire_to_node_index
+                        .get(&index)
+                        .is_some_and(|index| state.active_nodes.contains_key(index))
+                }
+            });
+            if !valid {
+                emit_messages_terminal_protocol_error(
+                    &tx,
+                    &runtime_metrics,
+                    "messages_invalid_block_lifecycle",
+                    format!("{event_type} has an invalid, reused, or inactive content block index"),
+                    HashMap::new(),
+                )
+                .await;
+                return Ok(());
+            }
+        }
+
         match event_type {
             "error" => {
                 let (code, message, extra_body, terminal_error) =
@@ -443,6 +781,7 @@ pub(crate) async fn stream_messages_to_urp_events(
                 return Ok(());
             }
             "message_start" => {
+                response_started = true;
                 let message = data_val.get("message").cloned().unwrap_or(Value::Null);
                 if let Some(id) = message.get("id").and_then(|v| v.as_str()) {
                     response_id = id.to_string();
@@ -464,17 +803,10 @@ pub(crate) async fn stream_messages_to_urp_events(
                         "usage",
                     ],
                 );
-                let mut response_start_extra = response_extra.clone();
-                if let Some(usage) = state.usage.snapshot()
-                    && let Ok(usage_value) = serde_json::to_value(usage)
-                {
-                    response_start_extra.insert(
-                        MESSAGES_STREAM_START_USAGE_EXTRA_KEY.to_string(),
-                        usage_value,
-                    );
-                }
+                let response_start_extra = response_extra.clone();
                 let _ = tx
                     .send(UrpStreamEvent::ResponseStart {
+                        usage: state.usage.snapshot(),
                         id: response_id.clone(),
                         model: response_model.clone(),
                         extra_body: response_start_extra,
@@ -488,7 +820,35 @@ pub(crate) async fn stream_messages_to_urp_events(
                     .get("content_block")
                     .cloned()
                     .unwrap_or(Value::Null);
-                for event in handle_content_block_start(node_index, cb, &mut state) {
+                let error_code = match cb.get("type").and_then(Value::as_str) {
+                    Some(
+                        "image" | "image_url" | "input_image" | "output_image" | "document"
+                        | "file" | "input_file" | "output_file" | "audio" | "input_audio"
+                        | "output_audio",
+                    ) => "messages_media_content_invalid",
+                    Some("tool_result") => "messages_tool_result_content_invalid",
+                    _ => "messages_custom_tool_input_invalid",
+                };
+                let events = match handle_content_block_start(
+                    node_index,
+                    cb,
+                    &urp.messages_custom_tool_names,
+                    &mut state,
+                ) {
+                    Ok(events) => events,
+                    Err(message) => {
+                        emit_messages_terminal_protocol_error(
+                            &tx,
+                            &runtime_metrics,
+                            error_code,
+                            message,
+                            HashMap::new(),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                };
+                for event in events {
                     let _ = tx.send(event).await;
                 }
             }
@@ -498,7 +858,21 @@ pub(crate) async fn stream_messages_to_urp_events(
                     continue;
                 };
                 let delta = data_val.get("delta").cloned().unwrap_or(Value::Null);
-                for event in handle_content_block_delta(node_index, delta, &mut state) {
+                let events = match handle_content_block_delta(node_index, delta, &mut state) {
+                    Ok(events) => events,
+                    Err(message) => {
+                        emit_messages_terminal_protocol_error(
+                            &tx,
+                            &runtime_metrics,
+                            "messages_custom_tool_input_invalid",
+                            message,
+                            HashMap::new(),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                };
+                for event in events {
                     record_visible_stream_event_delta(&runtime_metrics, &event).await;
                     let _ = tx.send(event).await;
                 }
@@ -508,16 +882,27 @@ pub(crate) async fn stream_messages_to_urp_events(
                 let Some(node_index) = state.wire_to_node_index.get(&wire_index).copied() else {
                     continue;
                 };
-                for event in handle_content_block_stop(node_index, &mut state) {
+                let events = match handle_content_block_stop(node_index, &mut state) {
+                    Ok(events) => events,
+                    Err(message) => {
+                        emit_messages_terminal_protocol_error(
+                            &tx,
+                            &runtime_metrics,
+                            "messages_custom_tool_input_invalid",
+                            message,
+                            HashMap::new(),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                };
+                for event in events {
                     let _ = tx.send(event).await;
                 }
             }
             "message_delta" => {
                 merge_message_delta_state(&mut state, &data_val);
                 if state.saw_terminal_delta {
-                    // Do not break: providers may send usage-only deltas after
-                    // the stop_reason delta; the loop ends at message_stop (or
-                    // stream end) while merge_event keeps the final counts.
                     explicit_terminal_event = Some("message_delta.stop_reason");
                 }
             }
@@ -544,6 +929,46 @@ pub(crate) async fn stream_messages_to_urp_events(
             .saw_terminal_delta
             .then_some("message_delta_stream_end")
     });
+    if terminal_event.is_some() && !downstream_closed && !state.active_nodes.is_empty() {
+        emit_messages_terminal_protocol_error(
+            &tx,
+            &runtime_metrics,
+            "messages_invalid_block_lifecycle",
+            "upstream Messages stream ended before a content block closed".to_string(),
+            HashMap::new(),
+        )
+        .await;
+        return Ok(());
+    }
+    if terminal_event.is_some() {
+        let invalid_arguments = state.completed_nodes.values().any(|node| {
+            let Node::ToolCall {
+                tool_type: ToolCallType::Function,
+                arguments,
+                ..
+            } = node
+            else {
+                return false;
+            };
+            match serde_json::from_str::<Value>(arguments) {
+                Ok(value) => !value.is_object(),
+                Err(error) => {
+                    !(state.finish_reason == Some(FinishReason::Length) && error.is_eof())
+                }
+            }
+        });
+        if invalid_arguments {
+            emit_messages_terminal_protocol_error(
+                &tx,
+                &runtime_metrics,
+                "messages_tool_input_invalid",
+                "completed Messages tool input must be a JSON object".to_string(),
+                HashMap::new(),
+            )
+            .await;
+            return Ok(());
+        }
+    }
     if let Some(terminal_event) = terminal_event {
         let output_nodes = ordered_completed_nodes(&state);
         crate::handlers::usage::increment_estimated_output_tokens(
@@ -621,10 +1046,13 @@ async fn emit_messages_terminal_protocol_error(
 fn handle_content_block_start(
     node_index: u32,
     content_block: Value,
+    messages_custom_tool_names: &std::collections::HashSet<String>,
     state: &mut AnthropicMessagesStreamState,
-) -> Vec<UrpStreamEvent> {
-    let Some(active_node) = active_node_from_content_block(&content_block) else {
-        return Vec::new();
+) -> Result<Vec<UrpStreamEvent>, String> {
+    let Some(active_node) =
+        active_node_from_content_block(&content_block, messages_custom_tool_names)?
+    else {
+        return Ok(Vec::new());
     };
 
     if !state.node_order.contains(&node_index) {
@@ -632,81 +1060,156 @@ fn handle_content_block_start(
     }
     let node = node_from_active(&active_node);
     let extra_body = active_node.extra_body.clone();
-    let mut start_extra_body = extra_body.clone();
-    if let ActiveNodeKind::ProviderItem { body, .. } = &active_node.kind {
-        start_extra_body.insert(
-            MESSAGES_PROVIDER_ITEM_START_BODY_EXTRA_KEY.to_string(),
-            body.clone(),
-        );
-    }
     state.active_nodes.insert(node_index, active_node);
 
-    vec![UrpStreamEvent::NodeStart {
+    let mut events = vec![UrpStreamEvent::NodeStart {
         node_index,
         header: node_header_from_node(&node),
-        extra_body: start_extra_body,
-    }]
+        extra_body: extra_body.clone(),
+    }];
+    if let Node::ToolCall {
+        tool_type: ToolCallType::Custom,
+        arguments,
+        ..
+    } = &node
+        && !arguments.is_empty()
+    {
+        events.push(UrpStreamEvent::NodeDelta {
+            node_index,
+            delta: NodeDelta::ToolCallArguments {
+                arguments: arguments.clone(),
+            },
+            usage: None,
+            extra_body,
+        });
+    }
+    let media_delta = match &node {
+        Node::Image { source, .. } => Some(NodeDelta::Image {
+            source: source.clone(),
+        }),
+        Node::File { source, .. } => Some(NodeDelta::File {
+            source: source.clone(),
+        }),
+        Node::Audio { source, .. } => Some(NodeDelta::Audio {
+            source: source.clone(),
+        }),
+        _ => None,
+    };
+    if let Some(delta) = media_delta {
+        events.push(UrpStreamEvent::NodeDelta {
+            node_index,
+            delta,
+            usage: None,
+            extra_body: HashMap::new(),
+        });
+    }
+    Ok(events)
 }
 
 fn handle_content_block_delta(
     node_index: u32,
     delta_value: Value,
     state: &mut AnthropicMessagesStreamState,
-) -> Vec<UrpStreamEvent> {
+) -> Result<Vec<UrpStreamEvent>, String> {
     let Some(active_node) = state.active_nodes.get_mut(&node_index) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let delta_type = delta_value
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let required_string = match delta_type {
+        "text_delta" => Some("text"),
+        "thinking_delta" => Some("thinking"),
+        "signature_delta" => Some("signature"),
+        "input_json_delta" => Some("partial_json"),
+        _ => None,
+    };
+    if required_string.is_some_and(|key| !delta_value.get(key).is_some_and(Value::is_string)) {
+        return Err(format!("Messages {delta_type} requires a string payload"));
+    }
+    if delta_type == "citations_delta" && !delta_value.get("citation").is_some_and(Value::is_object)
+    {
+        return Err("Messages citations_delta requires a citation object".to_string());
+    }
     let mut delta_extra = object_without_keys(
         &delta_value,
         &["type", "text", "thinking", "signature", "partial_json"],
     );
 
     let stream_delta = match (&mut active_node.kind, delta_type) {
+        (ActiveNodeKind::Text { citations, .. }, "citations_delta") => {
+            let Some(citation) = delta_value
+                .get("citation")
+                .filter(|value| value.is_object())
+            else {
+                return Ok(Vec::new());
+            };
+            let citation = crate::urp::Citation::decode(
+                citation.clone(),
+                crate::urp::ProviderProtocol::Messages,
+            );
+            citations.push(citation.clone());
+            delta_extra.remove("citation");
+            NodeDelta::Text {
+                logprobs: None,
+                signature: None,
+                citations: vec![citation.clone()],
+                content: String::new(),
+            }
+        }
         (ActiveNodeKind::Text { content, .. }, "text_delta") => {
             let Some(text) = delta_value.get("text").and_then(|v| v.as_str()) else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             if text.is_empty() {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             content.push_str(text);
             NodeDelta::Text {
+                logprobs: None,
+                signature: None,
+                citations: Vec::new(),
                 content: text.to_string(),
             }
         }
         (ActiveNodeKind::Reasoning { summary, .. }, "thinking_delta") => {
             let Some(text) = delta_value.get("thinking").and_then(|v| v.as_str()) else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             if text.is_empty() {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             summary.push_str(text);
-            delta_extra.insert(
-                "_monoize_summary_from_messages_thinking".to_string(),
-                Value::Bool(true),
-            );
             NodeDelta::Reasoning {
+                metadata: crate::urp::ReasoningMetadata {
+                    summary_as_thinking: true,
+                    ..Default::default()
+                },
                 content: None,
                 encrypted: None,
                 summary: Some(text.to_string()),
                 source: None,
             }
         }
-        (ActiveNodeKind::Reasoning { encrypted, .. }, "signature_delta") => {
+        (
+            ActiveNodeKind::Reasoning {
+                metadata,
+                encrypted,
+                ..
+            },
+            "signature_delta",
+        ) => {
             let Some(signature) = delta_value.get("signature").and_then(|v| v.as_str()) else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             if signature.is_empty() {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             encrypted.push_str(signature);
             NodeDelta::Reasoning {
+                metadata: metadata.clone(),
                 content: None,
                 encrypted: Some(Value::String(signature.to_string())),
                 summary: None,
@@ -715,18 +1218,36 @@ fn handle_content_block_delta(
         }
         (
             ActiveNodeKind::ToolCall {
+                tool_type,
                 arguments,
                 replace_on_next_delta,
+                custom_input_decoder,
                 ..
             },
             "input_json_delta",
         ) => {
             let Some(arguments_delta) = delta_value.get("partial_json").and_then(|v| v.as_str())
             else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             if arguments_delta.is_empty() {
-                return Vec::new();
+                return Ok(Vec::new());
+            }
+            if *tool_type == ToolCallType::Custom {
+                let decoder = custom_input_decoder.as_mut().ok_or_else(|| {
+                    "custom tool input stream is missing its incremental decoder".to_string()
+                })?;
+                let decoded = decoder.push_fragment(arguments_delta)?;
+                if decoded.is_empty() {
+                    return Ok(Vec::new());
+                }
+                arguments.push_str(&decoded);
+                return Ok(vec![UrpStreamEvent::NodeDelta {
+                    node_index,
+                    delta: NodeDelta::ToolCallArguments { arguments: decoded },
+                    usage: None,
+                    extra_body: delta_extra,
+                }]);
             }
             if *replace_on_next_delta {
                 arguments.clear();
@@ -737,61 +1258,107 @@ fn handle_content_block_delta(
                 arguments: arguments_delta.to_string(),
             }
         }
-        (ActiveNodeKind::ProviderItem { input_json, .. }, _) => {
+        (
+            ActiveNodeKind::ProviderItem {
+                body, input_json, ..
+            },
+            _,
+        ) => {
+            if delta_type == "compaction_delta" {
+                if let Some(content) = delta_value.get("content") {
+                    body["content"] = content.clone();
+                }
+            }
             input_json.merge_delta(&delta_value);
             NodeDelta::ProviderItem {
                 data: delta_value.clone(),
             }
         }
-        _ => return Vec::new(),
+        (
+            _,
+            "text_delta" | "thinking_delta" | "signature_delta" | "input_json_delta"
+            | "citations_delta" | "compaction_delta",
+        ) => {
+            return Err(format!(
+                "Messages {delta_type} does not match its active content block"
+            ));
+        }
+        _ => return Ok(Vec::new()),
     };
 
-    vec![UrpStreamEvent::NodeDelta {
+    Ok(vec![UrpStreamEvent::NodeDelta {
         node_index,
         delta: stream_delta,
         usage: None,
         extra_body: delta_extra,
-    }]
+    }])
 }
 
 fn handle_content_block_stop(
     node_index: u32,
     state: &mut AnthropicMessagesStreamState,
-) -> Vec<UrpStreamEvent> {
+) -> Result<Vec<UrpStreamEvent>, String> {
     let Some(active_node) = state.active_nodes.remove(&node_index) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
+
+    if let ActiveNodeKind::ToolCall {
+        custom_input_decoder: Some(decoder),
+        ..
+    } = &active_node.kind
+    {
+        decoder.finish()?;
+    }
 
     let node = node_from_active(&active_node);
     let extra_body = active_node.extra_body.clone();
     state.completed_nodes.insert(node_index, node.clone());
 
-    vec![UrpStreamEvent::NodeDone {
+    Ok(vec![UrpStreamEvent::NodeDone {
         node_index,
         node,
         usage: None,
         extra_body,
-    }]
+    }])
 }
 
-fn active_node_from_content_block(content_block: &Value) -> Option<ActiveNodeState> {
+fn active_node_from_content_block(
+    content_block: &Value,
+    messages_custom_tool_names: &std::collections::HashSet<String>,
+) -> Result<Option<ActiveNodeState>, String> {
+    if let Some(text) = content_block.as_str() {
+        return Ok(Some(ActiveNodeState {
+            kind: ActiveNodeKind::Text {
+                citations: Vec::new(),
+                content: text.to_string(),
+                phase: None,
+            },
+            extra_body: HashMap::new(),
+        }));
+    }
     let content_type = content_block
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    match content_type {
-        "text" => {
+    Ok(match content_type {
+        "text" | "input_text" | "output_text" => {
             let phase = content_block
                 .get("phase")
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
-            let mut extra_body = object_without_keys(content_block, &["type", "text", "phase"]);
-            if let Some(phase) = phase.as_ref() {
-                extra_body.insert("phase".to_string(), Value::String(phase.clone()));
-            }
+            let extra_body =
+                object_without_keys(content_block, &["type", "text", "phase", "citations"]);
             Some(ActiveNodeState {
                 kind: ActiveNodeKind::Text {
+                    citations: crate::urp::citations::decode(
+                        content_block
+                            .get("citations")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                        crate::urp::ProviderProtocol::Messages,
+                    ),
                     content: content_block
                         .get("text")
                         .and_then(|v| v.as_str())
@@ -806,6 +1373,10 @@ fn active_node_from_content_block(content_block: &Value) -> Option<ActiveNodeSta
             let extra_body = object_without_keys(content_block, &["type", "thinking", "signature"]);
             Some(ActiveNodeState {
                 kind: ActiveNodeKind::Reasoning {
+                    metadata: crate::urp::ReasoningMetadata {
+                        summary_as_thinking: true,
+                        ..Default::default()
+                    },
                     summary: content_block
                         .get("thinking")
                         .and_then(|v| v.as_str())
@@ -821,13 +1392,13 @@ fn active_node_from_content_block(content_block: &Value) -> Option<ActiveNodeSta
             })
         }
         "redacted_thinking" => {
-            let mut extra_body = object_without_keys(content_block, &["type", "data"]);
-            extra_body.insert(
-                crate::urp::REASONING_KIND_EXTRA_KEY.to_string(),
-                Value::String(crate::urp::REASONING_KIND_REDACTED_THINKING.to_string()),
-            );
+            let extra_body = object_without_keys(content_block, &["type", "data"]);
             Some(ActiveNodeState {
                 kind: ActiveNodeKind::Reasoning {
+                    metadata: crate::urp::ReasoningMetadata {
+                        redacted: true,
+                        ..Default::default()
+                    },
                     summary: String::new(),
                     encrypted: content_block
                         .get("data")
@@ -838,22 +1409,67 @@ fn active_node_from_content_block(content_block: &Value) -> Option<ActiveNodeSta
                 extra_body,
             })
         }
-        "tool_use" => Some(ActiveNodeState {
-            kind: ActiveNodeKind::ToolCall {
-                call_id: content_block
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                name: content_block
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                arguments: json_value_to_string(content_block.get("input")),
-                replace_on_next_delta: tool_use_input_is_placeholder(content_block.get("input")),
-            },
-            extra_body: object_without_keys(content_block, &["type", "id", "name", "input"]),
+        "tool_use" => {
+            let name = content_block
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let input = content_block.get("input");
+            let placeholder = tool_use_input_is_placeholder(input);
+            let tool_type = if content_block
+                .get("toolset_name")
+                .and_then(Value::as_str)
+                .is_none()
+                && messages_custom_tool_names.contains(&name)
+            {
+                ToolCallType::Custom
+            } else {
+                ToolCallType::Function
+            };
+            let (arguments, custom_input_decoder) = if tool_type == ToolCallType::Custom {
+                let mut decoder = CustomToolInputDecoder::new();
+                let arguments = if placeholder {
+                    String::new()
+                } else {
+                    decoder.push_fragment(&json_value_to_string(input))?
+                };
+                (arguments, Some(decoder))
+            } else {
+                (json_value_to_string(input), None)
+            };
+            Some(ActiveNodeState {
+                kind: ActiveNodeKind::ToolCall {
+                    namespace: content_block
+                        .get("toolset_name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    tool_type,
+                    call_id: content_block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    name,
+                    arguments,
+                    replace_on_next_delta: placeholder,
+                    custom_input_decoder,
+                },
+                extra_body: object_without_keys(
+                    content_block,
+                    &["type", "id", "name", "input", "toolset_name"],
+                ),
+            })
+        }
+        "image" | "image_url" | "input_image" | "output_image" | "document" | "file"
+        | "input_file" | "output_file" | "audio" | "input_audio" | "output_audio"
+        | "tool_result" => crate::urp::decode::anthropic::decode_content_block(
+            content_block,
+            OrdinaryRole::Assistant,
+        )?
+        .map(|mut node| ActiveNodeState {
+            extra_body: node.extra_body_mut().clone(),
+            kind: ActiveNodeKind::Complete(node),
         }),
         _ => Some(ActiveNodeState {
             kind: ActiveNodeKind::ProviderItem {
@@ -868,19 +1484,31 @@ fn active_node_from_content_block(content_block: &Value) -> Option<ActiveNodeSta
             },
             extra_body: HashMap::new(),
         }),
-    }
+    })
 }
 
 fn node_from_active(active_node: &ActiveNodeState) -> Node {
     match &active_node.kind {
-        ActiveNodeKind::Text { content, phase } => Node::Text {
+        ActiveNodeKind::Complete(node) => node.clone(),
+        ActiveNodeKind::Text {
+            citations,
+            content,
+            phase,
+        } => Node::Text {
+            logprobs: None,
+            signature: None,
+            citations: citations.clone(),
             id: None,
             role: OrdinaryRole::Assistant,
             content: content.clone(),
             phase: phase.clone(),
             extra_body: active_node.extra_body.clone(),
         },
-        ActiveNodeKind::Reasoning { summary, encrypted } => {
+        ActiveNodeKind::Reasoning {
+            metadata,
+            summary,
+            encrypted,
+        } => {
             let extra_body = active_node.extra_body.clone();
             let (id, encrypted_value) = if encrypted.is_empty() {
                 (None, None)
@@ -891,6 +1519,12 @@ fn node_from_active(active_node: &ActiveNodeState) -> Node {
                 }
             };
             Node::Reasoning {
+                metadata: crate::urp::ReasoningMetadata {
+                    downstream_only: !summary.is_empty()
+                        && id.is_none()
+                        && encrypted_value.is_none(),
+                    ..metadata.clone()
+                },
                 id,
                 content: None,
                 encrypted: encrypted_value,
@@ -900,13 +1534,17 @@ fn node_from_active(active_node: &ActiveNodeState) -> Node {
             }
         }
         ActiveNodeKind::ToolCall {
+            namespace,
+            tool_type,
             call_id,
             name,
             arguments,
             ..
         } => Node::ToolCall {
+            namespace: namespace.clone(),
+            signature: None,
             id: Some(call_id.clone()),
-            tool_type: ToolCallType::Function,
+            tool_type: *tool_type,
             call_id: call_id.clone(),
             name: name.clone(),
             arguments: arguments.clone(),
@@ -930,34 +1568,50 @@ fn node_from_active(active_node: &ActiveNodeState) -> Node {
 
 fn node_header_from_node(node: &Node) -> NodeHeader {
     match node {
-        Node::Text { role, phase, .. } => NodeHeader::Text {
+        Node::Text {
+            signature,
+            citations,
+            role,
+            phase,
+            ..
+        } => NodeHeader::Text {
+            signature: signature.clone(),
+            citations: citations.clone(),
             id: node.id().cloned(),
             role: *role,
             phase: phase.clone(),
         },
-        Node::Reasoning { .. } => NodeHeader::Reasoning {
+        Node::Reasoning { metadata, .. } => NodeHeader::Reasoning {
+            metadata: metadata.clone(),
             id: node.id().cloned(),
         },
         Node::ToolCall {
+            namespace,
+            signature,
             tool_type,
             call_id,
             name,
             ..
         } => NodeHeader::ToolCall {
+            namespace: namespace.clone(),
+            signature: signature.clone(),
             id: node.id().cloned(),
             tool_type: *tool_type,
             call_id: call_id.clone(),
             name: name.clone(),
         },
-        Node::Image { role, .. } => NodeHeader::Image {
+        Node::Image { role, metadata, .. } => NodeHeader::Image {
+            metadata: metadata.clone(),
             id: node.id().cloned(),
             role: *role,
         },
-        Node::Audio { role, .. } => NodeHeader::Audio {
+        Node::Audio { role, metadata, .. } => NodeHeader::Audio {
+            metadata: metadata.clone(),
             id: node.id().cloned(),
             role: *role,
         },
-        Node::File { role, .. } => NodeHeader::File {
+        Node::File { role, metadata, .. } => NodeHeader::File {
+            metadata: metadata.clone(),
             id: node.id().cloned(),
             role: *role,
         },
@@ -968,16 +1622,26 @@ fn node_header_from_node(node: &Node) -> NodeHeader {
             role,
             origin_protocol,
             item_type,
+            body,
             ..
         } => NodeHeader::ProviderItem {
+            body: Some(body.clone()),
             id: node.id().cloned(),
             origin_protocol: *origin_protocol,
             role: *role,
             item_type: item_type.clone(),
         },
         Node::ToolResult {
-            tool_type, call_id, ..
+            signature,
+            namespace,
+            name,
+            tool_type,
+            call_id,
+            ..
         } => NodeHeader::ToolResult {
+            signature: signature.clone(),
+            namespace: namespace.clone(),
+            name: name.clone(),
             id: node.id().cloned(),
             tool_type: *tool_type,
             call_id: call_id.clone(),
@@ -1013,6 +1677,7 @@ fn take_response_done(
         extra_body.insert("stop_sequence".to_string(), stop_sequence.clone());
     }
     Some(UrpStreamEvent::ResponseDone {
+        outcome: None,
         finish_reason: state.finish_reason.clone(),
         usage: state.usage.snapshot(),
         output: ordered_completed_nodes(state),
@@ -1120,6 +1785,9 @@ fn messages_stream_error_parts(
         data_val,
         &["type", "error", "code", "message", "param"],
     ));
+    if let Some(value) = error_value.get("param").or_else(|| data_val.get("param")) {
+        extra_body.insert("param".into(), value.clone());
+    }
     let terminal_error = StreamTerminalError {
         code: code
             .clone()
@@ -1155,6 +1823,9 @@ fn map_finish_reason(reason: &str) -> Option<FinishReason> {
     match reason {
         "end_turn" => Some(FinishReason::Stop),
         "max_tokens" => Some(FinishReason::Length),
+        "model_context_window_exceeded" => Some(FinishReason::ContextLimit),
+        "pause_turn" => Some(FinishReason::Paused),
+        "compaction" => Some(FinishReason::Compaction),
         "tool_use" => Some(FinishReason::ToolCalls),
         "refusal" => Some(FinishReason::ContentFilter),
         "stop_sequence" => Some(FinishReason::Stop),
@@ -1170,538 +1841,68 @@ fn finish_reason_name(reason: &FinishReason) -> &'static str {
         FinishReason::ToolCalls => "tool_calls",
         FinishReason::ContentFilter => "content_filter",
         FinishReason::Other => "other",
+        FinishReason::ContextLimit => "context_limit",
+        FinishReason::Paused => "paused",
+        FinishReason::Compaction => "compaction",
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod local_stream_compat_tests {
     use super::*;
-    use crate::urp::Usage;
     use serde_json::json;
 
-    #[test]
-    fn anthropic_block_lifecycle_emits_only_node_events() {
-        let mut state = AnthropicMessagesStreamState::default();
-
-        let start_events = handle_content_block_start(
-            0,
-            json!({
-                "type": "thinking",
-                "thinking": "",
-                "signature": ""
-            }),
-            &mut state,
-        );
-        assert_eq!(start_events.len(), 1);
-        assert!(matches!(
-            &start_events[0],
-            UrpStreamEvent::NodeStart {
-                node_index,
-                header: NodeHeader::Reasoning { .. },
-                ..
-            } if *node_index == 0
-        ));
-        let thinking_delta_events = handle_content_block_delta(
-            0,
-            json!({
-                "type": "thinking_delta",
-                "thinking": "mock_reasoning"
-            }),
-            &mut state,
-        );
-        assert_eq!(thinking_delta_events.len(), 1);
-        assert!(matches!(
-            &thinking_delta_events[0],
-            UrpStreamEvent::NodeDelta {
-                node_index,
-                delta: NodeDelta::Reasoning { content: None, encrypted: None, summary: Some(summary), .. },
-                ..
-            } if *node_index == 0 && summary == "mock_reasoning"
-        ));
-        let signature_delta_events = handle_content_block_delta(
-            0,
-            json!({
-                "type": "signature_delta",
-                "signature": "mock_sig"
-            }),
-            &mut state,
-        );
-        assert_eq!(signature_delta_events.len(), 1);
-        assert!(matches!(
-            &signature_delta_events[0],
-            UrpStreamEvent::NodeDelta {
-                node_index,
-                delta: NodeDelta::Reasoning { content: None, encrypted: Some(Value::String(signature)), .. },
-                ..
-            } if *node_index == 0 && signature == "mock_sig"
-        ));
-        let done_events = handle_content_block_stop(0, &mut state);
-        assert_eq!(done_events.len(), 1);
-        assert!(matches!(
-            &done_events[0],
-            UrpStreamEvent::NodeDone {
-                node_index,
-                node: Node::Reasoning {
-                    content: None,
-                    encrypted: Some(Value::String(signature)),
-                    summary: Some(summary),
-                    ..
-                },
-                ..
-            } if *node_index == 0 && summary == "mock_reasoning" && signature == "mock_sig"
-        ));
-    }
-
-    #[test]
-    fn anthropic_wire_indices_map_to_contiguous_canonical_node_indices() {
-        let mut state = AnthropicMessagesStreamState::default();
-
-        assert_eq!(canonical_node_index_for_start(&mut state, 4), 0);
-        assert_eq!(canonical_node_index_for_start(&mut state, 9), 1);
-        assert_eq!(canonical_node_index_for_start(&mut state, 4), 0);
-        assert_eq!(state.next_node_index, 2);
-        assert_eq!(state.wire_to_node_index.get(&4), Some(&0));
-        assert_eq!(state.wire_to_node_index.get(&9), Some(&1));
-    }
-
-    #[test]
-    fn anthropic_omitted_thinking_block_completes_with_signature_only() {
-        let mut state = AnthropicMessagesStreamState::default();
-
-        let start_events = handle_content_block_start(
-            0,
-            json!({
-                "type": "thinking",
-                "thinking": "",
-                "signature": ""
-            }),
-            &mut state,
-        );
-        assert_eq!(start_events.len(), 1);
-
-        let signature_events = handle_content_block_delta(
-            0,
-            json!({
-                "type": "signature_delta",
-                "signature": "sig_omitted"
-            }),
-            &mut state,
-        );
-        assert_eq!(signature_events.len(), 1);
-        assert!(matches!(
-            &signature_events[0],
-            UrpStreamEvent::NodeDelta {
-                delta: NodeDelta::Reasoning {
-                    content: None,
-                    encrypted: Some(Value::String(signature)),
-                    summary: None,
-                    ..
-                },
-                ..
-            } if signature == "sig_omitted"
-        ));
-
-        let done_events = handle_content_block_stop(0, &mut state);
-        assert_eq!(done_events.len(), 1);
-        assert!(matches!(
-            &done_events[0],
-            UrpStreamEvent::NodeDone {
-                node: Node::Reasoning {
-                    content: None,
-                    encrypted: Some(Value::String(signature)),
-                    summary: None,
-                    ..
-                },
-                ..
-            } if signature == "sig_omitted"
-        ));
-    }
-
-    #[test]
-    fn anthropic_message_completion_uses_completed_nodes_as_authoritative_state() {
-        let mut state = AnthropicMessagesStreamState::default();
-
-        for event in
-            handle_content_block_start(0, json!({ "type": "text", "text": "" }), &mut state)
-        {
-            assert!(!matches!(event, UrpStreamEvent::ResponseDone { .. }));
-        }
-        handle_content_block_delta(
-            0,
-            json!({ "type": "text_delta", "text": "hello" }),
-            &mut state,
-        );
-        handle_content_block_stop(0, &mut state);
-
-        handle_content_block_start(
-            1,
-            json!({
-                "type": "tool_use",
-                "id": "call_1",
-                "name": "lookup",
-                "input": {}
-            }),
-            &mut state,
-        );
-        handle_content_block_delta(
-            1,
-            json!({ "type": "input_json_delta", "partial_json": "{\"a\":1}" }),
-            &mut state,
-        );
-        handle_content_block_stop(1, &mut state);
-
-        let completion_event = UrpStreamEvent::ResponseDone {
-            finish_reason: Some(FinishReason::ToolCalls),
-            usage: Some(Usage {
-                input_tokens: 12,
-                output_tokens: 8,
-                input_details: None,
-                output_details: None,
-                extra_body: HashMap::new(),
-            }),
-            output: ordered_completed_nodes(&state),
-            extra_body: HashMap::new(),
+    #[tokio::test]
+    async fn messages_usage_corrections_after_stop_reason_are_retained() {
+        let events = [
+            json!({"type":"message_start", "message":{"id":"msg_usage", "model":"model", "content":[], "usage":{"input_tokens":10,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}),
+            json!({"type":"content_block_delta","index":99,"delta":{"type":"text_delta","text":"late text"}}),
+            json!({"type":"error","error":{"type":"overloaded_error","message":"late error"}}),
+            json!({"type":"message_delta","delta":{"stop_reason":null},"usage":{"input_tokens":null,"output_tokens":9}}),
+            json!({"type":"message_stop"}),
+        ];
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let response =
+            reqwest::Response::from(axum::http::Response::new(reqwest::Body::from(body)));
+        let metrics = Arc::new(Mutex::new(StreamRuntimeMetrics::default()));
+        let (tx, mut rx) = mpsc::channel(64);
+        let request = HandlerUrpRequest {
+            audio_output_format: None,
+            messages_custom_tool_names: Default::default(),
+            model: "sent-model".to_string(),
+            max_multiplier: None,
+            server_tool_usage_classes: Vec::new(),
+            affinity_explicit: None,
+            affinity_prefix_hash: String::new(),
+            estimated_input_tokens: 0,
+            has_tools: false,
         };
-
-        assert!(matches!(
-            &completion_event,
-            UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::ToolCalls),
-                output,
-                ..
+        stream_messages_to_urp_events(&request, response, tx, None, Some(metrics.clone()), 1000)
+            .await
+            .unwrap();
+        let mut terminal_count = 0;
+        while let Some(event) = rx.recv().await {
+            assert!(!matches!(event, UrpStreamEvent::Error { .. }), "{event:?}");
+            if let UrpStreamEvent::ResponseDone { usage, output, .. } = event {
+                terminal_count += 1;
+                let usage = usage.unwrap();
+                assert_eq!((usage.input_tokens, usage.output_tokens), (10, 9));
+                assert!(
+                    matches!(output.as_slice(), [Node::Text { content, .. }] if content == "answer")
+                );
             }
-            if matches!(&output[0], Node::Text { content, .. } if content == "hello")
-                && matches!(&output[1], Node::ToolCall { call_id, name, arguments, .. } if call_id == "call_1" && name == "lookup" && arguments == "{\"a\":1}")
-        ));
-    }
-
-    #[test]
-    fn anthropic_provider_item_input_json_delta_preserves_terminal_input() {
-        let mut state = AnthropicMessagesStreamState::default();
-        let native_start = json!({
-            "type": "server_tool_use",
-            "id": "srvtoolu_1",
-            "name": "web_search",
-            "input": {}
-        });
-
-        let start_events = handle_content_block_start(0, native_start.clone(), &mut state);
-        assert!(matches!(
-            start_events.as_slice(),
-            [UrpStreamEvent::NodeStart {
-                header: NodeHeader::ProviderItem {
-                    origin_protocol: ProviderProtocol::Messages,
-                    item_type,
-                    ..
-                },
-                extra_body,
-                ..
-            }] if item_type == "server_tool_use"
-                && extra_body.get(MESSAGES_PROVIDER_ITEM_START_BODY_EXTRA_KEY) == Some(&native_start)
-        ));
-
-        let first_delta = json!({
-            "type": "input_json_delta",
-            "partial_json": "{\"query\":\"mono"
-        });
-        let second_delta = json!({
-            "type": "input_json_delta",
-            "partial_json": "ize\",\"max_uses\":2}"
-        });
-        let first_events = handle_content_block_delta(0, first_delta.clone(), &mut state);
-        let second_events = handle_content_block_delta(0, second_delta.clone(), &mut state);
-        assert!(matches!(
-            first_events.as_slice(),
-            [UrpStreamEvent::NodeDelta {
-                delta: NodeDelta::ProviderItem { data },
-                ..
-            }] if data == &first_delta
-        ));
-        assert!(matches!(
-            second_events.as_slice(),
-            [UrpStreamEvent::NodeDelta {
-                delta: NodeDelta::ProviderItem { data },
-                ..
-            }] if data == &second_delta
-        ));
-
-        let done_events = handle_content_block_stop(0, &mut state);
-        assert!(matches!(
-            done_events.as_slice(),
-            [UrpStreamEvent::NodeDone {
-                node: Node::ProviderItem {
-                    origin_protocol: ProviderProtocol::Messages,
-                    item_type,
-                    body,
-                    ..
-                },
-                ..
-            }] if item_type == "server_tool_use"
-                && body["input"] == json!({ "query": "monoize", "max_uses": 2 })
-        ));
-        assert!(matches!(
-            ordered_completed_nodes(&state).as_slice(),
-            [Node::ProviderItem { body, .. }]
-                if body["input"] == json!({ "query": "monoize", "max_uses": 2 })
-        ));
-        merge_message_delta_state(
-            &mut state,
-            &json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": "end_turn", "stop_sequence": Value::Null }
-            }),
-        );
-        let response_done = take_response_done(&mut state, &HashMap::new()).expect("response done");
-        assert!(matches!(
-            response_done,
-            UrpStreamEvent::ResponseDone { output, .. }
-                if matches!(output.as_slice(), [Node::ProviderItem { body, .. }]
-                    if body["input"] == json!({ "query": "monoize", "max_uses": 2 }))
-        ));
-    }
-
-    #[test]
-    fn anthropic_partial_usage_is_merged_cumulatively() {
-        let mut usage = AnthropicStreamUsageAccumulator::default();
-
-        let start = usage
-            .merge_event(&json!({
-                "type": "message_start",
-                "message": {
-                    "usage": {
-                        "input_tokens": 10,
-                        "output_tokens": 0,
-                        "cache_read_input_tokens": 3,
-                        "cache_creation_input_tokens": 2,
-                        "cache_creation": {
-                            "ephemeral_5m_input_tokens": 2,
-                            "ephemeral_1h_input_tokens": 0
-                        },
-                        "output_tokens_details": { "future_detail": { "start": 1 } },
-                        "server_tool_use": {
-                            "web_fetch_requests": 1,
-                            "web_search_requests": 0
-                        },
-                        "custom_start_counter": 7
-                    }
-                }
-            }))
-            .expect("start usage");
-        assert_eq!(start.input_tokens, 15);
-        assert_eq!(start.output_tokens, 0);
-
-        let first_delta = usage
-            .merge_event(&json!({
-                "type": "message_delta",
-                "usage": {
-                    "input_tokens": Value::Null,
-                    "output_tokens": 4,
-                    "output_tokens_details": {
-                        "thinking_tokens": 2,
-                        "future_detail": { "delta": 2 }
-                    },
-                    "cache_read_input_tokens": Value::Null,
-                    "server_tool_use": { "web_search_requests": 2 },
-                    "custom_delta_counter": 11
-                }
-            }))
-            .expect("first delta usage");
-        assert_eq!(first_delta.input_tokens, 15);
-        assert_eq!(first_delta.output_tokens, 4);
-
-        let final_usage = usage
-            .merge_event(&json!({
-                "type": "message_delta",
-                "usage": { "output_tokens": 9 }
-            }))
-            .expect("final usage");
-        assert_eq!(final_usage.input_tokens, 15);
-        assert_eq!(final_usage.output_tokens, 9);
-        let input_details = final_usage.input_details.expect("input details");
-        assert_eq!(input_details.cache_read_tokens, 3);
-        assert_eq!(input_details.cache_creation_tokens, 2);
-        assert_eq!(input_details.cache_creation_5m_tokens, 2);
-        assert_eq!(input_details.cache_creation_1h_tokens, 0);
-        assert_eq!(
-            final_usage
-                .output_details
-                .expect("output details")
-                .reasoning_tokens,
-            2
-        );
-        assert_eq!(final_usage.extra_body["custom_start_counter"], json!(7));
-        assert_eq!(final_usage.extra_body["custom_delta_counter"], json!(11));
-        assert_eq!(
-            final_usage.extra_body["server_tool_use"],
-            json!({ "web_fetch_requests": 1, "web_search_requests": 2 })
-        );
-        assert_eq!(
-            final_usage.extra_body["output_tokens_details"],
-            json!({ "future_detail": { "start": 1, "delta": 2 } })
-        );
-    }
-
-    #[test]
-    fn anthropic_terminal_event_is_taken_once_after_multiple_deltas() {
-        let mut state = AnthropicMessagesStreamState::default();
-        state.usage.merge_event(&json!({
-            "type": "message_start",
-            "message": { "usage": { "input_tokens": 10, "output_tokens": 0 } }
-        }));
-        merge_message_delta_state(
-            &mut state,
-            &json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": "end_turn" },
-                "usage": { "output_tokens": 4 }
-            }),
-        );
-        state.usage.merge_event(&json!({
-            "type": "message_delta",
-            "delta": { "stop_reason": Value::Null },
-            "usage": { "input_tokens": Value::Null, "output_tokens": 9 }
-        }));
-
-        let first = take_response_done(&mut state, &HashMap::new()).expect("terminal event");
-        assert!(matches!(
-            first,
-            UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Stop),
-                usage: Some(Usage {
-                    input_tokens: 10,
-                    output_tokens: 9,
-                    ..
-                }),
-                ..
-            }
-        ));
-        assert!(take_response_done(&mut state, &HashMap::new()).is_none());
-    }
-
-    #[test]
-    fn anthropic_terminal_event_preserves_exact_messages_stop_reason() {
-        let mut state = AnthropicMessagesStreamState::default();
-        merge_message_delta_state(
-            &mut state,
-            &json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": "pause_turn" }
-            }),
-        );
-
-        let event = take_response_done(&mut state, &HashMap::new()).expect("terminal event");
-        assert!(matches!(
-            event,
-            UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Other),
-                extra_body,
-                ..
-            } if extra_body.get("stop_reason") == Some(&json!("pause_turn"))
-        ));
-    }
-
-    #[test]
-    fn anthropic_terminal_event_preserves_stop_sequence() {
-        let mut state = AnthropicMessagesStreamState::default();
-        merge_message_delta_state(
-            &mut state,
-            &json!({
-                "type": "message_delta",
-                "delta": {
-                    "stop_reason": "stop_sequence",
-                    "stop_sequence": "<END>"
-                }
-            }),
-        );
-
-        let event = take_response_done(&mut state, &HashMap::new()).expect("terminal event");
-        assert!(matches!(
-            event,
-            UrpStreamEvent::ResponseDone {
-                finish_reason: Some(FinishReason::Stop),
-                extra_body,
-                ..
-            } if extra_body.get("stop_reason") == Some(&json!("stop_sequence"))
-                && extra_body.get("stop_sequence") == Some(&json!("<END>"))
-        ));
-    }
-
-    #[test]
-    fn anthropic_tool_use_without_input_delta_keeps_non_placeholder_input() {
-        let mut state = AnthropicMessagesStreamState::default();
-
-        handle_content_block_start(
-            0,
-            json!({
-                "type": "tool_use",
-                "id": "call_1",
-                "name": "lookup",
-                "input": { "a": 1 }
-            }),
-            &mut state,
-        );
-
-        let done_events = handle_content_block_stop(0, &mut state);
-        assert_eq!(done_events.len(), 1);
-        assert!(matches!(
-            &done_events[0],
-            UrpStreamEvent::NodeDone {
-                node: Node::ToolCall { arguments, .. },
-                ..
-            } if arguments == "{\"a\":1}"
-        ));
-    }
-
-    #[test]
-    fn messages_stream_rejects_reserved_wire_extras_but_keeps_decoder_markers() {
-        let extra = object_without_keys(
-            &json!({
-                "type": "text",
-                "vendor_block_counter": 7,
-                "_monoize_spoofed_block": true
-            }),
-            &["type"],
-        );
-        assert_eq!(extra.get("vendor_block_counter"), Some(&json!(7)));
-        assert!(!extra.contains_key("_monoize_spoofed_block"));
-
-        let mut usage = AnthropicStreamUsageAccumulator::default();
-        let usage = usage
-            .merge_event(&json!({
-                "usage": {
-                    "input_tokens": 1,
-                    "output_tokens": 2,
-                    "vendor_usage_counter": 3,
-                    "_monoize_spoofed_usage": true,
-                    "output_tokens_details": {
-                        "thinking_tokens": 1,
-                        "vendor_detail": 4,
-                        "_monoize_spoofed_detail": true
-                    }
-                }
-            }))
-            .expect("usage");
-        assert_eq!(usage.extra_body["vendor_usage_counter"], json!(3));
-        assert_eq!(
-            usage.extra_body["output_tokens_details"],
-            json!({ "vendor_detail": 4 })
-        );
-        assert!(!usage.extra_body.contains_key("_monoize_spoofed_usage"));
-
-        let mut state = AnthropicMessagesStreamState::default();
-        handle_content_block_start(
-            0,
-            json!({ "type": "thinking", "thinking": "", "signature": "" }),
-            &mut state,
-        );
-        let events = handle_content_block_delta(
-            0,
-            json!({ "type": "thinking_delta", "thinking": "x" }),
-            &mut state,
-        );
-        assert!(
-            matches!(events.as_slice(), [UrpStreamEvent::NodeDelta { extra_body, .. }]
-            if extra_body.get("_monoize_summary_from_messages_thinking") == Some(&json!(true)))
-        );
+        }
+        assert_eq!(terminal_count, 1);
+        let usage = crate::handlers::usage::latest_stream_usage_snapshot(&Some(metrics))
+            .await
+            .unwrap();
+        assert_eq!(usage.output_tokens, 9);
     }
 }

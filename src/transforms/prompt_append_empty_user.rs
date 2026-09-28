@@ -99,6 +99,9 @@ impl Transform for PromptAppendEmptyUserTransform {
                 .is_some_and(|node| node.role() == Some(OrdinaryRole::Assistant))
             {
                 req.input.push(Node::Text {
+                    logprobs: None,
+                    signature: None,
+                    citations: Vec::new(),
                     id: None,
                     role: OrdinaryRole::User,
                     content: cfg.content.clone(),

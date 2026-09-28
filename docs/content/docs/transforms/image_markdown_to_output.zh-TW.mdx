@@ -3,6 +3,8 @@ title: "圖像：Markdown 轉圖像節點"
 description: 把 assistant 文字中的 Markdown 圖片語法轉換為真正的圖像節點。
 ---
 
+未擷取出圖片的文字會保留中繼資料。擷取圖片後，引文位置會隨保留文字調整，涵蓋已移除 Markdown 的引文會被刪除。原始文字的簽章和 token 分數會被清除。帶有文字中繼資料的串流可能等到文字區塊結束後，再傳送暫存的增量。
+
 ## 行為
 
 此變換從 assistant 文字中提取 Markdown 圖片區塊（例如 `![alt](url)`），並轉換為標準的 assistant 圖像節點。它與 `image_output_to_markdown` 互逆。

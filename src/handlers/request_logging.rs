@@ -129,6 +129,7 @@ fn apply_client_gone_if_needed(log: &mut InsertRequestLog, client_gone: bool) {
 
 fn apply_usage_fields(log: &mut InsertRequestLog, usage: Option<&urp::Usage>) {
     if let Some(usage) = usage {
+        let usage = usage.accounting();
         log.input_tokens = Some(usage.input_tokens);
         log.output_tokens = Some(usage.output_tokens);
         log.cache_read_tokens = usage.cached_tokens();
@@ -153,7 +154,7 @@ fn apply_usage_fields(log: &mut InsertRequestLog, usage: Option<&urp::Usage>) {
             .as_ref()
             .map(|details| details.rejected_prediction_tokens)
             .filter(|&value| value > 0);
-        log.usage_breakdown_json = Some(build_usage_breakdown(usage));
+        log.usage_breakdown_json = Some(build_usage_breakdown(&usage));
     }
 }
 
@@ -529,6 +530,7 @@ pub(super) fn spawn_request_log(
     client_gone: bool,
     upstream_response_model: Option<String>,
 ) {
+    let usage = usage.map(|usage| usage.accounting().into_owned());
     let Some(user_id) = auth.user_id.clone() else {
         return;
     };
@@ -1087,6 +1089,7 @@ mod admission_tests {
         log.status = REQUEST_LOG_STATUS_ERROR.to_string();
         log.error_code = Some("billing_settlement_failed".to_string());
         let usage = urp::Usage {
+            iterations: Default::default(),
             input_tokens: 12,
             output_tokens: 3,
             input_details: None,

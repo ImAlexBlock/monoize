@@ -1,6 +1,6 @@
 //! `reasoning_strip_encrypted` response-phase transform.
 //!
-//! Drops opaque `encrypted` reasoning payloads from `Reasoning` nodes,
+//! Drops opaque `encrypted` reasoning payloads and typed tool-call signatures,
 //! reasoning deltas, and reasoning-bearing envelope-extra control events.
 //! Plaintext reasoning surfaces (`content`, `summary`, `source`) and node-local
 //! `extra_body` keys other than `encrypted_content` are preserved.
@@ -122,6 +122,9 @@ impl Transform for ReasoningStripEncryptedTransform {
 
 fn strip_encrypted_in_node(node: &mut Node) {
     match node {
+        Node::ToolCall { signature, .. } => {
+            *signature = None;
+        }
         Node::Reasoning {
             encrypted,
             extra_body,
@@ -139,6 +142,12 @@ fn strip_encrypted_in_node(node: &mut Node) {
 
 fn strip_encrypted_in_stream_event(event: &mut UrpStreamEvent) {
     match event {
+        UrpStreamEvent::NodeStart {
+            header: NodeHeader::ToolCall { signature, .. },
+            ..
+        } => {
+            *signature = None;
+        }
         UrpStreamEvent::NodeStart {
             header: NodeHeader::Reasoning { .. },
             extra_body,
@@ -180,6 +189,36 @@ fn envelope_is_reasoning(extra_body: &HashMap<String, Value>) -> bool {
         || extra_body.get("type").and_then(Value::as_str) == Some("reasoning")
 }
 
+#[cfg(test)]
+mod tool_signature_tests {
+    use super::*;
+
+    #[test]
+    fn stripping_call_signature_prevents_wire_transport_for_node_and_header() {
+        let mut node: Node=serde_json::from_value(json!({"type":"tool_call","call_id":"c","name":"run","arguments":"{}","signature":"secret"})).unwrap();
+        strip_encrypted_in_node(&mut node);
+        assert!(matches!(
+            node,
+            Node::ToolCall {
+                signature: None,
+                ..
+            }
+        ));
+        let mut event:UrpStreamEvent=serde_json::from_value(json!({"event":"node_start","node_index":0,"header":{"type":"tool_call","call_id":"c","name":"run","signature":"secret"}})).unwrap();
+        strip_encrypted_in_stream_event(&mut event);
+        assert!(matches!(
+            event,
+            UrpStreamEvent::NodeStart {
+                header: NodeHeader::ToolCall {
+                    signature: None,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+}
+
 inventory::submit!(TransformEntry {
     factory: || Box::new(ReasoningStripEncryptedTransform),
 });
@@ -217,11 +256,15 @@ mod tests {
         let mut state = transform.init_state();
         let (_tmp, context) = ctx().await;
         let mut resp = crate::urp::UrpResponse {
+            outcome: Default::default(),
+
             id: "resp_1".into(),
             model: "m".into(),
             created_at: None,
             output: vec![
                 Node::Reasoning {
+                    metadata: Default::default(),
+
                     id: Some("rs_1".into()),
                     content: Some("plaintext cot".into()),
                     encrypted: Some(json!("mz2.aaaaaaaa")),
@@ -274,6 +317,8 @@ mod tests {
         let mut event = UrpStreamEvent::NodeDelta {
             node_index: 0,
             delta: NodeDelta::Reasoning {
+                metadata: Default::default(),
+
                 content: Some("partial cot".into()),
                 encrypted: Some(json!("mz2.zzzz")),
                 summary: None,
@@ -347,9 +392,13 @@ mod tests {
         let mut state: Box<dyn TransformState> = Box::new(NoState);
         let (_tmp, context) = ctx().await;
         let mut event = UrpStreamEvent::ResponseDone {
+            outcome: Default::default(),
+
             finish_reason: None,
             usage: None,
             output: vec![Node::Reasoning {
+                metadata: Default::default(),
+
                 id: Some("rs_1".into()),
                 content: None,
                 encrypted: Some(json!("mz2.zzz")),
@@ -389,8 +438,16 @@ mod tests {
         let mut state: Box<dyn TransformState> = Box::new(NoState);
         let (_tmp, context) = ctx().await;
         let mut req = crate::urp::UrpRequest {
+            context: Default::default(),
+            image_generation: Default::default(),
+            instructions_format: Default::default(),
+            logprobs: Default::default(),
+            sampling: Default::default(),
+
             model: "m".into(),
             input: vec![Node::Reasoning {
+                metadata: Default::default(),
+
                 id: Some("rs_1".into()),
                 content: None,
                 encrypted: Some(json!("mz2.zzz")),

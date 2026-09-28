@@ -3,11 +3,17 @@ title: "欄位：設定"
 description: 在設定路徑寫入 JSON 值，可選擇僅在滿足條件時寫入。
 ---
 
+明確設定的 `when_equals: null` 只符合值為 JSON `null` 的現有欄位，不符合缺少的欄位。
+
 ## 行為
 
 此變換在設定的 extra_body 路徑寫入 JSON 值。設定了 `when_equals` 時，僅當當前值等於給定 JSON 值才寫入；未設定時總是寫入。
 
 用它新增或取代協議轉換不攜帶的廠商私有欄位。
+
+請求路徑 `reasoning.effort`、`reasoning.summary`、`reasoning.mode`、`reasoning.budget_tokens` 和 `reasoning.display` 操作統一推理設定。其他路徑仍操作 extra-body 欄位。
+
+將 `reasoning.summary` 設為 `detailed` 可請求 GPT 推理摘要。上游必須支援並實際傳回摘要。
 
 ## 參考資訊
 

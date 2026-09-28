@@ -3,11 +3,17 @@ title: "フィールド: 設定"
 description: 設定したパスに JSON 値を書き込みます。条件一致時のみの書き込みも可能です。
 ---
 
+`when_equals: null` を明示すると、存在する JSON `null` にのみ一致します。欠落したフィールドには一致しません。
+
 ## 動作
 
 この変換は設定された extra_body パスに JSON 値を書き込みます。`when_equals` を設定すると、現在の値が指定 JSON 値と等しいときのみ書き込みます。未設定の場合は常に書き込みます。
 
 プロトコル変換が運ばないプロバイダー固有フィールドの追加や置換に使います。
+
+リクエストの `reasoning.effort`、`reasoning.summary`、`reasoning.mode`、`reasoning.budget_tokens`、`reasoning.display` は共通の推論設定を操作します。他のパスは引き続き extra-body フィールドを操作します。
+
+GPT の推論要約を要求するには、`reasoning.summary` を `detailed` に設定します。上流が要約に対応し、実際に返す必要があります。
 
 ## リファレンス
 

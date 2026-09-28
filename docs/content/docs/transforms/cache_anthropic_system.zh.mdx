@@ -3,6 +3,8 @@ title: "自动缓存：Anthropic 系统提示词"
 description: 在系统提示词之后插入 Anthropic cache_control 缓存断点。
 ---
 
+请求级缓存设置占用四个缓存槽位中的一个。每个显式节点断点占用一个槽位。达到四个槽位后，这些变换不再添加标记。
+
 ## 行为
 
 此变换在请求的最后一个 system 或 developer 节点上插入 Anthropic ephemeral `cache_control` 缓存断点。上游随后缓存稳定的系统前缀，并在后续请求中直接读取缓存。

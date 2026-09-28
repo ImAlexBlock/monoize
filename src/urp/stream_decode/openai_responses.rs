@@ -8,9 +8,7 @@ use crate::handlers::usage::{
     record_visible_stream_event_delta,
 };
 use crate::handlers::{StreamRuntimeMetrics, StreamTerminalError, UrpRequest as HandlerUrpRequest};
-#[cfg(test)]
-use crate::urp::internal_legacy_bridge::nodes_to_items;
-use crate::urp::internal_legacy_bridge::{Item, Part, Role};
+use crate::urp::internal_legacy_bridge::{Part, Role};
 use crate::urp::stream_helpers::{
     extract_reasoning_parts, extract_responses_message_phase, extract_responses_message_text,
 };
@@ -82,12 +80,15 @@ fn parse_responses_sse_data_with_event(
             .and_then(Value::as_str)
             .filter(|event_name| !event_name.is_empty());
         // PR3d: a non-empty SSE `event:` field other than "message" names the frame;
-        // otherwise the payload's own non-empty string `type` does. Joined values
-        // in one frame may each carry their own `type`, which wins per value.
+        // otherwise each joined value uses its own type or a bare error envelope.
         let event_name = if !sse_event.is_empty() && sse_event != "message" {
             sse_event.to_string()
         } else if let Some(name) = payload_type {
             name.to_string()
+        } else if value.get("error").is_some_and(|error| !error.is_null())
+            && value.get("response").is_none()
+        {
+            "error".to_string()
         } else {
             return Err(
                 "upstream Responses event value must be an object with a non-empty string type"
@@ -110,5 +111,137 @@ include!("openai_responses/event_map.inc.rs");
 include!("openai_responses/state.inc.rs");
 include!("openai_responses/output_events.inc.rs");
 include!("openai_responses/completed.inc.rs");
-include!("openai_responses/decode_helpers.inc.rs");
-include!("openai_responses/tests.inc.rs");
+
+#[cfg(test)]
+mod joined_sse_data_tests {
+    use super::*;
+
+    #[test]
+    fn splits_multiple_complete_typed_objects_in_source_order() {
+        let parsed = parse_responses_sse_data(
+            "{\"type\":\"response.created\",\"sequence_number\":0}\n{\"type\":\"response.in_progress\",\"sequence_number\":1}",
+        )
+        .expect("joined event is valid");
+
+        assert!(!parsed.done);
+        assert_eq!(parsed.events.len(), 2);
+        assert_eq!(parsed.events[0].0, "response.created");
+        assert_eq!(parsed.events[1].0, "response.in_progress");
+    }
+
+    #[test]
+    fn accepts_done_after_complete_objects() {
+        let parsed = parse_responses_sse_data(
+            "{\"type\":\"response.completed\",\"response\":{}}\n[DONE]",
+        )
+        .expect("terminal joined event is valid");
+
+        assert!(parsed.done);
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].0, "response.completed");
+    }
+
+    #[test]
+    fn rejects_any_invalid_value_without_partial_output() {
+        for data in [
+            "{\"type\":\"response.created\"}\ntrailing",
+            "{\"sequence_number\":0}",
+            "[]",
+            "{\"type\":\"\"}",
+        ] {
+            assert!(parse_responses_sse_data(data).is_err(), "accepted {data:?}");
+        }
+    }
+
+    #[test]
+    fn sse_event_field_wins_over_payload_type() {
+        let parsed = parse_responses_sse_data_with_event(
+            "{\"type\":\"response.completed\",\"response\":{}}",
+            "response.incomplete",
+        )
+        .expect("named SSE event with payload type is valid");
+
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].0, "response.incomplete");
+    }
+
+    #[test]
+    fn sse_message_event_falls_back_to_payload_type() {
+        let parsed = parse_responses_sse_data_with_event(
+            "{\"type\":\"response.completed\",\"response\":{}}",
+            "message",
+        )
+        .expect("generic SSE event name falls back to the payload type");
+
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].0, "response.completed");
+    }
+
+    #[test]
+    fn empty_sse_event_falls_back_to_payload_type() {
+        let parsed = parse_responses_sse_data_with_event(
+            "{\"type\":\"response.created\"}",
+            "",
+        )
+        .expect("missing SSE event name falls back to the payload type");
+
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].0, "response.created");
+    }
+
+    #[test]
+    fn sse_event_cannot_replace_a_missing_payload_type() {
+        let parsed = parse_responses_sse_data_with_event("{\"sequence_number\":0}", "response.created")
+            .expect("SSE event name satisfies the naming rule without a payload type");
+
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].0, "response.created");
+    }
+
+    #[test]
+    fn enforces_joined_event_bounds() {
+        let too_many = (0..65)
+            .map(|index| format!("{{\"type\":\"response.vendor.{index}\"}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(parse_responses_sse_data(&too_many).is_err());
+
+        let oversized = format!(
+            "{{\"type\":\"response.vendor\",\"padding\":\"{}\"}}",
+            "x".repeat(8 * 1024 * 1024)
+        );
+        assert!(parse_responses_sse_data(&oversized).is_err());
+    }
+}
+
+#[cfg(test)]
+mod delta_extra_body_tests {
+    use super::*;
+
+    #[test]
+    fn output_text_delta_extra_body_excludes_the_wire_event_type() {
+        let events = map_responses_event_to_urp_events_with_state(
+            "response.output_text.delta",
+            json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "content_index": 0,
+                "item_id": "msg_mock",
+                "delta": "answer",
+                "vendor_hint": "keep"
+            }),
+            &HashMap::new(),
+            &mut ResponsesStreamIndexState::default(),
+        );
+        let extra = events.iter().find_map(|event| match event {
+            UrpStreamEvent::NodeDelta { extra_body, .. } => Some(extra_body),
+            _ => None,
+        }).expect("text delta");
+
+        assert!(
+            !extra.contains_key("type"),
+            "wire event type must not enter item extra_body: {extra:?}"
+        );
+        assert_eq!(extra.get("vendor_hint"), Some(&json!("keep")));
+    }
+}

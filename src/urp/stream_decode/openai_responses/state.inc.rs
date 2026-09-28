@@ -47,6 +47,9 @@ fn map_output_item_done(
                 ToolCallType::Function
             };
             let node = first_node_from_item_value(item).unwrap_or_else(|| Node::ToolResult {
+                signature: None,
+                namespace: item.get("namespace").and_then(Value::as_str).map(str::to_string),
+                name: item.get("name").and_then(Value::as_str).map(str::to_string),
                 id: item
                     .get("id")
                     .and_then(|v| v.as_str())
@@ -130,25 +133,25 @@ fn map_output_item_done(
                         .is_some_and(|summary| !summary.is_empty())
                     || fallback_encrypted.is_some()
                 {
-                    let mut delta_extra = HashMap::new();
-                    if let Some(id) = item
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| state.item_id.clone())
-                    {
-                        delta_extra.insert("reasoning_item_id".to_string(), Value::String(id));
-                    }
+                    let metadata = crate::urp::ReasoningMetadata {
+                        item_id: item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| state.item_id.clone()),
+                        ..Default::default()
+                    };
                     events.push(UrpStreamEvent::NodeDelta {
                         node_index,
                         delta: NodeDelta::Reasoning {
+                            metadata,
                             content: fallback_content,
                             encrypted: fallback_encrypted,
                             summary: fallback_summary,
                             source: source.clone(),
                         },
                         usage: None,
-                        extra_body: delta_extra,
+                        extra_body: HashMap::new(),
                     });
                 }
             } else if let Node::ToolCall { arguments, .. } = &node
@@ -176,16 +179,30 @@ fn map_output_item_done(
             output_state_for(index_state, output_index).node_done_seen = true;
         }
         "message" => {
+            let completed_nodes = nodes_from_item_value(item);
+            if !completed_nodes.is_empty() {
+                let state = output_state_for(index_state, output_index);
+                state.content_nodes = completed_nodes.into_iter().enumerate().map(|(index, node)| {
+                    let index = index as u64;
+                    let node = if node_is_empty_text(&node) {
+                        state.content_nodes.get(&index)
+                            .and_then(|previous| merge_output_node(previous, &node).ok())
+                            .unwrap_or(node)
+                    } else {
+                        node
+                    };
+                    (index, node)
+                }).collect();
+            }
             let (part_done_seen, emitted_any_node) = index_state
                 .output_state_by_index
                 .get(&output_index)
                 .map(|state| (state.part_done_seen, state.emitted_any_node))
                 .unwrap_or((false, false));
             if !part_done_seen && !emitted_any_node {
-                let decoded_item = decode_item_from_value(item);
-                if let Item::Message { .. } = decoded_item {
+                {
                     let nodes = nodes_from_item_value(item);
-                    for node in nodes {
+                    for mut node in nodes {
                         let node_index = index_state.allocate_fresh_node_index();
                         emit_pending_envelope_control_if_needed(
                             output_index,
@@ -195,30 +212,28 @@ fn map_output_item_done(
                         events.push(UrpStreamEvent::NodeStart {
                             node_index,
                             header: node_header_from_node(&node),
-                            extra_body: item_extra_body_from_value(item),
+                            extra_body: node.extra_body_mut().clone(),
                         });
                         output_state_for(index_state, output_index).emitted_any_node = true;
                         if let Node::Text {
                             content,
-                            phase,
+                            citations,
+                            signature,
                             extra_body,
                             ..
                         } = &node
                             && !content.is_empty()
                         {
-                            let mut delta_extra_body = extra_body.clone();
-                            if let Some(phase) = phase {
-                                delta_extra_body
-                                    .entry("phase".to_string())
-                                    .or_insert_with(|| json!(phase));
-                            }
                             events.push(UrpStreamEvent::NodeDelta {
                                 node_index,
                                 delta: NodeDelta::Text {
+                                    logprobs: None,
+                                    signature: signature.clone(),
+                                    citations: citations.clone(),
                                     content: content.clone(),
                                 },
                                 usage: None,
-                                extra_body: delta_extra_body,
+                                extra_body: extra_body.clone(),
                             });
                         }
                         events.push(UrpStreamEvent::NodeDone {
@@ -319,7 +334,7 @@ fn merge_response_completed_outputs(
                 nodes: merged_nodes,
             };
             used_accumulated_indices.push(index);
-        } else if !terminal_entry.nodes.iter().all(node_is_empty_text) {
+        } else if !terminal_entry.nodes.is_empty() {
             merged_entries.push(terminal_entry);
         }
     }
@@ -445,7 +460,6 @@ fn entry_output_kind(entry: &AccumulatedOutputEntry) -> Option<OutputEntryKind> 
         .nodes
         .iter()
         .filter(|node| !matches!(node, Node::NextDownstreamEnvelopeExtra { .. }))
-        .filter(|node| !node_is_empty_text(node))
         .filter_map(node_output_kind);
     let first = observed.next()?;
     observed.all(|kind| kind == first).then_some(first)
@@ -461,6 +475,13 @@ fn node_output_kind(node: &Node) -> Option<OutputEntryKind> {
         | Node::Refusal { .. } => Some(OutputEntryKind::Message),
         Node::ToolCall { .. } => Some(OutputEntryKind::ToolCall),
         Node::ToolResult { .. } => Some(OutputEntryKind::ToolResult),
+        Node::ProviderItem { extra_body, .. }
+            if extra_body.contains_key(
+                crate::urp::decode::openai_responses::RESPONSES_CONTENT_PART_SHAPE_KEY,
+            ) =>
+        {
+            Some(OutputEntryKind::Message)
+        }
         Node::ProviderItem { .. } => Some(OutputEntryKind::ProviderItem),
         Node::NextDownstreamEnvelopeExtra { .. } => None,
     }
@@ -470,13 +491,11 @@ fn merge_output_node_lists(accumulated: &[Node], terminal: &[Node]) -> Result<Ve
     let accumulated_typed = accumulated
         .iter()
         .filter(|node| !matches!(node, Node::NextDownstreamEnvelopeExtra { .. }))
-        .filter(|node| !node_is_empty_text(node))
         .cloned()
         .collect::<Vec<_>>();
     let terminal_typed = terminal
         .iter()
         .filter(|node| !matches!(node, Node::NextDownstreamEnvelopeExtra { .. }))
-        .filter(|node| !node_is_empty_text(node))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -505,6 +524,7 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
     match (accumulated, terminal) {
         (
             Node::Reasoning {
+                metadata: left_metadata,
                 id: left_id,
                 content: left_content,
                 encrypted: left_encrypted,
@@ -513,6 +533,7 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
                 extra_body: left_extra,
             },
             Node::Reasoning {
+                metadata: right_metadata,
                 id: right_id,
                 content: right_content,
                 encrypted: right_encrypted,
@@ -521,6 +542,11 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
                 extra_body: right_extra,
             },
         ) => Ok(Node::Reasoning {
+            metadata: {
+                let mut metadata = left_metadata.clone();
+                metadata.merge(right_metadata);
+                metadata
+            },
             id: right_id.clone().or_else(|| left_id.clone()),
             content: merge_optional_string_field("reasoning.text", left_content, right_content)?,
             encrypted: merge_terminal_reasoning_encrypted(left_encrypted, right_encrypted),
@@ -530,6 +556,9 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
         }),
         (
             Node::Text {
+                logprobs: left_logprobs,
+                signature: left_signature,
+                citations: left_citations,
                 id: left_id,
                 role: left_role,
                 content: left_content,
@@ -537,6 +566,9 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
                 extra_body: left_extra,
             },
             Node::Text {
+                logprobs: right_logprobs,
+                signature: right_signature,
+                citations: right_citations,
                 id: right_id,
                 role: right_role,
                 content: right_content,
@@ -548,6 +580,13 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
                 return Err("message role differs from completed output".to_string());
             }
             Ok(Node::Text {
+                logprobs: right_logprobs.clone().or_else(|| left_logprobs.clone()),
+                signature: right_signature.clone().or_else(|| left_signature.clone()),
+                citations: if right_citations.is_empty() {
+                    left_citations.clone()
+                } else {
+                    right_citations.clone()
+                },
                 id: right_id.clone().or_else(|| left_id.clone()),
                 role: *right_role,
                 content: if !left_content.is_empty()
@@ -564,6 +603,7 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
         }
         (
             Node::ToolCall {
+                namespace: left_namespace, signature: left_signature,
                 id: left_id,
                 tool_type: left_tool_type,
                 call_id: left_call_id,
@@ -572,6 +612,7 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
                 extra_body: left_extra,
             },
             Node::ToolCall {
+                namespace: right_namespace, signature: right_signature,
                 id: right_id,
                 tool_type: right_tool_type,
                 call_id: right_call_id,
@@ -580,6 +621,8 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
                 extra_body: right_extra,
             },
         ) => Ok(Node::ToolCall {
+            namespace: right_namespace.clone().or_else(|| left_namespace.clone()),
+            signature: right_signature.clone().or_else(|| left_signature.clone()),
             id: right_id.clone().or_else(|| left_id.clone()),
             tool_type: if *left_tool_type == ToolCallType::Custom
                 || *right_tool_type == ToolCallType::Custom
@@ -590,27 +633,15 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
             },
             call_id: merge_string_field("function_call.call_id", left_call_id, right_call_id)?,
             name: merge_string_field("function_call.name", left_name, right_name)?,
-            arguments: if *left_tool_type == ToolCallType::Function
-                && *right_tool_type == ToolCallType::Function
-                && left_arguments != right_arguments
-                && (matches!(
-                    (
-                        serde_json::from_str::<Value>(left_arguments),
-                        serde_json::from_str::<Value>(right_arguments),
-                    ),
-                    (Ok(left), Ok(right)) if left == right
-                ) || function_arguments_match_projected_field(
-                    left_arguments,
-                    right_arguments,
-                ))
-            {
-                right_arguments.clone()
-            } else {
-                merge_string_field("function_call.arguments", left_arguments, right_arguments)?
-            },
+            arguments: merge_function_or_custom_arguments(
+                *left_tool_type,
+                *right_tool_type,
+                left_arguments,
+                right_arguments,
+            )?,
             extra_body: merge_extra_body(left_extra, right_extra),
         }),
-        (left, right) if nodes_semantically_match(left, right) => Ok(right.clone()),
+        (left, right) if left == right || nodes_semantically_match(left, right) => Ok(right.clone()),
         (left, right)
             if std::mem::discriminant(left) == std::mem::discriminant(right)
                 && node_is_empty_text(left) =>
@@ -621,18 +652,33 @@ fn merge_output_node(accumulated: &Node, terminal: &Node) -> Result<Node, String
     }
 }
 
-/// A streamed snapshot may omit the JSON wrapper around arguments that the
-/// accumulated deltas already built; a non-empty snapshot always wins.
-fn replace_nonempty_tool_arguments(current: &mut String, snapshot: &str) {
-    if !snapshot.is_empty() {
-        *current = snapshot.to_string();
+fn merge_function_or_custom_arguments(
+    left_tool_type: ToolCallType,
+    right_tool_type: ToolCallType,
+    left_arguments: &str,
+    right_arguments: &str,
+) -> Result<String, String> {
+    if left_tool_type == ToolCallType::Function
+        && right_tool_type == ToolCallType::Function
+        && left_arguments != right_arguments
+        && (function_arguments_json_equal(left_arguments, right_arguments)
+            || function_arguments_match_projected_field(left_arguments, right_arguments))
+    {
+        return Ok(right_arguments.to_string());
     }
+    merge_string_field("function_call.arguments", left_arguments, right_arguments)
 }
 
-/// A terminal snapshot may wrap the accumulated argument string into an
-/// object field instead of echoing it verbatim — Codex apply_patch snapshots
-/// do this with `input`/`patch`/`command`/`content`. The pair then reconciles:
-/// the completed snapshot wins.
+fn function_arguments_json_equal(left: &str, right: &str) -> bool {
+    matches!(
+        (
+            serde_json::from_str::<Value>(left),
+            serde_json::from_str::<Value>(right),
+        ),
+        (Ok(left), Ok(right)) if left == right
+    )
+}
+
 fn function_arguments_match_projected_field(accumulated: &str, terminal: &str) -> bool {
     if accumulated.is_empty() {
         return false;

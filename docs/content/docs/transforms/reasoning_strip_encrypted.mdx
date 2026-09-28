@@ -3,6 +3,8 @@ title: "Reasoning: strip encrypted payloads"
 description: Remove encrypted reasoning payloads while keeping plaintext reasoning.
 ---
 
+This transform also removes tool-call signatures from responses and streams. It preserves tool names, arguments, and plaintext reasoning.
+
 ## What it does
 
 This transform removes encrypted reasoning payloads from response nodes, stream events, and passthrough state. Plaintext reasoning stays untouched.

@@ -43,13 +43,17 @@ RTYPE-4. If the Rust item names remain unsuffixed, they MUST still use these exa
 
 ```text
 UrpRequest {
+  image_generation: Option<ImageGenerationOptions>,
   model: String,
   input: Vec<Node>,
+  instructions_format: Option<InstructionsFormat>,
+  context: RequestContext,
   stream: Option<bool>,
   temperature: Option<f64>,
   top_p: Option<f64>,
   max_output_tokens: Option<u64>,
   reasoning: Option<ReasoningConfig>,
+  logprobs: Option<LogprobConfig>,
   tools: Option<Vec<ToolDefinition>>,
   tool_choice: Option<ToolChoice>,
   parallel_tool_calls: Option<bool>,
@@ -63,8 +67,10 @@ UrpRequest {
 UrpResponse {
   id: String,
   model: String,
+  created_at: Option<i64>,
   output: Vec<Node>,
   finish_reason: Option<FinishReason>,
+  outcome: Option<ResponseOutcome>,
   usage: Option<Usage>,
   extra_body: HashMap<String, JsonValue>
 }
@@ -93,6 +99,10 @@ RTYPE-4A. The Rust core layer MUST define exactly one canonical request tool-def
 ```text
 ToolDefinition {
   tool_type: String,
+  namespace: Option<String>,
+  tools: Option<Vec<ToolDefinition>>,
+  origin_protocol: Option<ProviderProtocol>,
+  config: Option<JsonValue>,
   name: Option<String>,
   description: Option<String>,
   function: Option<FunctionDefinition>,
@@ -111,7 +121,7 @@ RTYPE-4D. The Rust core layer MUST define exactly one canonical function tool sh
 FunctionDefinition {
   name: String,
   description: Option<String>,
-  parameters: JsonValue,
+  parameters: Option<JsonValue>,
   strict: Option<bool>,
   extra_body: HashMap<String, JsonValue>
 }
@@ -130,9 +140,13 @@ CustomToolDefinition {
 }
 ```
 
-RTYPE-4G. `ToolDefinition.function` MUST be present when `tool_type = "function"` and the tool has parsed function semantics. `ToolDefinition.custom` MUST be present when `tool_type = "custom"` and the tool has parsed custom semantics. Provider-native or built-in tools MAY leave both fields absent and store their provider-specific config in `ToolDefinition.extra_body`.
+RTYPE-4G. `ToolDefinition.function` MUST contain parsed function semantics when `tool_type = "function"`.
+`ToolDefinition.custom` MUST contain parsed custom semantics when `tool_type = "custom"`.
+Provider-native tools MAY leave both fields absent. Their configuration MUST reside in `ToolDefinition.config`, with the source protocol in `origin_protocol`.
 
-RTYPE-4H. The Rust core layer MUST NOT require a distinct strongly typed Rust config struct for every OpenAI, Anthropic, or other provider-native built-in tool. Optional fields added to `ToolDefinition` MUST remain default-compatible for provider-native constructors that only know `tool_type` and `extra_body`.
+RTYPE-4H. The Rust core MUST NOT require a separate configuration struct for each provider-native tool.
+New optional ToolDefinition fields MUST default to absence for internal constructors that omit them.
+Wire decoders MUST populate `config` and `origin_protocol` for provider-native configuration under URPV2-S8.
 
 RTYPE-5. The Rust core module MUST define exactly one canonical top-level conversational enum:
 
@@ -143,48 +157,53 @@ Node =
       role: OrdinaryRole,
       content: String,
       phase: Option<String>,
+      signature: Option<JsonValue>,
+      citations: Vec<Citation>,
       extra_body: HashMap<String, JsonValue>
     }
   | Image {
       id: Option<String>,
       role: OrdinaryRole,
       source: ImageSource,
+      metadata: MediaMetadata,
       extra_body: HashMap<String, JsonValue>
     }
   | Audio {
       id: Option<String>,
       role: OrdinaryRole,
       source: AudioSource,
+      metadata: MediaMetadata,
       extra_body: HashMap<String, JsonValue>
     }
   | File {
       id: Option<String>,
       role: OrdinaryRole,
       source: FileSource,
+      metadata: MediaMetadata,
       extra_body: HashMap<String, JsonValue>
     }
   | Refusal {
       id: Option<String>,
-      role: OrdinaryRole::Assistant,
       content: String,
       extra_body: HashMap<String, JsonValue>
     }
   | Reasoning {
       id: Option<String>,
-      role: OrdinaryRole::Assistant,
       content: Option<String>,
       summary: Option<String>,
       encrypted: Option<JsonValue>,
       source: Option<String>,
+      metadata: ReasoningMetadata,
       extra_body: HashMap<String, JsonValue>
     }
   | ToolCall {
       id: Option<String>,
-      role: OrdinaryRole::Assistant,
       tool_type: ToolCallType,
       call_id: String,
       name: String,
       arguments: String,
+      namespace: Option<String>,
+      signature: Option<JsonValue>,
       extra_body: HashMap<String, JsonValue>
     }
   | ProviderItem {
@@ -196,9 +215,12 @@ Node =
       extra_body: HashMap<String, JsonValue>
     }
   | ToolResult {
+      signature: Option<JsonValue>,
       id: Option<String>,
       tool_type: ToolCallType,
       call_id: String,
+      namespace: Option<String>,
+      name: Option<String>,
       is_error: bool,
       content: Vec<ToolResultContent>,
       extra_body: HashMap<String, JsonValue>
@@ -208,9 +230,62 @@ Node =
     }
 ```
 
+Refusal, Reasoning, and ToolCall have an implicit assistant role. Their Rust variants MUST NOT store a separate role field.
+
+The metadata types MUST use these fields:
+
+```text
+MediaMetadata {
+  image_mask: bool,
+  image_generation: ImageGenerationMetadata,
+  filename: Option<String>,
+  detail: Option<String>,
+  document_title: Option<String>,
+  document_context: Option<String>,
+  document_citations: Option<JsonValue>,
+  resource: Option<MediaResource>,
+  reference_id: Option<String>,
+  signature: Option<JsonValue>,
+  media_type: Option<String>,
+  transcript: Option<String>,
+  expires_at: Option<i64>
+}
+
+MediaResource {
+  protocol: ProviderProtocol,
+  provider_id: Option<String>,
+  channel_id: Option<String>,
+  credential_scope: Option<String>
+}
+
+ImageGenerationMetadata {
+  revised_prompt: Option<String>,
+  quality: Option<String>,
+  size: Option<String>,
+  background: Option<String>,
+  output_format: Option<String>,
+  model: Option<String>
+}
+
+ReasoningMetadata {
+  redacted: bool,
+  downstream_only: bool,
+  chat_content: bool,
+  summary_as_thinking: bool,
+  item_id: Option<String>,
+  summary_parts: Option<Vec<ReasoningTextPart>>,
+  content_parts: Option<Vec<ReasoningTextPart>>
+}
+
+ReasoningTextPart {
+  byte_length: usize,
+  extra_body: HashMap<String, JsonValue>
+}
+```
+
 RTYPE-6. `OrdinaryRole` in the Rust core layer MUST contain exactly `System`, `Developer`, `User`, and `Assistant`.
 
-RTYPE-6a. `ProviderProtocol` in the Rust core layer MUST contain exactly `Responses`, `ChatCompletion`, `Messages`, `Gemini`, `OpenaiImage`, and `Replicate`, serialized as `responses`, `chat_completion`, `messages`, `gemini`, `openai_image`, and `replicate`.
+RTYPE-6a. `ProviderProtocol` in the Rust core layer MUST contain exactly `Responses`, `ChatCompletion`, `Messages`, `Gemini`, `OpenaiImage`, `OpenrouterImage`, and `Replicate`, serialized as `responses`, `chat_completion`, `messages`, `gemini`, `openai_image`, `openrouter_image`, and `replicate`.
 
 RTYPE-6b. The Rust core layer MUST define `ToolCallType` with exactly `Function` and `Custom`, serialized as `function` and `custom`. Its serde default MUST be `Function` for legacy internal payloads that predate the discriminator.
 
@@ -244,11 +319,11 @@ RTYPE-9. The Rust core layer MUST define exactly one canonical streaming enum fa
 
 ```text
 UrpStreamEvent =
-  | ResponseStart { id: String, model: String, extra_body: HashMap<String, JsonValue> }
+  | ResponseStart { id: String, model: String, usage: Option<Usage>, extra_body: HashMap<String, JsonValue> }
   | NodeStart { node_index: u32, header: NodeHeader, extra_body: HashMap<String, JsonValue> }
   | NodeDelta { node_index: u32, delta: NodeDelta, usage: Option<Usage>, extra_body: HashMap<String, JsonValue> }
   | NodeDone { node_index: u32, node: Node, usage: Option<Usage>, extra_body: HashMap<String, JsonValue> }
-  | ResponseDone { finish_reason: Option<FinishReason>, usage: Option<Usage>, output: Vec<Node>, extra_body: HashMap<String, JsonValue> }
+  | ResponseDone { outcome: Option<ResponseOutcome>, finish_reason: Option<FinishReason>, usage: Option<Usage>, output: Vec<Node>, extra_body: HashMap<String, JsonValue> }
   | ProviderControl { protocol: String, event_name: String, data: JsonValue, extra_body: HashMap<String, JsonValue> }
   | Error { code: Option<String>, message: String, extra_body: HashMap<String, JsonValue> }
 ```
@@ -303,13 +378,17 @@ MAP-13. A function tool's semantic `name`, `description`, and `strict` fields MU
 
 MAP-14. Custom tools with parsed custom semantics MUST map to `ToolDefinition { tool_type = "custom", custom = Some(CustomToolDefinition { ... }) }`. Their semantic `name`, `description`, and `format` fields MUST map to `CustomToolDefinition.name`, `CustomToolDefinition.description`, and `CustomToolDefinition.format` respectively.
 
-MAP-15. Provider-native or built-in tool config fields MAY remain in `ToolDefinition.extra_body` when preserving them at the tool-definition layer is the correct ownership layer. Examples include `file_search.vector_store_ids`, `computer.display_width_px`, MCP server fields, and future provider-native tool fields.
+MAP-15. Provider-native tool configuration MUST reside in `ToolDefinition.config`. The decoder MUST record its source in `ToolDefinition.origin_protocol`.
+Examples include file-search vector-store identifiers, computer display settings, and MCP server settings.
+An encoder MUST emit that configuration only to its recorded protocol. Namespace child definitions MUST reside only in `ToolDefinition.tools`.
 
 MAP-16. `ToolDefinition.name` and `ToolDefinition.description` own top-level tool metadata only. They MUST NOT replace `FunctionDefinition.name`, `FunctionDefinition.description`, `CustomToolDefinition.name`, or `CustomToolDefinition.description` when the parsed semantics belong inside `function` or `custom`.
 
 MAP-17. `UrpRequest.parallel_tool_calls` owns request-level parallel tool-use permission. A decoder MUST map OpenAI-compatible top-level `parallel_tool_calls` into this field when the value is boolean. An encoder targeting an OpenAI-compatible upstream MUST emit this field as top-level `parallel_tool_calls` and MUST NOT move it into any `ToolDefinition`, `FunctionDefinition`, or `CustomToolDefinition` extras.
 
-MAP-18. Anthropic Messages `tool_choice.disable_parallel_tool_use` is a request-level tool-choice control, not a tool-definition field. A decoder MUST preserve it inside the canonical `ToolChoice` value for Anthropic `auto`, `any`, and named `tool` choices. If the flag is `true`, the decoder MUST also set `UrpRequest.parallel_tool_calls = Some(false)` so cross-family OpenAI-compatible encoders can preserve the no-parallel semantics at top level.
+MAP-18. Messages `tool_choice.disable_parallel_tool_use` MUST map only to typed `UrpRequest.parallel_tool_calls`, with its boolean inverted.
+The decoder MUST remove the native flag from ToolChoice passthrough. The encoder MUST derive it from the current typed value.
+Absence MUST omit the native flag. Unknown tool-choice members remain in the canonical ToolChoice object.
 
 MAP-19. An ordered provider reasoning-detail array MUST decode to an ordered run of `Node::Reasoning` values, one node per source detail. A decoder MUST NOT merge two source detail entries merely because they have the same detail type or occur in the same assistant message.
 
@@ -394,15 +473,18 @@ A member whose key starts with `_monoize_` and was created after wire parsing is
 
 NH-27. The stripping helper in NH-26 MUST NOT remove or mutate top-level request or response `extra_body`.
 
-NH-28. `ToolDefinition.extra_body` owns only fields that belong to exactly one request tool-definition object and are not represented by `tool_type`, `name`, `description`, `function`, or `custom`.
+NH-28. `ToolDefinition.extra_body` owns only fields that belong to exactly one request tool-definition object and have no typed owner.
+Typed owners include `tool_type`, `name`, `description`, `namespace`, `function`, `custom`, `tools`, `origin_protocol`, and `config`.
 
 NH-29. `FunctionDefinition.extra_body` owns only fields that belong to exactly one function-definition payload and are not represented by `name`, `description`, `parameters`, or `strict`. An Anthropic `input_schema` field belongs to `parameters`, not to `FunctionDefinition.extra_body`.
 
 NH-30. `CustomToolDefinition.extra_body` owns only fields that belong to exactly one custom-tool payload and are not represented by `name`, `description`, or `format`.
 
-NH-31. Shared decode helpers MUST assign request tool-definition unknown fields to exactly one of these layers: top-level request `extra_body`, `ToolDefinition.extra_body`, `FunctionDefinition.extra_body`, or `CustomToolDefinition.extra_body`. The same unknown field MUST NOT be duplicated across those layers.
+NH-31. Shared decode helpers MUST assign request tool-definition unknown fields to exactly one of these layers: top-level request `extra_body`, `ToolDefinition.extra_body`, `FunctionDefinition.extra_body`, or `CustomToolDefinition.extra_body`. Provider-native configuration belongs to `ToolDefinition.config` under MAP-15. The same field MUST NOT be duplicated across these owners.
 
-NH-32. Shared encode helpers MUST consume request tool-definition unknown fields from the ownership layer that matches the target wire object being emitted. A helper MUST NOT read provider-native built-in config from top-level request `extra_body` when that config belongs to one `ToolDefinition.extra_body`.
+NH-32. Shared encode helpers MUST consume unknown fields from the owner that matches the emitted wire object.
+They MUST read provider-native tool configuration from `ToolDefinition.config`, with protocol eligibility determined by `origin_protocol`.
+They MUST NOT recover that configuration from request or tool extras.
 
 NH-33. The Rust core layer MUST provide a helper that removes every `Node::ProviderItem` from a `Vec<Node>` unless its `origin_protocol` exactly equals the selected target `ProviderProtocol`. This helper MUST leave all non-ProviderItem nodes unchanged.
 
@@ -545,3 +627,43 @@ TASK-3. Task 8 target: shared decode helpers in `src/urp/decode/*` MUST emit fla
 TASK-4. Task 9 target: stream helpers in `src/urp/stream_decode/*`, `src/urp/stream_encode/*`, and `src/urp/stream_helpers.rs` MUST use canonical node lifecycle events from RTYPE-9 through RTYPE-10 plus SHELP-1 through SHELP-18, with `ResponseDone.output` as final authority.
 
 TASK-5. Tasks 6 through 9 are not complete if any helper still depends on a hidden canonical grouped-message assumption, including any helper whose core inputs are grouped `parts`, grouped `items`, or cached merged message wrappers.
+
+## Typed semantic metadata
+
+RTYPE-NEW-1. `ReasoningConfig` MUST expose optional effort, summary, mode, budget_tokens, and display fields. Unknown configuration members remain in extra_body.
+RTYPE-NEW-2. Reasoning nodes, headers, and deltas MUST carry `ReasoningMetadata`. It includes redacted, downstream_only, chat_content, summary_as_thinking, and optional item_id.
+RTYPE-NEW-3. Optional summary_parts and content_parts describe UTF-8 byte lengths and unknown part members. They MUST NOT retain text copies.
+RTYPE-NEW-4. A text-part encoder MUST use current text. Invalid lengths or UTF-8 boundaries MUST produce one rebuilt part without old text.
+RTYPE-NEW-5. Text nodes, headers, deltas, and temporary bridge parts MUST carry citations and an optional signature.
+RTYPE-NEW-6. `ResponseStart.usage` MUST use `Option<Usage>`. No JSON serialization round trip is permitted for internal start usage.
+RTYPE-NEW-7. `UrpRequest.context` MUST hold runtime identities independently of extra_body. Serialization and transform round trips MUST NOT expose or replace trusted context.
+
+RTYPE-NEW-7a. Serialization MUST omit `UrpRequest.context`. Deserialization MUST consume and discard any JSON `context` value.
+The discarded value MUST NOT enter flattened `extra_body`. Missing context MUST produce the default runtime context.
+`RequestContext` MUST hold optional `ResponseHistoryContext` and a map from wire tool names to `ToolTransport`.
+`ResponseHistoryContext` MUST contain typed response ID, authorization scope, storage flag, and optional previous response ID.
+`ToolTransport` MUST contain a target `ProviderProtocol`, a wire `ToolCallType`, and an original `ToolIdentity`.
+`ToolIdentity` MUST contain optional namespace, name, and `ToolCallType`.
+These fields MUST NOT be recovered from `_monoize_*` extras.
+RTYPE-NEW-8. The typed additions in this section extend the type listings above. Absence remains authoritative at every adapter boundary.
+
+RTYPE-NEW-9. ToolCall nodes, headers, and bridge parts MUST include optional `namespace: String` and `signature: JsonValue` fields.
+ToolResult nodes and headers MUST include optional `namespace: String` and `name: String` fields.
+RTYPE-NEW-10. ToolDefinition MUST include optional namespace, ordered child tools, origin_protocol, and native config fields under URPV2-S8.
+RTYPE-NEW-11. Media nodes, headers, bridge parts, and ToolResultContent media MUST carry MediaMetadata under media-transport.spec.md. ToolResult nodes and headers MUST retain typed signatures.
+RTYPE-NEW-12. ProviderItem headers MUST include an optional initial body. Stream helpers MUST preserve that body as canonical initial state.
+
+
+## Canonical semantic metadata extension
+
+RSEM-1. SEM-1 through SEM-6 in urp-v2-flat-structure.spec.md supersede older JSON citation and terminal-extra shapes in this file.
+Rust citations MUST use Citation values. Text and Refusal nodes, bridge parts, and deltas MUST retain optional TokenLogprob arrays.
+UrpRequest MUST expose optional LogprobConfig. UrpResponse and ResponseDone MUST expose optional ResponseOutcome.
+Usage MUST expose optional ordered UsageIteration values. Constructors that omit these optional semantic fields MUST default to absence during deserialization.
+Existing final audio and reasoning representations remain unchanged.
+
+RSEM-2. UrpRequest MUST expose optional SamplingConfig with optional top_k, seed, presence_penalty, and frequency_penalty fields.
+FunctionDefinition MUST expose optional response_schema for a function result JSON Schema.
+TokenScore MUST expose optional token_id. OpenAI wire projections MUST omit token_id.
+InputDetails MUST expose optional tool_prompt_modality_breakdown and preserve it during usage iteration aggregation.
+These additions follow GEM-4a in gemini-codec.spec.md and SEM-2a in urp-v2-flat-structure.spec.md.

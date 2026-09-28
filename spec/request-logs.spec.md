@@ -762,3 +762,5 @@ FL56. While any tooltip-detail overlay in the request-logs table is open (as def
 FL58. The retention cutoff MUST be `MONOIZE_REQUEST_LOG_RETENTION_DAYS` days (default 365, parsed per RRB-C1); the hourly sweep deletes rows strictly older than the cutoff. A value smaller than the default is the supported co-location tuning; setting it higher only affects future deletions.
 
 FL57. The frontend tooltip-pause bookkeeping used by FL38 and FL56 MUST be resilient to virtualization-driven row unmounts and tooltip component remounts. If a tooltip-owning row leaves the DOM before a matching close callback fires, the page MUST still eventually resume live updates without requiring a manual refresh or page reload. Implementations MUST therefore track tooltip-open state by stable tooltip identity (or an equivalent leak-free ownership model), rather than relying on a process-wide integer counter that can remain permanently positive after an unbalanced open/close sequence.
+
+RL-ITER-1. Request-log token fields and usage breakdowns MUST use aggregate iteration counters under MB-U1 when Usage contains iterations. They MUST NOT add primary-generation counters twice.

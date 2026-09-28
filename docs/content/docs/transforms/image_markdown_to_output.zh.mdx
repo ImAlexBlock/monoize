@@ -3,6 +3,8 @@ title: "图像：Markdown 转图像节点"
 description: 把 assistant 文本中的 Markdown 图片语法转换为真正的图像节点。
 ---
 
+没有提取出图片的文本会保留元数据。提取图片后，引用位置会随保留文本调整，覆盖已移除 Markdown 的引用会被删除。原始文本的签名和 token 分数会被清除。带有文本元数据的流可能等待文本块结束后，再发送缓存的增量。
+
 ## 行为
 
 此变换从 assistant 文本中提取 Markdown 图片块（例如 `![alt](url)`），并转换为标准的 assistant 图像节点。它与 `image_output_to_markdown` 互逆。

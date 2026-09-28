@@ -1,0 +1,34 @@
+---
+title: "Role: move assistant images to user"
+description: Move assistant images to the next user message.
+---
+
+## What it does
+
+This transform moves each assistant image to immediately before the next user message. If no later user message exists, it appends the image. It assigns the user role and preserves the image source and image order. Other content remains unchanged.
+
+## When to use
+
+Enable this transform when an upstream accepts assistant image fields but ignores their content.
+
+## Reference
+
+| Property | Value |
+| --- | --- |
+| Type ID | `role_assistant_image_to_user` |
+| Phase | `request` |
+| Scopes | Provider, Global, API key |
+
+## Configuration
+
+This transform has no options. Use an empty `config` object.
+
+```json
+{
+  "transform": "role_assistant_image_to_user",
+  "enabled": true,
+  "phase": "request",
+  "models": ["*"],
+  "config": {}
+}
+```

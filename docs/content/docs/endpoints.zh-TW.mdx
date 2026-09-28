@@ -17,6 +17,18 @@ x-api-key: sk-...
 
 任何端點都可以到達任何上游類型。例如，用戶端呼叫 `/v1/messages`，而路由透過 `chat_completion` 類型的 Channel 服務該模型。Monoize 在兩個方向上轉換協議。
 
+## 協議轉換
+
+多個工具使用相同名稱時，請使用 Responses 工具命名空間。選定的 Channel 使用 Chat Completions、Messages 或 Gemini 時，Monoize 會保留工具身分。
+
+跨服務商傳遞檔案時，請提供檔案內容或公開 URL。私有檔案參照必須符合唯一的 Provider、Channel 和憑證範圍。
+
+請將圖片遮罩與原圖一起提交。圖片轉換會保留遮罩尺寸和透明度。
+
+目標協議無法表示回應中的媒體時，介面會傳回明確錯誤。串流回應會以錯誤結束，不會傳送成功結束事件。
+
+Gemini 轉換會保留支援的取樣參數、引用、工具簽章和用量明細。協議專屬欄位只會傳送至相容的目標協議。
+
 ## 列出模型
 
 ```bash
@@ -90,6 +102,8 @@ curl http://localhost:8080/v1/embeddings \
 ```
 
 ## 圖像
+
+透過 Responses Channel 呼叫圖像端點前，請設定 `image_enable_openai_generation_tool`。缺少必要工具時，請求會在轉送前傳回錯誤。
 
 生成：
 

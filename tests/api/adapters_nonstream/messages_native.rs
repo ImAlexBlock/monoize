@@ -621,21 +621,8 @@ async fn provider_scoped_file_ids_are_not_cross_family_translated() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let messages_upstream = last_captured_body(&to_messages, "messages");
-    assert!(
-        !messages_upstream.to_string().contains("file_openai_1"),
-        "OpenAI file IDs must not be emitted as Anthropic Files IDs"
-    );
-    assert!(
-        !to_messages
-            .captured_headers
-            .lock()
-            .expect("captured headers lock")
-            .iter()
-            .any(|(key, _)| key == "anthropic-beta"),
-        "an omitted OpenAI file ID must not enable the Anthropic Files beta"
-    );
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(to_messages.captured_bodies.lock().unwrap().is_empty());
 
     let to_responses = setup().await;
     let (status, _) = json_post(
@@ -657,12 +644,8 @@ async fn provider_scoped_file_ids_are_not_cross_family_translated() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let responses_upstream = last_captured_body(&to_responses, "responses");
-    assert!(
-        !responses_upstream.to_string().contains("file_anthropic_1"),
-        "Anthropic file IDs must not be emitted as OpenAI Files IDs"
-    );
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(to_responses.captured_bodies.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -9,8 +9,6 @@ use serde_json::{Value, json};
 use std::any::Any;
 use std::collections::HashSet;
 
-const SUMMARY_FROM_PLAINTEXT_REASONING_KEY: &str = "_monoize_summary_from_plaintext_reasoning";
-
 #[derive(Debug, Deserialize)]
 struct Config {}
 
@@ -113,13 +111,14 @@ fn rewrite_stream_reasoning(event: &mut UrpStreamEvent, state: &mut StreamState)
         UrpStreamEvent::NodeDelta {
             node_index,
             delta,
-            extra_body,
+            extra_body: _,
             ..
         } => {
             let NodeDelta::Reasoning {
                 content,
                 encrypted,
                 summary,
+                metadata,
                 ..
             } = delta
             else {
@@ -130,10 +129,7 @@ fn rewrite_stream_reasoning(event: &mut UrpStreamEvent, state: &mut StreamState)
             }
             if let Some(text) = content.take().filter(|text| !text.is_empty()) {
                 *summary = Some(text);
-                extra_body.insert(
-                    SUMMARY_FROM_PLAINTEXT_REASONING_KEY.to_string(),
-                    Value::Bool(true),
-                );
+                metadata.summary_as_thinking = true;
             }
         }
         UrpStreamEvent::NodeDone {
@@ -157,7 +153,10 @@ fn rewrite_stream_reasoning(event: &mut UrpStreamEvent, state: &mut StreamState)
 
 fn rewrite_reasoning_node(node: &mut Node) {
     let Node::Reasoning {
-        content, summary, ..
+        content,
+        summary,
+        metadata,
+        ..
     } = node
     else {
         return;
@@ -169,6 +168,7 @@ fn rewrite_reasoning_node(node: &mut Node) {
         return;
     }
     *summary = Some(text);
+    metadata.summary_as_thinking = true;
 }
 
 inventory::submit!(TransformEntry {
@@ -179,9 +179,10 @@ inventory::submit!(TransformEntry {
 mod tests {
     use super::*;
     use crate::image_transform_cache::ImageTransformCache;
+    use crate::transforms::test_fixtures::items_to_nodes;
     use crate::transforms::{TransformRuntimeContext, build_states_for_rules, registry};
     use crate::urp::UrpResponse;
-    use crate::urp::internal_legacy_bridge::{Item, Part, Role, items_to_nodes, nodes_to_items};
+    use crate::urp::internal_legacy_bridge::{Item, Part, Role, nodes_to_items};
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -212,6 +213,8 @@ mod tests {
         }];
         let mut states = build_states_for_rules(&rules, &registry).expect("states");
         let mut resp = UrpResponse {
+            outcome: Default::default(),
+
             id: "resp_1".to_string(),
             model: "gpt-test".to_string(),
             created_at: None,
@@ -219,6 +222,8 @@ mod tests {
                 id: None,
                 role: Role::Assistant,
                 parts: vec![Part::Reasoning {
+                    metadata: Default::default(),
+
                     id: None,
                     content: Some("plain reasoning".to_string()),
                     encrypted: None,
@@ -270,6 +275,8 @@ mod tests {
         }];
         let mut states = build_states_for_rules(&rules, &registry).expect("states");
         let mut resp = UrpResponse {
+            outcome: Default::default(),
+
             id: "resp_1".to_string(),
             model: "gpt-test".to_string(),
             created_at: None,
@@ -277,6 +284,8 @@ mod tests {
                 id: None,
                 role: Role::Assistant,
                 parts: vec![Part::Reasoning {
+                    metadata: Default::default(),
+
                     id: None,
                     content: Some("plain reasoning".to_string()),
                     encrypted: Some(Value::String("ciphertext".to_string())),
@@ -339,6 +348,8 @@ mod tests {
         let mut event = UrpStreamEvent::NodeDelta {
             node_index: 7,
             delta: NodeDelta::Reasoning {
+                metadata: Default::default(),
+
                 content: Some("plain".to_string()),
                 encrypted: None,
                 summary: None,
@@ -369,6 +380,7 @@ mod tests {
             encrypted,
             summary,
             source,
+            metadata,
         } = delta
         else {
             panic!("expected reasoning delta");
@@ -377,12 +389,8 @@ mod tests {
         assert_eq!(encrypted, None);
         assert_eq!(summary.as_deref(), Some("plain"));
         assert_eq!(source, None);
-        assert_eq!(
-            extra_body
-                .get(SUMMARY_FROM_PLAINTEXT_REASONING_KEY)
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert!(metadata.summary_as_thinking);
+        assert!(extra_body.is_empty());
     }
 
     #[tokio::test]
@@ -394,6 +402,8 @@ mod tests {
         let mut event = UrpStreamEvent::NodeDone {
             node_index: 2,
             node: Node::Reasoning {
+                metadata: Default::default(),
+
                 id: None,
                 content: Some("plain".to_string()),
                 encrypted: Some(Value::String("ciphertext".to_string())),

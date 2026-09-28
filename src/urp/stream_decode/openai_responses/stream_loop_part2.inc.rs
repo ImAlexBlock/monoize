@@ -4,13 +4,44 @@ fn map_responses_event_to_urp_events_with_state(
     message_phases_by_output_index: &HashMap<u64, String>,
     index_state: &mut ResponsesStreamIndexState,
 ) -> Vec<UrpStreamEvent> {
+    accumulate_message_content_event(event_name, &data_val, index_state);
     match event_name {
         "response.created" | "response.in_progress" => Vec::new(),
         "response.output_item.added" => map_output_item_added(data_val, index_state),
         "response.content_part.added" => map_content_part_added(data_val, index_state),
+        "response.refusal.delta" => vec![UrpStreamEvent::NodeDelta {
+            node_index: urp_node_index_from_delta(&data_val, index_state),
+            delta: NodeDelta::Refusal {
+                logprobs: None,
+                content: data_val
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+            usage: None,
+            extra_body: HashMap::new(),
+        }],
+        "response.output_text.annotation.added" => vec![UrpStreamEvent::NodeDelta {
+            node_index: urp_node_index_from_delta(&data_val, index_state),
+            delta: NodeDelta::Text {
+                logprobs: None,
+                signature: None,
+                citations: data_val
+                    .get("annotation")
+                    .cloned()
+                    .map(|v| {
+                        crate::urp::Citation::decode(v, crate::urp::ProviderProtocol::Responses)
+                    })
+                    .into_iter()
+                    .collect(),
+                content: String::new(),
+            },
+            usage: None,
+            extra_body: HashMap::new(),
+        }],
         "response.output_text.delta" => {
-            let mut extra =
-                delta_extra_body_with_phase(data_val.clone(), message_phases_by_output_index);
+            let mut extra = text_delta_extra_body(data_val.clone());
             let mut events = Vec::new();
             let output_index = data_val
                 .get("output_index")
@@ -31,11 +62,8 @@ fn map_responses_event_to_urp_events_with_state(
                 .or_else(|| data_val.get("part_index"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
+            let should_emit_start = !index_state.node_index_by_content_key.contains_key(&(output_index, content_index));
             let node_index = index_state.node_index_for_content(output_index, content_index);
-            let should_emit_start = {
-                let output_state = output_state_for(index_state, output_index);
-                !output_state.emitted_any_node
-            };
             if should_emit_start {
                 let output_state = output_state_for(index_state, output_index);
                 if output_state.item_extra_body.is_empty() {
@@ -44,6 +72,9 @@ fn map_responses_event_to_urp_events_with_state(
                 emit_pending_envelope_control_if_needed(output_index, index_state, &mut events);
                 let item_id = stable_message_item_id_for_output(index_state, output_index);
                 let node = Node::Text {
+                    logprobs: crate::urp::logprobs::decode(data_val.get("logprobs")),
+                    signature: None,
+                    citations: Vec::new(),
                     id: Some(item_id),
                     role: output_state_for(index_state, output_index)
                         .role
@@ -51,10 +82,11 @@ fn map_responses_event_to_urp_events_with_state(
                         .to_ordinary()
                         .unwrap_or(OrdinaryRole::Assistant),
                     content: String::new(),
-                    phase: extra
+                    phase: data_val
                         .get("phase")
                         .and_then(Value::as_str)
-                        .map(str::to_string),
+                        .map(str::to_string)
+                        .or_else(|| message_phases_by_output_index.get(&output_index).cloned()),
                     extra_body: extra.clone(),
                 };
                 events.push(UrpStreamEvent::NodeStart {
@@ -67,6 +99,9 @@ fn map_responses_event_to_urp_events_with_state(
             events.push(UrpStreamEvent::NodeDelta {
                 node_index,
                 delta: NodeDelta::Text {
+                    logprobs: crate::urp::logprobs::decode(data_val.get("logprobs")),
+                    signature: None,
+                    citations: Vec::new(),
                     content: output_text_delta_content(&data_val).to_string(),
                 },
                 usage: None,
@@ -103,9 +138,11 @@ fn map_responses_event_to_urp_events_with_state(
                     )
                 })
                 .unwrap_or_default();
-            let mut extra_body = split_known_fields(
+            let extra_body = split_known_fields(
                 data_val.clone(),
                 &[
+                    "type",
+                    "sequence_number",
                     "delta",
                     "text",
                     "output_index",
@@ -114,12 +151,14 @@ fn map_responses_event_to_urp_events_with_state(
                     "summary_index",
                 ],
             );
-            if let Some(id) = reasoning_item_id {
-                extra_body.insert("reasoning_item_id".to_string(), Value::String(id));
+            let mut delta =
+                node_delta_from_reasoning_event(event_name, &data_val, reasoning_source);
+            if let NodeDelta::Reasoning { metadata, .. } = &mut delta {
+                metadata.item_id = reasoning_item_id;
             }
             vec![UrpStreamEvent::NodeDelta {
                 node_index: urp_node_index_from_delta(&data_val, index_state),
-                delta: node_delta_from_reasoning_event(event_name, &data_val, reasoning_source),
+                delta,
                 usage: None,
                 extra_body,
             }]
@@ -129,6 +168,7 @@ fn map_responses_event_to_urp_events_with_state(
         | "response.reasoning_summary_part.added"
         | "response.reasoning_summary_part.done"
         | "response.output_text.done"
+        | "response.refusal.done"
         | "response.function_call_arguments.done"
         | "response.custom_tool_call_input.done" => Vec::new(),
         "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
@@ -147,7 +187,7 @@ fn map_responses_event_to_urp_events_with_state(
                 usage: None,
                 extra_body: split_known_fields(
                     data_val,
-                    &["delta", "output_index", "content_index", "part_index"],
+                    &["type", "sequence_number", "delta", "output_index", "content_index", "part_index"],
                 ),
             }]
         }
@@ -173,10 +213,9 @@ fn map_responses_event_to_urp_events_with_state(
         }
         "response.content_part.done" => map_content_part_done(data_val, index_state),
         "response.output_item.done" => map_output_item_done(data_val, index_state),
-        "response.completed"
-        | "response.incomplete"
-        | "response.failed"
-        | "response.cancelled" => map_response_completed(data_val, index_state),
+        "response.completed" | "response.incomplete" | "response.failed" | "response.cancelled" => {
+            map_response_completed(data_val, index_state)
+        }
         "error" => vec![UrpStreamEvent::Error {
             code: data_val
                 .get("code")
@@ -250,6 +289,9 @@ struct OutputItemStreamState {
     reasoning_summary_delta_seen: bool,
     function_arguments_delta_seen: bool,
     reasoning_source: Option<String>,
+    message_phase: Option<String>,
+    text_citations: BTreeMap<(u64, u64), crate::urp::Citation>,
+    content_nodes: BTreeMap<u64, Node>,
 }
 
 fn merge_reasoning_source(dst: &mut Option<String>, source: Option<String>) {
@@ -317,7 +359,9 @@ fn responses_stream_error_parts(
         .and_then(|status| u16::try_from(status).ok())
         .unwrap_or(StatusCode::BAD_REQUEST.as_u16());
     let terminal_error = StreamTerminalError {
-        code: code.clone().unwrap_or_else(|| "upstream_stream_error".to_string()),
+        code: code
+            .clone()
+            .unwrap_or_else(|| "upstream_stream_error".to_string()),
         message: message.clone(),
         http_status,
         error_type: error_type.clone(),

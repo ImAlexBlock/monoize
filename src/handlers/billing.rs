@@ -338,6 +338,8 @@ pub(super) fn calculate_charge_components(
     pricing: &ModelPricing,
     provider_multiplier: Multiplier,
 ) -> Option<ChargeComponents> {
+    let aggregate = usage.accounting();
+    let usage = aggregate.as_ref();
     let prompt_tokens = i128::from(usage.input_tokens);
     let completion_tokens = i128::from(usage.output_tokens);
     let cached_tokens = i128::from(usage.cached_tokens().unwrap_or(0));
@@ -453,6 +455,8 @@ pub(super) fn calculate_charge_nano(
 }
 
 pub(super) fn build_usage_breakdown(usage: &urp::Usage) -> Value {
+    let aggregate = usage.accounting();
+    let usage = aggregate.as_ref();
     let input_details = usage.input_details.as_ref();
     let output_details = usage.output_details.as_ref();
 
@@ -1581,6 +1585,8 @@ pub(super) fn calculate_rate_matrix_charge_components(
     provider_multiplier: Multiplier,
     requested_usage_classes: &[String],
 ) -> Result<MatrixChargeComponents, String> {
+    let aggregate = usage.accounting();
+    let usage = aggregate.as_ref();
     let input_details = usage.input_details.as_ref();
     let output_details = usage.output_details.as_ref();
     // One FX snapshot and one peak-window determination for the whole request (MB-C1b,
@@ -1899,6 +1905,8 @@ async fn maybe_charge_usage_with_output(
     response_service_tier: Option<&str>,
     request_id: Option<&str>,
 ) -> AppResult<ChargeComputation> {
+    let aggregate = usage.accounting();
+    let usage = aggregate.as_ref();
     let resolution = match attempt.billing_rate_resolution.clone() {
         Some(resolution) => Some(resolution),
         None => match attempt.pricing_profile.as_deref() {

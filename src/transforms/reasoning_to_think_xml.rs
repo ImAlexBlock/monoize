@@ -96,6 +96,9 @@ impl Transform for ReasoningToThinkXmlTransform {
                     } = node
                     {
                         *node = Node::Text {
+                            logprobs: None,
+                            signature: None,
+                            citations: Vec::new(),
                             id: None,
                             role: OrdinaryRole::Assistant,
                             content: format!("<{0}>{1}</{0}>", cfg.tag, content),
@@ -115,8 +118,10 @@ impl Transform for ReasoningToThinkXmlTransform {
 fn convert_stream_reasoning_to_xml(event: &mut UrpStreamEvent, tag: &str) {
     match event {
         UrpStreamEvent::NodeStart { header, .. } => {
-            if let NodeHeader::Reasoning { id } = header {
+            if let NodeHeader::Reasoning { metadata: _, id } = header {
                 *header = NodeHeader::Text {
+                    signature: None,
+                    citations: Vec::new(),
                     id: id.take(),
                     role: OrdinaryRole::Assistant,
                     phase: None,
@@ -132,6 +137,9 @@ fn convert_stream_reasoning_to_xml(event: &mut UrpStreamEvent, tag: &str) {
             } = delta
             {
                 *delta = NodeDelta::Text {
+                    logprobs: None,
+                    signature: None,
+                    citations: Vec::new(),
                     content: format!("<{tag}>{content}</{tag}>"),
                 };
             }

@@ -69,7 +69,7 @@ DOC-20. The navigation tree MUST contain exactly these top-level entries in this
 8. Transforms (`transforms/`)
 9. Troubleshooting (`troubleshooting.mdx`)
 
-DOC-21. The Transforms section MUST contain one overview page plus one page per built-in transform. The set of transform pages MUST equal the canonical transform ID list in `spec/urp-transform-system.spec.md` TF-7 (36 transforms). Each transform page filename MUST equal its canonical `type_id` plus the locale suffix.
+DOC-21. The Transforms section MUST contain one overview page plus one page per built-in transform. The set of transform pages MUST equal the canonical transform ID list in `spec/urp-transform-system.spec.md` TF-7 (40 transforms). Each transform page filename MUST equal its canonical `type_id` plus the locale suffix.
 
 DOC-22. Each transform page MUST state: the transform `type_id`, the phase(s), the supported scopes, every config property with its type and default, at least one JSON config example, and at least one situation in which an operator should enable the transform.
 

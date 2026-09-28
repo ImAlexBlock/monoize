@@ -184,6 +184,8 @@ mod tests {
 
     fn image_node(role: OrdinaryRole, marker: &str) -> Node {
         Node::Image {
+            metadata: Default::default(),
+
             id: Some(format!("img-{marker}")),
             role,
             source: ImageSource::Url {
@@ -196,6 +198,10 @@ mod tests {
 
     fn text_node_with_id(role: OrdinaryRole, content: &str) -> Node {
         Node::Text {
+            citations: Default::default(),
+            logprobs: Default::default(),
+            signature: Default::default(),
+
             id: None,
             role,
             content: content.to_string(),
@@ -265,6 +271,9 @@ mod tests {
     #[test]
     fn skips_tool_nodes_and_lands_on_the_next_user_run() {
         let tool_call = Node::ToolCall {
+            namespace: Default::default(),
+            signature: Default::default(),
+
             id: None,
             tool_type: crate::urp::ToolCallType::Function,
             call_id: "call-1".to_string(),
@@ -273,6 +282,10 @@ mod tests {
             extra_body: HashMap::new(),
         };
         let tool_result = Node::ToolResult {
+            name: Default::default(),
+            namespace: Default::default(),
+            signature: Default::default(),
+
             id: None,
             tool_type: crate::urp::ToolCallType::Function,
             call_id: "call-1".to_string(),
@@ -349,6 +362,8 @@ mod tests {
         let user_image = image_node(OrdinaryRole::User, "keep");
         let system_image = image_node(OrdinaryRole::System, "sys");
         let audio = Node::Audio {
+            metadata: Default::default(),
+
             id: None,
             role: OrdinaryRole::Assistant,
             source: AudioSource::Url {
@@ -357,6 +372,8 @@ mod tests {
             extra_body: HashMap::new(),
         };
         let file = Node::File {
+            metadata: Default::default(),
+
             id: None,
             role: OrdinaryRole::Assistant,
             source: FileSource::FileId {

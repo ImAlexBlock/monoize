@@ -48,9 +48,9 @@ Request body MUST be JSON. Monoize MUST parse the following fields:
 | `model` | string | YES | — | Logical model name for routing. |
 | `n` | integer | NO | `1` | Number of images to generate. MUST be ≥ 1. |
 
-IG1. All other fields present in the request body (including but not limited to `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation`, `style`, `response_format`, `user`) MUST be preserved as URP `extra_body` fields on the generated URP request. Monoize MUST NOT interpret, validate, or reject these fields.
+IG1. Recognized image controls MUST populate `UrpRequest.image_generation` under MT9d of `media-transport.spec.md`. Unknown fields and `user` MUST remain in `extra_body` and follow upstream whitelist rules. Invalid typed image controls MUST return `400 invalid_request` before dispatch.
 
-IG2. `response_format` field: Monoize MUST NOT interpret this field. It is preserved in `extra_body` and subject to the same whitelist filtering as other extra fields (per `unified_responses_proxy.spec.md` §7.7.1). The downstream Image API response always uses `b64_json` format (see §5).
+IG2. The Images `response_format` field belongs to typed image options, not the text structured-output format. The downstream Image API response always uses `b64_json` format (see §5).
 
 ### 3.2 `POST /v1/images/edits`
 
@@ -86,11 +86,11 @@ IM2. `prompt` → `UrpRequest.input` as one `Node::Text` with `role: User` and t
 
 IM3. The downstream Image API contract is non-streaming. Monoize MAY use either `stream: Some(false)` or `stream: Some(true)` on the internal upstream URP request, provided the final downstream response remains a single non-streaming Image API JSON response. If a request-phase transform sets `stream = true`, Monoize MUST collect the upstream stream internally and MUST NOT return downstream SSE for Image API endpoints.
 
-IM4. All remaining fields from the request body → `UrpRequest.extra_body`. The fields `prompt`, `model`, and `n` MUST be excluded from `extra_body`.
+IM4. Each subrequest MUST carry typed image options under IG1. The fields `prompt`, `model`, and `n` MUST be excluded from `extra_body`. Each subrequest requests one image; the handler owns fan-out for downstream `n`.
 
 IM5. `tools`, `tool_choice`, `temperature`, `top_p`, `max_output_tokens`, `reasoning`, `response_format`, and `user` on the URP request MUST be left as `None`/absent. Monoize MUST NOT inject any `tools` or `tool_choice` values at Image API request mapping time. Users who need specific tool injection (e.g. `image_generation` tool for OpenAI Responses upstream) MUST configure request-phase transforms on the provider or API key.
 
-IM5b. If the selected upstream attempt has effective upstream type `responses`, the Images API compatibility path SHOULD use a request-phase transform that inserts a Responses `image_generation` tool and forces a specific `tool_choice` for that tool. Without a forced tool choice, a text-capable Responses model MAY return only assistant text, which produces no Image API data item under §5.1.
+IM5b. If the selected upstream attempt has effective upstream type `responses`, configure a request-phase transform that inserts a Responses `image_generation` tool. A request without that tool MUST fail with `400 unsupported_media` before dispatch. A forced image `tool_choice` is optional. Without it, a text-capable Responses model MAY return only assistant text, which produces no Image API data item under §5.1.
 
 IM5a. If a routed upstream provider only surfaces generated image outputs on the streaming Responses event channel and omits them from the terminal non-streaming response body, Monoize MAY internally execute the sub-request as a streaming upstream request, collect the emitted URP stream events into a final `UrpResponse`, and continue response extraction from that collected `UrpResponse`.
 
@@ -102,7 +102,7 @@ IM6. `model` → `UrpRequest.model`.
 
 IM7. The `image` file MUST be mapped to one `Node::Image` with `role: User` and `ImageSource::Base64 { media_type, data }`.
 
-IM8. If `mask` is present, the mask file MUST be mapped to a second `Node::Image` with `role: User` and `ImageSource::Base64 { media_type, data }`, after the source image.
+IM8. If `mask` is present, map it to `Node::Image` with `role: User`, `ImageSource::Base64 { media_type, data }`, and `metadata.image_mask = true`, after source images.
 
 IM9. `prompt` MUST be mapped to one `Node::Text` with `role: User`, before the image node(s).
 
@@ -110,7 +110,7 @@ IM10. Node order in `UrpRequest.input` MUST be: `[prompt_text, image, extra_imag
 
 IM11. The downstream Image API contract is non-streaming. Monoize MAY use either `stream: Some(false)` or `stream: Some(true)` internally for edit sub-requests, provided the final downstream response remains a single non-streaming Image API JSON response. If a request-phase transform sets `stream = true`, Monoize MUST collect the upstream stream internally and MUST NOT return downstream SSE for Image API endpoints.
 
-IM12. All remaining text fields → `UrpRequest.extra_body`. The fields `prompt`, `model`, `n`, `image`, and `mask` MUST be excluded from `extra_body`.
+IM12. Remaining text fields MUST follow IG1 after IE1 coercion. The fields `prompt`, `model`, `n`, `image`, and `mask` MUST be excluded from `extra_body`.
 
 IM13. Same as IM5: no `tools`/`tool_choice` injection.
 
