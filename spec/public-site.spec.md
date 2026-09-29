@@ -128,7 +128,7 @@ PS-W1. The welcome page MUST render these sections in this order:
 
 1. Product statement and two actions.
 2. A supported-model marquee and one API request example.
-3. A model list.
+3. Model cards.
 4. A capability list.
 5. A summary statistics strip.
 6. A frequently-asked-questions list.

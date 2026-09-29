@@ -163,22 +163,18 @@ export function WelcomePage() {
           <h2 className="mt-3 text-3xl font-medium tracking-tight sm:text-4xl">{t("publicSite.home.modelsTitle")}</h2>
           <p className="mt-3 text-base leading-7 text-muted-foreground">{t("publicSite.home.modelsDescription")}</p>
         </ScrollReveal>
-        <ScrollReveal className="mt-9 border-t border-border">
-          <div className="hidden grid-cols-[1.2fr_0.9fr_2fr_1.2fr] gap-5 border-b border-border py-4 font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground sm:grid">
-            <span>{t("publicSite.home.modelsColModel")}</span>
-            <span>{t("publicSite.home.modelsColProvider")}</span>
-            <span>{t("publicSite.home.modelsColDesc")}</span>
-            <span className="text-right">{t("publicSite.home.modelsColPrice")}</span>
-          </div>
+        <ScrollReveal className="mt-9 grid gap-4 sm:grid-cols-3">
           {models.map((model) => (
-            <div key={model.name} className="grid gap-x-5 gap-y-1 border-b border-border py-4 transition-colors hover:bg-muted/30 sm:grid-cols-[1.2fr_0.9fr_2fr_1.2fr] sm:items-baseline">
-              <span className="text-base font-medium tracking-tight">{model.name}</span>
-              <span className="text-sm text-muted-foreground">{model.provider}</span>
-              <span className="text-sm text-muted-foreground">{t(`publicSite.home.${model.descKey}`)}</span>
-              <span className="font-mono text-[13px] text-muted-foreground sm:text-right">{t("publicSite.home.pricePlaceholder")}</span>
+            <div key={model.name} className="rounded-xl border border-border bg-card p-5 transition-colors hover:border-foreground/25">
+              <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{model.provider}</div>
+              <h3 className="mt-3 text-lg font-medium tracking-tight">{model.name}</h3>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">{t(`publicSite.home.${model.descKey}`)}</p>
+              <div className="mt-5 font-mono text-[13px] text-muted-foreground">{t("publicSite.home.pricePlaceholder")}</div>
             </div>
           ))}
-          <Link to="/marketplace" className="mt-5 inline-block text-sm text-muted-foreground transition-colors hover:text-foreground">{t("publicSite.home.modelsMore")}</Link>
+        </ScrollReveal>
+        <ScrollReveal className="mt-5">
+          <Link to="/marketplace" className="inline-block text-sm text-muted-foreground transition-colors hover:text-foreground">{t("publicSite.home.modelsMore")}</Link>
         </ScrollReveal>
       </section>
 
