@@ -27,14 +27,14 @@ export function PublicLayout() {
   const siteName = resolvePublicBrandName(site?.site_name || "LingShenAI Console");
 
   return (
-    <div className="h-dvh overflow-y-auto overflow-x-hidden bg-background text-foreground">
+    <div className="public-surface h-dvh overflow-y-auto overflow-x-hidden bg-background text-foreground">
       <a
         href="#public-content"
         className="fixed left-4 top-2 z-[60] -translate-y-20 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground focus:translate-y-0 focus:outline-none focus:ring-[3px] focus:ring-ring"
       >
         {t("publicSite.skipToContent")}
       </a>
-      <header className="sticky top-0 z-40 border-b bg-background/92 backdrop-blur-xl">
+      <header className="sticky top-0 z-40 border-b bg-background">
         <nav className="mx-auto flex min-h-16 max-w-7xl items-center gap-3 px-4 sm:px-6 lg:px-8" aria-label={t("publicSite.primaryNavigation")}>
           <Link to="/" className="flex min-h-11 min-w-0 items-center gap-3 rounded-md focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring">
             <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border bg-card p-1.5 text-foreground">

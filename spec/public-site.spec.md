@@ -171,12 +171,15 @@ and truncates once at final scaling.
 
 ## 6. Visual and accessibility contract
 
-PS-V1. Public surfaces MUST use the Paper Console direction and the tokens defined by
-`frontend-design-system.spec.md`. They MUST use the existing neutral background, blue
-primary color, serif display font, sans-serif body font, and code font.
+PS-V1. Public surfaces MUST use the public editorial direction defined by `design.md`:
+a warm paper background, a terracotta primary token, near-square corners, serif display
+type, sans-serif body type, and monospace code. The public tokens are scoped to
+`PublicLayout` and MUST NOT change the Console tokens defined by
+`frontend-design-system.spec.md`.
 
-PS-V2. Public surfaces MUST NOT introduce another brand palette. Icons MUST come from
-Lucide or the existing product icon set. Emoji MUST NOT serve as interface icons.
+PS-V2. Public surfaces MUST NOT introduce a brand palette beyond the public editorial
+tokens in `design.md`. Icons MUST come from Lucide or the existing product icon set.
+Emoji MUST NOT serve as interface icons.
 
 PS-V3. Motion MUST animate only `transform` and `opacity`. Interaction duration MUST be
 from 150 through 300 milliseconds. `prefers-reduced-motion: reduce` MUST disable positional

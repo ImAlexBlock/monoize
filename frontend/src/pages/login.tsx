@@ -100,7 +100,7 @@ export function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-dvh flex-col items-center justify-center p-4">
+    <div className="public-surface flex min-h-dvh flex-col items-center justify-center p-4">
       <motion.div
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -155,7 +155,7 @@ export function LoginPage() {
           <CardHeader className="text-center">
             <motion.div
               variants={itemVariants}
-              className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border bg-background p-2 text-foreground"
+              className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-md border bg-background p-2 text-foreground"
             >
               <MonoizeLogo className="h-full w-full" />
             </motion.div>

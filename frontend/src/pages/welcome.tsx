@@ -51,8 +51,8 @@ function SectionIntro({
         transition={{ duration: 0.3 }}
         className="relative z-10"
       >
-        <p className="font-mono text-sm text-primary">{label}</p>
-        <h2 className="mt-3 font-display text-3xl font-semibold">{title}</h2>
+        <p className="font-mono text-xs uppercase tracking-[0.22em] text-primary">{label}</p>
+        <h2 className="mt-3 font-display text-3xl font-semibold leading-tight sm:text-4xl">{title}</h2>
         {children}
       </motion.div>
     </div>
@@ -69,13 +69,12 @@ export function WelcomePage() {
   return (
     <div>
       <section className="relative isolate overflow-hidden border-b">
-        <div className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(circle_at_70%_25%,hsl(var(--primary)/0.14),transparent_32%),linear-gradient(to_right,hsl(var(--border)/0.35)_1px,transparent_1px),linear-gradient(to_bottom,hsl(var(--border)/0.35)_1px,transparent_1px)] bg-[size:auto,32px_32px,32px_32px] [mask-image:linear-gradient(to_bottom,black,transparent)]" />
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.24 }} className="mx-auto grid max-w-7xl gap-12 px-4 py-20 sm:px-6 sm:py-28 lg:grid-cols-[1.1fr_0.9fr] lg:items-center lg:px-8">
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.24 }} className="mx-auto grid max-w-6xl gap-12 px-4 py-20 sm:px-6 sm:py-28 lg:grid-cols-[1.15fr_0.85fr] lg:items-center lg:px-8">
           <div className="max-w-3xl">
-            <p className="mb-5 font-mono text-sm font-medium text-primary">API GATEWAY · MODEL ROUTING</p>
+            <p className="mb-6 font-mono text-xs font-medium uppercase tracking-[0.22em] text-primary">API GATEWAY · MODEL ROUTING</p>
             {isLoading ? <><Skeleton className="h-14 w-full max-w-xl" /><Skeleton className="mt-3 h-14 w-4/5 max-w-lg" /><Skeleton className="mt-7 h-6 w-full max-w-2xl" /></> : (
               <>
-                <h1 className="font-display text-4xl font-semibold leading-tight tracking-tight sm:text-6xl">{t("publicSite.welcome.title", { siteName })}</h1>
+                <h1 className="font-display text-5xl font-semibold leading-[1.05] tracking-tight sm:text-7xl">{t("publicSite.welcome.title", { siteName })}</h1>
                 <p className="mt-6 max-w-2xl text-lg leading-8 text-muted-foreground">{site?.site_description || t("publicSite.welcome.description", { siteName })}</p>
               </>
             )}
@@ -84,14 +83,14 @@ export function WelcomePage() {
               <Button asChild size="lg" variant="outline" className="min-h-11"><Link to="/apidocs">{t("publicSite.welcome.readDocs")}</Link></Button>
             </div>
           </div>
-          <Card className="overflow-hidden bg-card/90 shadow-sm">
+          <Card className="overflow-hidden bg-card">
             <div className="flex items-center gap-2 border-b px-4 py-3"><span className="size-2.5 rounded-full bg-destructive/70" /><span className="size-2.5 rounded-full bg-warning/70" /><span className="size-2.5 rounded-full bg-success/70" /><span className="ml-2 font-mono text-xs text-muted-foreground">request.sh</span></div>
             <pre className="overflow-x-auto p-5 text-sm leading-7"><code>{`curl ${exampleBase}/responses \\\n  -H "Authorization: Bearer $LYNSHEN_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gpt-5","input":"Hello"}'`}</code></pre>
           </Card>
         </motion.div>
       </section>
 
-      <section className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
+      <section className="mx-auto max-w-6xl px-4 py-16 sm:px-6 lg:px-8">
         <SectionIntro index="01" label="API" title={t("publicSite.welcome.familiesTitle")} className="max-w-2xl">
           <p className="mt-3 text-base leading-7 text-muted-foreground">{t("publicSite.welcome.familiesDescription")}</p>
         </SectionIntro>
@@ -101,7 +100,7 @@ export function WelcomePage() {
       </section>
 
       <section className="border-y bg-muted/35">
-        <div className="mx-auto grid max-w-7xl gap-8 px-4 py-16 sm:px-6 lg:grid-cols-2 lg:px-8">
+        <div className="mx-auto grid max-w-6xl gap-8 px-4 py-16 sm:px-6 lg:grid-cols-2 lg:px-8">
           <SectionIntro index="02" label="GROUPS" title={t("publicSite.welcome.pricingTitle")}>
             <p className="mt-4 max-w-xl text-base leading-7 text-muted-foreground">{t("publicSite.welcome.pricingDescription")}</p>
           </SectionIntro>
@@ -109,7 +108,7 @@ export function WelcomePage() {
         </div>
       </section>
 
-      <section className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
+      <section className="mx-auto max-w-6xl px-4 py-16 sm:px-6 lg:px-8">
         <SectionIntro index="03" label="CONNECT" title={t("publicSite.welcome.stepsTitle")}>
           <p className="mt-3 text-base leading-7 text-muted-foreground">{t("publicSite.welcome.stepsDescription")}</p>
         </SectionIntro>
@@ -118,7 +117,7 @@ export function WelcomePage() {
         </ol>
       </section>
 
-      <section className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
+      <section className="mx-auto max-w-6xl px-4 py-16 sm:px-6 lg:px-8">
         <Card className="flex flex-col gap-6 p-7 sm:flex-row sm:items-center sm:justify-between"><div className="flex gap-4"><ShieldCheck className="mt-1 size-6 shrink-0 text-success" /><div><h2 className="font-display text-2xl font-semibold">{t("publicSite.welcome.statusTitle")}</h2><p className="mt-2 text-muted-foreground">{t("publicSite.welcome.statusDescription")}</p></div></div><Button asChild variant="outline" className="min-h-11 shrink-0"><Link to="/status">{t("publicSite.welcome.viewStatus")}<CheckCircle2 /></Link></Button></Card>
       </section>
     </div>

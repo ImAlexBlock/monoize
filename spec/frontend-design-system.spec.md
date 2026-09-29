@@ -6,9 +6,10 @@ DS-P1. `PublicLayout`, the welcome page, API Docs, public Marketplace, and publi
 MUST use the existing semantic color, type, card, form, dialog, loading, empty-state,
 motion, localization, and accessibility primitives in this specification.
 
-DS-P2. Public surfaces use the Paper Console direction: neutral paper-like surfaces, the
-existing blue primary token, serif display type, sans-serif body type, and monospace code.
-They MUST NOT add a second brand palette or raw repeated status colors.
+DS-P2. Public surfaces use the public editorial direction defined by `design.md`: warm
+paper-like surfaces, a terracotta primary token scoped to `PublicLayout`, serif display
+type, sans-serif body type, and monospace code. They MUST NOT add a brand palette beyond
+those public tokens, and MUST NOT use raw repeated status colors.
 
 DS-P3. Marketplace offer details MUST use the shared modal primitives and satisfy focus
 trap, Escape close, focus restoration, viewport-bounded body scrolling, and reduced-motion
