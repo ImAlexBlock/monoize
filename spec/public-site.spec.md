@@ -138,6 +138,18 @@ PS-W2. The welcome page MUST NOT display model, Provider, Channel, or Group coun
 PS-W3. The primary actions MUST link to Model Marketplace and API Docs. The status action
 MUST link to `/status`.
 
+PS-W4. Each numbered welcome-page section (`01` through `04`) MUST render its section index
+as a decorative marker:
+
+- the marker MUST be typeset larger than the section heading and MUST render behind the
+  section label, heading, and description;
+- the marker MUST use the `primary` token at low opacity and MUST NOT reduce the contrast of
+  the section text below WCAG AA (`PS-V5`);
+- the marker MUST be hidden from assistive technology and MUST NOT receive pointer events;
+- the marker and the section intro block MUST enter with an opacity fade of at most 300 ms
+  when the section scrolls into view;
+- the fade MUST NOT use positional motion (`PS-V3`).
+
 ## 5. API documentation page
 
 PS-D1. `/apidocs` MUST document OpenAI Responses, OpenAI Chat Completions, Anthropic
@@ -192,8 +204,11 @@ nouns, endpoint paths, and environment-variable names MUST remain English in eve
 PS-L3. The built-in `site_name` default MUST be `LynShen Console`. The static HTML fallback
 title MUST be `LynShen Console`.
 
-PS-L4. The login page, Console layout, welcome page, Marketplace, API Docs, and status page
-MUST render the runtime `site_name`.
+PS-L4. The login page and Console layout MUST render the runtime `site_name`. The welcome
+page, Marketplace, API Docs, status page, and usage-ranking page MUST render the public
+brand name. The public brand name equals `site_name` with one trailing ` Console` suffix
+removed (ASCII case-insensitive, surrounding whitespace ignored). When removal produces an
+empty string, the runtime `site_name` MUST be used unchanged.
 
 PS-L5. The migration MUST replace a stored site name only when it exactly equals an old
 built-in default. It MUST preserve every administrator-defined value.

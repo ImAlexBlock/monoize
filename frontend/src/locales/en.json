@@ -2,7 +2,7 @@
   "publicSite": {
     "skipToContent": "Skip to content",
     "primaryNavigation": "Public navigation",
-    "footer": "One endpoint for supported API protocols.",
+    "footer": "A stable, affordable large-model aggregation and relay provider.",
     "nav": {
       "home": "Home",
       "marketplace": "Model Marketplace",
@@ -39,23 +39,24 @@
       "loadFailed": "Usage ranking failed to load"
     },
     "welcome": {
-      "title": "Connect once. Route every supported model with {{siteName}}.",
-      "description": "Use one API key and one Base URL for supported model providers.",
-      "exploreModels": "Explore models",
-      "readDocs": "Read API Docs",
+      "title": "Set up once. Run leading models worldwide with {{siteName}}.",
+      "description": "Code, roleplay, image and video generation. Endless ideas and great prices, all with {{siteName}}.",
+      "exploreModels": "Get started",
+      "readDocs": "Integration guide",
       "familiesTitle": "Use the protocol your application already supports.",
-      "familiesDescription": "Send raw HTTP requests through OpenAI, Anthropic, Gemini, and image endpoints.",
-      "pricingTitle": "Choose a Group before you send traffic.",
-      "pricingDescription": "Each Group lists its own available models and price ranges. The same model may have a different price in another Group.",
+      "familiesDescription": "Use widely adopted API standards, including image generation.",
+      "pricingTitle": "Multiple model groups",
+      "pricingDescription": "Each group has its own models and price range.",
       "groupTitle": "Group routing",
       "groupDescription": "A Group selects the configured Provider route for an API key.",
       "priceTitle": "Provider prices",
       "priceDescription": "Each visible price comes from the Provider and its configured multiplier.",
       "stepsTitle": "Connect in three steps.",
+      "stepsDescription": "One, two, three. Start now!",
       "codeTitle": "Use raw HTTP from any runtime.",
       "codeDescription": "Set the authorization header. Send JSON to the endpoint that matches your protocol.",
-      "statusTitle": "Check Provider status before an incident.",
-      "statusDescription": "View the current state of each public Provider inside its Group.",
+      "statusTitle": "Check service status anytime, anywhere.",
+      "statusDescription": "We work to provide a stable, high-quality service.",
       "viewStatus": "View status"
     },
     "families": {

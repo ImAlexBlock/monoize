@@ -2,7 +2,7 @@
   "publicSite": {
     "skipToContent": "本文へ移動",
     "primaryNavigation": "公開ナビゲーション",
-    "footer": "1 つの入口から対応済み API プロトコルを呼び出します。",
+    "footer": "安定・低価格の大規模モデル集約中継プロバイダー",
     "nav": {
       "home": "ホーム",
       "marketplace": "モデルマーケット",
@@ -39,23 +39,24 @@
       "loadFailed": "使用量ランキングを読み込めません"
     },
     "welcome": {
-      "title": "接続は一度だけ。{{siteName}} からすべての対応モデルを呼び出します。",
-      "description": "1 つの API キーと 1 つの Base URL で対応済みモデル Provider に接続します。",
-      "exploreModels": "モデルを見る",
-      "readDocs": "API ドキュメントを読む",
+      "title": "設定は一度だけ。{{siteName}} で国内外のトップモデルを利用できます。",
+      "description": "コーディング、ロールプレイ、画像・動画生成。アイデアは無限、料金もお得。すべて {{siteName}} で。",
+      "exploreModels": "今すぐ始める",
+      "readDocs": "導入ガイド",
       "familiesTitle": "アプリが対応済みのプロトコルをそのまま使用します。",
-      "familiesDescription": "OpenAI、Anthropic、Gemini、画像の各エンドポイントへ生の HTTP リクエストを送信します。",
-      "pricingTitle": "トラフィックを送る前に Group を選択します。",
-      "pricingDescription": "各 Group は利用可能なモデルと価格範囲を個別に表示します。同じモデルでも別の Group では価格が異なる場合があります。",
+      "familiesDescription": "広く使われる API 標準に対応し、画像生成フォーマットにも対応します。",
+      "pricingTitle": "複数のモデルグループ",
+      "pricingDescription": "グループごとに利用できるモデルと価格帯が異なります。",
       "groupTitle": "Group ルーティング",
       "groupDescription": "Group は API キーに設定済み Provider ルートを選択します。",
       "priceTitle": "Provider 価格",
       "priceDescription": "各公開価格は Provider 価格と設定済み倍率から決まります。",
       "stepsTitle": "3 ステップで接続します。",
+      "stepsDescription": "ワン、ツー、スリーで始めましょう！",
       "codeTitle": "任意のランタイムから生の HTTP を送信します。",
       "codeDescription": "認証ヘッダーを設定します。プロトコルに対応するエンドポイントへ JSON を送信します。",
-      "statusTitle": "障害の前に Provider 状態を確認します。",
-      "statusDescription": "各 Group 内の公開 Provider の現在の状態を確認します。",
+      "statusTitle": "いつでもどこでもサービス状態を確認",
+      "statusDescription": "安定した高品質なサービスを提供できるよう努めます。",
       "viewStatus": "状態を見る"
     },
     "families": {

@@ -2,7 +2,7 @@
   "publicSite": {
     "skipToContent": "跳到正文",
     "primaryNavigation": "公開導覽",
-    "footer": "使用一個入口呼叫已支援的 API 協定。",
+    "footer": "穩定、優惠的大模型聚合中轉提供者",
     "nav": {
       "home": "首頁",
       "marketplace": "模型廣場",
@@ -39,23 +39,24 @@
       "loadFailed": "無法載入用量排行"
     },
     "welcome": {
-      "title": "只連線一次。使用 {{siteName}} 呼叫每個已支援的模型。",
-      "description": "使用一個 API 金鑰和一個 Base URL 連接已支援的模型 Provider。",
-      "exploreModels": "查看模型",
-      "readDocs": "閱讀 API 文件",
+      "title": "一次設定，使用 {{siteName}} 暢享國內外頂尖模型",
+      "description": "程式開發、角色扮演、圖片與影片生成，靈感無限、優惠多多，一切盡在 {{siteName}}",
+      "exploreModels": "馬上開始",
+      "readDocs": "接入指南",
       "familiesTitle": "繼續使用應用程式已支援的協定。",
-      "familiesDescription": "透過 OpenAI、Anthropic、Gemini 和影像端點傳送原始 HTTP 請求。",
-      "pricingTitle": "傳送流量前先選擇 Group。",
-      "pricingDescription": "每個 Group 獨立顯示可用模型和價格區間。同一個模型在其他 Group 中可以有不同價格。",
+      "familiesDescription": "支援廣泛使用的 API 標準接入，同時支援影像生成格式。",
+      "pricingTitle": "多種模型組",
+      "pricingDescription": "每個分組有不同的模型和價格區間。",
       "groupTitle": "Group 路由",
       "groupDescription": "Group 為 API 金鑰選擇已設定的 Provider 路由。",
       "priceTitle": "Provider 價格",
       "priceDescription": "每個公開價格由 Provider 價格和已設定的倍率決定。",
       "stepsTitle": "分三步完成連線。",
+      "stepsDescription": "一、二、三，開始使用吧！",
       "codeTitle": "從任何執行環境傳送原始 HTTP。",
       "codeDescription": "設定認證標頭。向與協定相符的端點傳送 JSON。",
-      "statusTitle": "在故障前檢查 Provider 狀態。",
-      "statusDescription": "查看每個 Group 內公開 Provider 的目前狀態。",
+      "statusTitle": "隨時隨地查看服務狀態",
+      "statusDescription": "我們會盡最大努力為您提供穩定、優質的服務！",
       "viewStatus": "查看狀態"
     },
     "families": {

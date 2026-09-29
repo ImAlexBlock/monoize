@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useTheme } from "@/hooks/use-theme";
 import { toggleLanguage } from "@/i18n";
 import { usePublicSiteSettings } from "@/lib/swr";
+import { resolvePublicBrandName } from "@/lib/public-site";
 import { cn } from "@/lib/utils";
 
 const links = [
@@ -23,7 +24,7 @@ export function PublicLayout() {
   const { data: site, isLoading } = usePublicSiteSettings();
   const { resolvedTheme, setTheme } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
-  const siteName = site?.site_name || "LynShen Console";
+  const siteName = resolvePublicBrandName(site?.site_name || "LynShen Console");
 
   return (
     <div className="h-dvh overflow-y-auto overflow-x-hidden bg-background text-foreground">
