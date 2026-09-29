@@ -614,13 +614,16 @@ async fn forward_stream_typed_once(
                     upstream_path_for_model(attempt.provider_type, &req_attempt.model, false);
                 let http = client_http_for_attempt(&state, &attempt)?;
                 mark_plan_routed_before_dispatch(&funding_scope).await?;
-                let call = upstream::call_upstream_with_timeout_and_headers(
+                let stream_idle_timeout_ms =
+                    state.monoize_runtime.read().await.stream_idle_timeout_ms;
+                let call = upstream::call_upstream_generation_with_timeout_and_headers(
                     &http,
                     &provider,
                     &attempt.api_key,
                     &path,
                     &upstream_body,
                     attempt.request_timeout_ms,
+                    stream_idle_timeout_ms,
                     &attempt_extra_headers(&attempt, &upstream_body),
                 )
                 .await;
@@ -1066,7 +1069,7 @@ async fn forward_stream_typed_once(
                 &attempt.api_key,
                 &path,
                 &upstream_body,
-                attempt.request_timeout_ms.saturating_mul(10).max(600_000),
+                upstream::generation_header_timeout_ms(attempt.request_timeout_ms),
                 &attempt_extra_headers(&attempt, &upstream_body),
             )
             .await;

@@ -364,8 +364,29 @@ After successful headers,
 the HTTP client MUST impose no total response lifetime limit. Stream decoding MUST
 continue to enforce `monoize_stream_idle_timeout_ms` between upstream events. These rules
 MUST apply to downstream streaming, image streaming, and upstream streams collected into
-non-streaming responses. Non-streaming upstream requests MUST retain their existing total
-request timeout.
+non-streaming responses.
+
+STRM-3b. A non-streaming upstream generation request is a request to the generation
+endpoint that `upstream_path_for_model(provider_type, model, false)` returns, or to
+`/v1/responses/compact`, sent with `stream` absent or `false`. This includes the buffered
+upstream call made for a downstream streaming request. For such a request:
+
+1. The wait for response headers MUST be bounded by the STRM-3a budget
+   `max(saturating_mul(request_timeout_ms, 10), 600000)` milliseconds, and reading a
+   non-success error body MUST share that deadline.
+2. After successful headers, the HTTP client MUST impose no total response lifetime
+   limit. Reading the response body MUST fail when no body chunk arrives within
+   `monoize_stream_idle_timeout_ms` of the previous chunk, or of the headers for the
+   first chunk. That failure is a Network-kind upstream error.
+3. The response-size cap `MONOIZE_UPSTREAM_RESPONSE_MAX_BYTES` (RRB-R1 of `spec/runtime-resource-bounds.spec.md`) still applies.
+
+Rationale: a non-streaming upstream sends headers only after it has generated the
+complete output, so the header wait grows with input length. A 30000 ms total limit
+aborts long-context requests that are still in progress.
+
+STRM-3c. Upstream requests other than generation requests (embeddings, multipart image
+edits, active probes, and model discovery) MUST keep a total request timeout of
+`request_timeout_ms`.
 
 STRM-4. If a partial stream later fails with a breaker-relevant terminal failure — an in-stream terminal error event classified by RTA-5a, RTA-5b, or RTA-6, or a stream adapter failure whose error code starts with `upstream_` (idle timeout, stream decode failure, protocol error, missing stream terminal) — Monoize MUST record exactly one passive health failure for the serving Channel using the attempt's health key. HTTP `429` and RTA-5b rate-limit signals have the RateLimited class. An RTA-5a signal has the Persistent class and MUST trip immediately. Other qualifying events and adapter failures have the Transient class. A mid-stream failure MUST NOT trigger a shared-origin blast and MUST NOT mark peer Channels. An event outside these classifications MUST NOT update health. An adapter failure whose error code does not start with `upstream_` (internal transform or encode failure) MUST NOT update health and MUST NOT clear the affinity binding.
 

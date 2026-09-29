@@ -145,13 +145,16 @@ pub async fn compact_response(
                 attempt.session_affinity_value =
                     resolve_session_affinity_value(&attempt, &upstream_body);
                 mark_plan_routed_before_dispatch(&funding_scope).await?;
-                let result = upstream::call_upstream_with_timeout_and_headers(
+                let stream_idle_timeout_ms =
+                    state.monoize_runtime.read().await.stream_idle_timeout_ms;
+                let result = upstream::call_upstream_generation_with_timeout_and_headers(
                     &http,
                     &provider,
                     &attempt.api_key,
                     "/v1/responses/compact",
                     &upstream_body,
                     attempt.request_timeout_ms,
+                    stream_idle_timeout_ms,
                     &extra_headers,
                 )
                 .await;

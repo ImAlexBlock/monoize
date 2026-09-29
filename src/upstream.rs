@@ -291,6 +291,62 @@ pub async fn call_upstream_raw_with_timeout_and_headers(
     .await
 }
 
+/// STRM-3b: non-streaming generation call. A non-streaming upstream usually sends
+/// its response headers only after the whole completion is generated, so the
+/// header wait scales with input length and uses the STRM-3a streaming budget
+/// instead of `request_timeout_ms`. Once headers arrive, the body read is bounded
+/// by `idle_timeout_ms` between chunks rather than by a total lifetime.
+pub async fn call_upstream_generation_with_timeout_and_headers(
+    client: &reqwest::Client,
+    provider: &ProviderConfig,
+    auth_value: &str,
+    path: &str,
+    body: &Value,
+    request_timeout_ms: u64,
+    idle_timeout_ms: u64,
+    extra_headers: &[(String, String)],
+) -> Result<Value, UpstreamCallError> {
+    let resp = send_json_with_breakpoint_fallback(provider, body, |body| async move {
+        send_upstream_stream_request(
+            client,
+            provider,
+            auth_value,
+            path,
+            &body,
+            generation_header_timeout_ms(request_timeout_ms),
+            extra_headers,
+        )
+        .await
+    })
+    .await?;
+    read_json_response_capped_with_idle(resp, idle_timeout_ms.max(1)).await
+}
+
+/// STRM-3a/STRM-3b header-wait budget shared by streaming and non-streaming generation.
+pub fn generation_header_timeout_ms(request_timeout_ms: u64) -> u64 {
+    request_timeout_ms.saturating_mul(10).max(600_000)
+}
+
+async fn read_json_response_capped_with_idle(
+    resp: reqwest::Response,
+    idle_timeout_ms: u64,
+) -> Result<Value, UpstreamCallError> {
+    let status = resp.status();
+    let bytes = crate::bounded_response::read_response_body_with_limit_and_idle(
+        resp,
+        upstream_response_max_bytes(),
+        std::time::Duration::from_millis(idle_timeout_ms),
+    )
+    .await
+    .map_err(|err| {
+        UpstreamCallError::new(UpstreamErrorKind::Network, Some(status), err.to_string())
+    })?;
+    let text = String::from_utf8_lossy(&bytes);
+    serde_json::from_str(&text).map_err(|err| {
+        UpstreamCallError::new(UpstreamErrorKind::Http, Some(status), err.to_string())
+    })
+}
+
 pub async fn call_upstream_stream_with_timeout_and_headers(
     client: &reqwest::Client,
     provider: &ProviderConfig,
@@ -953,6 +1009,132 @@ mod tests {
         .await
         .expect("successful response headers");
         assert!(response.text().await.unwrap_err().is_timeout());
+        server.abort();
+    }
+
+    /// Serves `/v1/chat/completions` after `header_delay`, then emits `chunks`
+    /// JSON fragments spaced by `chunk_gap`; `stall` keeps the body open forever.
+    async fn generation_test_upstream(
+        header_delay: std::time::Duration,
+        chunk_gap: std::time::Duration,
+        stall: bool,
+    ) -> (ProviderConfig, tokio::task::JoinHandle<()>) {
+        use axum::{Router, body::Body, routing::post};
+        crate::monoize_routing::test_set_allow_private_upstream(true);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                tokio::time::sleep(header_delay).await;
+                let parts: [&'static str; 3] = ["{\"id\":", "\"gen\",", "\"ok\":true}"];
+                let body = Body::from_stream(futures_util::stream::unfold(
+                    0usize,
+                    move |index| async move {
+                        let part = *parts.get(index)?;
+                        if index > 0 {
+                            tokio::time::sleep(chunk_gap).await;
+                        }
+                        if stall && index == 1 {
+                            std::future::pending::<()>().await;
+                        }
+                        Some((Ok::<_, std::convert::Infallible>(part), index + 1))
+                    },
+                ));
+                (StatusCode::OK, body)
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = serde_json::from_value(serde_json::json!({
+            "id": "generation-test",
+            "type": "chat_completion",
+            "base_url": format!("http://{address}"),
+            "auth": { "type": "bearer", "value": "test-key" }
+        }))
+        .unwrap();
+        (provider, server)
+    }
+
+    #[test]
+    fn generation_header_budget_matches_streaming_budget() {
+        assert_eq!(generation_header_timeout_ms(30_000), 600_000);
+        assert_eq!(generation_header_timeout_ms(300_000), 3_000_000);
+        assert_eq!(generation_header_timeout_ms(u64::MAX), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn generation_headers_may_arrive_after_request_timeout() {
+        let (provider, server) = generation_test_upstream(
+            std::time::Duration::from_millis(400),
+            std::time::Duration::from_millis(0),
+            false,
+        )
+        .await;
+        let value = call_upstream_generation_with_timeout_and_headers(
+            &timeout_test_client(),
+            &provider,
+            "test-key",
+            "/v1/chat/completions",
+            &serde_json::json!({"stream": false}),
+            100,
+            1_000,
+            &[],
+        )
+        .await
+        .expect("slow headers stay within the generation budget");
+        assert_eq!(value["ok"], true);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn generation_body_has_no_total_lifetime_limit() {
+        let (provider, server) = generation_test_upstream(
+            std::time::Duration::from_millis(0),
+            std::time::Duration::from_millis(150),
+            false,
+        )
+        .await;
+        let value = call_upstream_generation_with_timeout_and_headers(
+            &timeout_test_client(),
+            &provider,
+            "test-key",
+            "/v1/chat/completions",
+            &serde_json::json!({"stream": false}),
+            100,
+            250,
+            &[],
+        )
+        .await
+        .expect("each chunk arrives inside the idle window");
+        assert_eq!(value["id"], "gen");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn generation_body_idle_stall_fails_as_network_error() {
+        let (provider, server) = generation_test_upstream(
+            std::time::Duration::from_millis(0),
+            std::time::Duration::from_millis(0),
+            true,
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let error = call_upstream_generation_with_timeout_and_headers(
+            &timeout_test_client(),
+            &provider,
+            "test-key",
+            "/v1/chat/completions",
+            &serde_json::json!({"stream": false}),
+            60_000,
+            200,
+            &[],
+        )
+        .await
+        .expect_err("stalled body must hit the idle deadline");
+        assert!(matches!(error.kind, UpstreamErrorKind::Network));
+        assert_eq!(error.status, Some(StatusCode::OK));
+        assert!(error.message.contains("idle for 200ms"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         server.abort();
     }
 

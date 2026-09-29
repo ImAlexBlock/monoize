@@ -22,6 +22,8 @@ pub(crate) enum BoundedResponseError {
         #[source]
         source: reqwest::Error,
     },
+    #[error("upstream response body idle for {idle_ms}ms without data")]
+    Idle { idle_ms: u128 },
 }
 
 impl BoundedResponseError {
@@ -59,6 +61,24 @@ pub(crate) async fn read_response_body_with_limit(
     response: reqwest::Response,
     max_bytes: usize,
 ) -> Result<Bytes, BoundedResponseError> {
+    read_body(response, max_bytes, None).await
+}
+
+/// Like [`read_response_body_with_limit`], but fails when no chunk arrives within
+/// `idle` of the previous one (or of the call, for the first chunk).
+pub(crate) async fn read_response_body_with_limit_and_idle(
+    response: reqwest::Response,
+    max_bytes: usize,
+    idle: std::time::Duration,
+) -> Result<Bytes, BoundedResponseError> {
+    read_body(response, max_bytes, Some(idle)).await
+}
+
+async fn read_body(
+    response: reqwest::Response,
+    max_bytes: usize,
+    idle: Option<std::time::Duration>,
+) -> Result<Bytes, BoundedResponseError> {
     let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
     if let Some(content_length) = response.content_length()
         && content_length > max_bytes_u64
@@ -71,7 +91,18 @@ pub(crate) async fn read_response_body_with_limit(
 
     let mut body = BytesMut::new();
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = match idle {
+            Some(idle) => tokio::time::timeout(idle, stream.next())
+                .await
+                .map_err(|_| BoundedResponseError::Idle {
+                    idle_ms: idle.as_millis(),
+                })?,
+            None => stream.next().await,
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         let chunk = chunk.map_err(|source| BoundedResponseError::BodyRead { source })?;
         if chunk.len() > max_bytes.saturating_sub(body.len()) {
             return Err(BoundedResponseError::StreamedLengthExceeded { max_bytes });
