@@ -19,7 +19,7 @@ Use semantic tokens. Do not use raw Tailwind palette colors for repeated semanti
 
 The palette is neutral gray plus one blue. Do not add new hues for chrome. Semantic status colors are the only other hues.
 
-Public surfaces (`/`, `/marketplace`, `/status`, `/apidocs`, `/usage-ranking`, `/login`) override these tokens with the public editorial palette: warm paper, a terracotta primary, and near-square corners. The override is scoped to `.public-surface` in `frontend/src/index.css`; it never changes Console tokens. See `design.md`.
+Public surfaces (`/`, `/marketplace`, `/status`, `/apidocs`, `/usage-ranking`, `/login`) override these tokens with the public minimal palette: near-monochrome surfaces, a `primary` token equal to the foreground, and pill actions. The override is scoped to `.public-surface` in `frontend/src/index.css`; it never changes Console tokens. See `design.md`.
 
 ### Semantic status tokens
 

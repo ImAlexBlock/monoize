@@ -294,51 +294,51 @@
 }
 
 /*
- * Public editorial surface (design.md / PS-V1).
+ * Public minimal surface (design-experimental.md / PS-V1).
  *
  * Scoped to PublicLayout so the Console keeps the product tokens. The public
- * surface uses a warm paper palette and a terracotta accent instead of the
- * default blue, near-square corners, and no shadows or decorative glows.
+ * surface uses a near-monochrome palette (ink on paper, paper on ink), pill
+ * actions, and no decorative color.
  */
 .public-surface {
-	--radius: 0.125rem;
-	--background: 40 24% 97%;
-	--foreground: 30 10% 12%;
-	--card: 40 30% 99%;
-	--card-foreground: 30 10% 12%;
-	--popover: 40 30% 99%;
-	--popover-foreground: 30 10% 12%;
-	--primary: 16 70% 44%;
-	--primary-foreground: 40 33% 98%;
-	--secondary: 40 18% 94%;
-	--secondary-foreground: 30 10% 12%;
-	--muted: 40 18% 94%;
-	--muted-foreground: 30 8% 40%;
-	--accent: 36 30% 93%;
-	--accent-foreground: 30 10% 12%;
-	--border: 32 14% 85%;
-	--input: 32 14% 85%;
-	--ring: 16 70% 44%;
+	--radius: 0.75rem;
+	--background: 0 0% 98%;
+	--foreground: 0 0% 9%;
+	--card: 0 0% 100%;
+	--card-foreground: 0 0% 9%;
+	--popover: 0 0% 100%;
+	--popover-foreground: 0 0% 9%;
+	--primary: 0 0% 9%;
+	--primary-foreground: 0 0% 98%;
+	--secondary: 0 0% 96%;
+	--secondary-foreground: 0 0% 9%;
+	--muted: 0 0% 96%;
+	--muted-foreground: 0 0% 45%;
+	--accent: 0 0% 96%;
+	--accent-foreground: 0 0% 9%;
+	--border: 0 0% 90%;
+	--input: 0 0% 90%;
+	--ring: 0 0% 9%;
 }
 
 .dark .public-surface {
-	--background: 30 8% 8%;
-	--foreground: 40 20% 92%;
-	--card: 30 8% 11%;
-	--card-foreground: 40 20% 92%;
-	--popover: 30 8% 11%;
-	--popover-foreground: 40 20% 92%;
-	--primary: 16 72% 58%;
-	--primary-foreground: 20 20% 8%;
-	--secondary: 30 6% 15%;
-	--secondary-foreground: 40 20% 92%;
-	--muted: 30 6% 15%;
-	--muted-foreground: 40 8% 62%;
-	--accent: 30 6% 15%;
-	--accent-foreground: 40 20% 92%;
-	--border: 30 6% 20%;
-	--input: 30 6% 20%;
-	--ring: 16 72% 58%;
+	--background: 0 0% 4%;
+	--foreground: 0 0% 93%;
+	--card: 0 0% 6%;
+	--card-foreground: 0 0% 93%;
+	--popover: 0 0% 6%;
+	--popover-foreground: 0 0% 93%;
+	--primary: 0 0% 93%;
+	--primary-foreground: 0 0% 4%;
+	--secondary: 0 0% 10%;
+	--secondary-foreground: 0 0% 93%;
+	--muted: 0 0% 10%;
+	--muted-foreground: 0 0% 64%;
+	--accent: 0 0% 10%;
+	--accent-foreground: 0 0% 93%;
+	--border: 0 0% 15%;
+	--input: 0 0% 15%;
+	--ring: 0 0% 93%;
 }
 
 .public-surface .shadow-sm,
@@ -348,4 +348,50 @@
 .public-surface .shadow-xl {
 	box-shadow: none;
 }
+
+/* Home model marquee: two identical runs slide by half their width, so the
+   loop is seamless. Paused on hover; disabled under reduced motion. */
+@keyframes home-marquee {
+	to { transform: translateX(-50%); }
+}
+
+.public-surface .home-marquee {
+	overflow: hidden;
+	mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+}
+
+.public-surface .home-marquee-track {
+	display: flex;
+	gap: 12px;
+	width: max-content;
+	animation: home-marquee 30s linear infinite;
+}
+
+.public-surface .home-marquee:hover .home-marquee-track {
+	animation-play-state: paused;
+}
+
+/* Home FAQ accordion. */
+.public-surface .home-faq-body {
+	max-height: 0;
+	opacity: 0;
+	overflow: hidden;
+	transition: max-height 0.3s ease, opacity 0.3s ease;
+}
+
+.public-surface .home-faq[open] .home-faq-body {
+	max-height: 16rem;
+	opacity: 1;
+}
+
+.public-surface .home-faq summary::-webkit-details-marker {
+	display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.public-surface .home-marquee-track {
+		animation: none;
+	}
+}
+
 

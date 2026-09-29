@@ -85,10 +85,10 @@ export function PublicLayout() {
             >
               {resolvedTheme === "dark" ? <Moon /> : <Sun />}
             </Button>
-            <Button asChild variant="outline" className="min-h-11">
+            <Button asChild variant="outline" className="min-h-11 rounded-full">
               <Link to="/login">{t("publicSite.nav.login")}</Link>
             </Button>
-            <Button asChild variant="primary" className="min-h-11">
+            <Button asChild variant="primary" className="min-h-11 rounded-full">
               <Link to="/dashboard">{t("publicSite.nav.console")}</Link>
             </Button>
           </div>

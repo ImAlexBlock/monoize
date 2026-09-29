@@ -127,27 +127,18 @@ Security Policy protections.
 PS-W1. The welcome page MUST render these sections in this order:
 
 1. Product statement and two actions.
-2. Supported API families.
-3. Group and pricing explanation.
-4. Three-step connection flow.
-5. Status-page action.
+2. A supported-model marquee and one API request example.
+3. A model list.
+4. A capability list.
+5. A summary statistics strip.
+6. A frequently-asked-questions list.
+7. Final actions and footer navigation.
 
-PS-W2. The welcome page MUST NOT display model, Provider, Channel, or Group counts.
+PS-W2. The welcome page MUST NOT display Provider, Channel, or Group counts. The summary
+statistics strip MAY display aggregate catalog figures.
 
 PS-W3. The primary actions MUST link to Model Marketplace and API Docs. The status action
 MUST link to `/status`.
-
-PS-W4. Each numbered welcome-page section (`01` through `03`) MUST render its section index
-as a decorative marker:
-
-- the marker MUST be typeset larger than the section heading and MUST render behind the
-  section label, heading, and description;
-- the marker MUST use the `primary` token at low opacity and MUST NOT reduce the contrast of
-  the section text below WCAG AA (`PS-V5`);
-- the marker MUST be hidden from assistive technology and MUST NOT receive pointer events;
-- the marker and the section intro block MUST enter with an opacity fade of at most 300 ms
-  when the section scrolls into view;
-- the fade MUST NOT use positional motion (`PS-V3`).
 
 ## 5. API documentation page
 
@@ -171,15 +162,14 @@ and truncates once at final scaling.
 
 ## 6. Visual and accessibility contract
 
-PS-V1. Public surfaces MUST use the public editorial direction defined by `design.md`:
-a warm paper background, a terracotta primary token, near-square corners, serif display
-type, sans-serif body type, and monospace code. The public tokens are scoped to
-`PublicLayout` and MUST NOT change the Console tokens defined by
-`frontend-design-system.spec.md`.
+PS-V1. Public surfaces MUST use the public minimal direction defined by `design.md`:
+a near-monochrome palette (ink on paper, paper on ink), pill actions, sans-serif display
+and body type, and monospace code. The public tokens are scoped to `PublicLayout` and MUST
+NOT change the Console tokens defined by `frontend-design-system.spec.md`.
 
-PS-V2. Public surfaces MUST NOT introduce a brand palette beyond the public editorial
-tokens in `design.md`. Icons MUST come from Lucide or the existing product icon set.
-Emoji MUST NOT serve as interface icons.
+PS-V2. Public surfaces MUST NOT introduce a brand palette beyond the public tokens in
+`design.md`. Icons MUST come from Lucide or the existing product icon set. Emoji MUST NOT
+serve as interface icons.
 
 PS-V3. Motion MUST animate only `transform` and `opacity`. Interaction duration MUST be
 from 150 through 300 milliseconds. `prefers-reduced-motion: reduce` MUST disable positional
