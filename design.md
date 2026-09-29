@@ -68,6 +68,7 @@
 - 统计数字：进入视口时 count-up（900ms，easeOutCubic）。
 - 卡片/行 hover：背景或边框变化；按钮 hover 轻微上移。
 - `prefers-reduced-motion: reduce` 时关闭位移与跑马灯，数字直接显示终值。
+- Hero 背景：可选「字符海洋」canvas（PS-V7）。默认缓慢流动，鼠标轨迹产生涟漪与高亮；单色低对比，离屏/隐藏暂停，reduced-motion 只渲染静态一帧。
 
 ## 8. 反模式
 
