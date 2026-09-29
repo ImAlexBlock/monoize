@@ -687,7 +687,7 @@ pub async fn load_state_with_runtime(runtime: RuntimeConfig) -> AppResult<AppSta
     let exchange_rate_service = if is_replica {
         ExchangeRateService::new_read_only(db.clone()).await
     } else {
-        ExchangeRateService::new(db.clone(), http.clone()).await
+        ExchangeRateService::new(db.clone()).await
     }
     .map_err(|err| {
         AppError::new(

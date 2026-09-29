@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { mutate } from "swr";
@@ -110,6 +110,23 @@ export function OrgLimitsPage() {
     // Re-seed only on org change; currency switches re-derive through the editor.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orgId]);
+
+  // CNY is the default input currency. Stored limits are nano-USD, so the drafts
+  // switch to CNY once both the limits and the fixed rate are loaded; switching
+  // earlier would render every stored limit as empty.
+  const defaultedToCny = useRef(false);
+  useEffect(() => {
+    if (defaultedToCny.current || !data || !rate || limitCurrency !== "USD") return;
+    defaultedToCny.current = true;
+    setLimitCurrency("CNY");
+    setSpaceDraft(draftFromLimits(data.space.limits, "CNY", rate));
+    const md: Record<string, SpendLimitDraft> = {};
+    for (const m of data.members) md[m.user_id] = draftFromLimits(m.limits, "CNY", rate);
+    setMemberDrafts(md);
+    const kd: Record<string, SpendLimitDraft> = {};
+    for (const k of data.keys) kd[k.key_id] = draftFromLimits(k.limits, "CNY", rate);
+    setKeyDrafts(kd);
+  }, [data, rate, limitCurrency]);
 
   if (!isOwner) {
     return (

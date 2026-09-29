@@ -224,7 +224,7 @@ export function UsersPage() {
   const [balanceAddAmount, setBalanceAddAmount] = useState("");
   /// The add-amount currency: the wallet is nano-USD, so a CNY amount converts
   /// through the live exchange-rate snapshot before it is applied.
-  const [balanceAddCurrency, setBalanceAddCurrency] = useState<"USD" | "CNY">("USD");
+  const [balanceAddCurrency, setBalanceAddCurrency] = useState<"USD" | "CNY">("CNY");
   const [saving, setSaving] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [accountClassTarget, setAccountClassTarget] = useState<{
@@ -753,7 +753,7 @@ export function UsersPage() {
                         onValueChange={(v) => {
                           setBalanceMode(v as "set" | "add");
                           setBalanceAddAmount("");
-                          setBalanceAddCurrency("USD");
+                          setBalanceAddCurrency("CNY");
                         }}
                       >
                         <TabsList className="h-7">

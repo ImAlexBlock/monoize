@@ -2,7 +2,6 @@ use super::money::parse_rate;
 use crate::db::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use reqwest::Client;
 use sea_orm::ConnectionTrait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,7 +9,10 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-pub const ER_API_LATEST_USD_URL: &str = "https://open.er-api.com/v6/latest/USD";
+/// SB-FX-1: the single CNY-per-USD rate used by every conversion. It is a fixed
+/// constant, not a market quote, so a stored USD amount always projects to the
+/// same CNY amount. Changing it rescales every CNY projection of existing balances.
+pub const FIXED_CNY_PER_USD: &str = "6.72";
 pub const EXCHANGE_RATE_REFRESH_INTERVAL: Duration = Duration::minutes(15);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,24 +213,18 @@ pub trait ExchangeRateFetcher: Send + Sync {
     async fn fetch_latest_usd(&self) -> Result<String, String>;
 }
 
+/// Produces the SB-FX-1 fixed rate in the validated response shape, so the fixed
+/// rate passes the same parsing, persistence, and freshness path as any snapshot.
 #[derive(Clone)]
-struct ReqwestExchangeRateFetcher {
-    client: Client,
-}
+struct FixedExchangeRateFetcher;
 
 #[async_trait]
-impl ExchangeRateFetcher for ReqwestExchangeRateFetcher {
+impl ExchangeRateFetcher for FixedExchangeRateFetcher {
     async fn fetch_latest_usd(&self) -> Result<String, String> {
-        self.client
-            .get(ER_API_LATEST_USD_URL)
-            .send()
-            .await
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| error.to_string())?
-            .text()
-            .await
-            .map_err(|error| error.to_string())
+        Ok(format!(
+            r#"{{"result":"success","base_code":"USD","time_last_update_unix":{},"rates":{{"CNY":{FIXED_CNY_PER_USD}}}}}"#,
+            Utc::now().timestamp()
+        ))
     }
 }
 
@@ -241,12 +237,9 @@ pub struct ExchangeRateService {
 }
 
 impl ExchangeRateService {
-    pub async fn new(db: DbPool, client: Client) -> Result<Self, ExchangeRateError> {
-        let service = Self::with_fetcher(
-            ExchangeRateStore::new(db),
-            ReqwestExchangeRateFetcher { client },
-        )
-        .await?;
+    pub async fn new(db: DbPool) -> Result<Self, ExchangeRateError> {
+        let service =
+            Self::with_fetcher(ExchangeRateStore::new(db), FixedExchangeRateFetcher).await?;
         let _ = service.refresh_if_due(Utc::now()).await;
         Ok(service)
     }
@@ -462,6 +455,29 @@ mod tests {
 
     fn snapshot(refreshed_at: chrono::DateTime<Utc>) -> ExchangeRateSnapshot {
         parse_er_api_response(VALID_RESPONSE, refreshed_at).unwrap()
+    }
+
+    #[tokio::test]
+    async fn writable_service_always_reports_the_fixed_rate() {
+        let store = migrated_store().await;
+        // A previously persisted market rate is replaced by the fixed rate at startup.
+        store
+            .persist(&snapshot(Utc.with_ymd_and_hms(2026, 8, 27, 1, 2, 3).unwrap()))
+            .await
+            .unwrap();
+        let service = ExchangeRateService::with_fetcher(store.clone(), super::FixedExchangeRateFetcher)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let first = service.refresh_if_due(now).await.unwrap();
+        let later = service
+            .refresh_if_due(now + chrono::Duration::minutes(15))
+            .await
+            .unwrap();
+
+        assert_eq!(first.cny_per_usd, super::FIXED_CNY_PER_USD);
+        assert_eq!(later.cny_per_usd, super::FIXED_CNY_PER_USD);
+        assert_eq!(store.load().await.unwrap().unwrap().cny_per_usd, super::FIXED_CNY_PER_USD);
     }
 
     #[tokio::test]

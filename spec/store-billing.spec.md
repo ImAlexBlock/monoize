@@ -24,7 +24,9 @@ SB-0.10. A Store deployment MUST mount Store mutation and callback endpoints on 
 
 ## 1. Exchange Rates And Money
 
-SB-FX-1. The Store Primary MUST request `https://open.er-api.com/v6/latest/USD` at startup and 15 minutes after each completed attempt.
+SB-FX-1. The rate is the fixed constant `6.72` CNY per USD (`FIXED_CNY_PER_USD`). It is not a market quote. Every USD/CNY conversion in the Store, metered billing, spending limits, Admin balance adjustment, and every display MUST use this rate, so a stored nano-USD amount always projects to the same CNY amount. At startup and 15 minutes after each completed refresh, the Store Primary MUST persist a snapshot with this rate, with source and refresh timestamps equal to the refresh time. The Store Primary MUST NOT request a remote rate source. Changing the constant rescales the CNY projection of every existing balance; it requires a spec change and a deployment.
+
+SB-FX-1a. SB-FX-3, SB-FX-4, SB-FX-15, SB-FX-16, SB-FX-19, and SB-FX-20 describe a remote rate source. They do not apply while SB-FX-1 fixes the rate. The fixed snapshot MUST still pass the SB-FX-4 response shape, SB-FX-5, SB-FX-6, and SB-FX-7 validation.
 
 SB-FX-2. A Replica MUST read the persisted rate. A Replica MUST NOT request or update the remote rate.
 

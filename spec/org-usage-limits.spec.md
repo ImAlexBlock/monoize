@@ -165,9 +165,12 @@ aggregations per request and MUST NOT add a write on the request path.
 
 ORGL-20. Every limit editor — the org Limits view (ORGL-14) at the space, member, and
 key levels, and the personal-key create/edit dialog — offers a USD/CNY input toggle.
+The toggle defaults to CNY. An editor that prefills stored limits MUST keep USD until
+the rate snapshot is loaded, then switch the drafts to CNY; it MUST NOT render a stored
+limit as empty because the rate is still loading.
 Drafts hold display strings in the chosen currency; conversion to the canonical
 nano-USD storage happens once, at save time: a USD amount maps directly, a CNY amount
-divides by the live `cny_per_usd` snapshot (the same exact-decimal contract as the
+divides by the `cny_per_usd` snapshot (fixed by SB-FX-1) (the same exact-decimal contract as the
 wallet CNY top-up) and the editor shows the rate it will use. Stored windows remain
 nano-USD; enforcement (ORGL-5..7, ORGL-19) is unchanged.
 

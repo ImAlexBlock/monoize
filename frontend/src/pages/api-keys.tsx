@@ -553,7 +553,7 @@ export function ApiKeysPage() {
   /// ORGL-18: per-key spend limits typed as USD; empty = unlimited. The same
   /// three windows as the org-space Limits view.
   const [newKeySpendLimits, setNewKeySpendLimits] = useState<SpendLimitDraft>({ total: "", hourly: "", daily: "" });
-  const [newKeyLimitCurrency, setNewKeyLimitCurrency] = useState<"USD" | "CNY">("USD");
+  const [newKeyLimitCurrency, setNewKeyLimitCurrency] = useState<"USD" | "CNY">("CNY");
   const { data: exchangeRate } = useStoreExchangeRate();
   const [newKeyModelLimitsEnabled, setNewKeyModelLimitsEnabled] = useState(false);
   const [newKeyModelLimits, setNewKeyModelLimits] = useState("");
@@ -805,12 +805,15 @@ export function ApiKeysPage() {
   const openEditDialog = (key: ApiKey) => {
     setEditKey(key);
     setNewKeyName(key.name);
+    // Stored limits are nano-USD; prefill in CNY only when the fixed rate is loaded,
+    // otherwise an unconvertible CNY prefill would render the limits as empty.
+    const editCurrency = exchangeRate?.cny_per_usd ? "CNY" : "USD";
     setNewKeySpendLimits({
-      total: nanoToLimitInput(key.spend_limit_total_nano_usd, "USD", undefined),
-      hourly: nanoToLimitInput(key.spend_limit_hourly_nano_usd, "USD", undefined),
-      daily: nanoToLimitInput(key.spend_limit_daily_nano_usd, "USD", undefined),
+      total: nanoToLimitInput(key.spend_limit_total_nano_usd, editCurrency, exchangeRate?.cny_per_usd),
+      hourly: nanoToLimitInput(key.spend_limit_hourly_nano_usd, editCurrency, exchangeRate?.cny_per_usd),
+      daily: nanoToLimitInput(key.spend_limit_daily_nano_usd, editCurrency, exchangeRate?.cny_per_usd),
     });
-    setNewKeyLimitCurrency("USD");
+    setNewKeyLimitCurrency(editCurrency);
     setNewKeyModelLimitsEnabled(key.model_limits_enabled);
     setNewKeyModelLimits(key.model_limits.join(", "));
     setNewKeyIpWhitelist(key.ip_whitelist.join(", "));

@@ -117,7 +117,7 @@ A5. `PUT /api/dashboard/users/{user_id}` MUST apply ordinary user fields, `balan
 
 A6. The users-page balance editor MUST offer two modes: `set` (an absolute balance) and
 `add` (a delta applied to the current balance). The `add` mode MUST offer a currency
-choice of exactly `USD` and `CNY`. A `USD` amount converts to nano-USD directly; a `CNY`
+choice of exactly `USD` and `CNY`, and MUST select `CNY` when the editor opens or the mode changes. A `USD` amount converts to nano-USD directly; a `CNY`
 amount converts by dividing by the current exchange-rate snapshot's `cny_per_usd` (the
 same snapshot the billing engine reads), with the result previewed to the operator before
 saving. When no rate snapshot is available, a `CNY` add MUST be rejected client-side with
