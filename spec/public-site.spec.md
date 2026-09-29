@@ -126,80 +126,28 @@ Security Policy protections.
 
 PS-W1. The welcome page MUST render these sections in this order:
 
-1. Product statement, Console action, API Docs action, and one API request example. The
-   hero MUST NOT render an eyebrow or category label above the product statement.
-2. A live low-price model section.
-3. Supported API families and a statement that clients which accept a custom Base URL and
-   API key can connect without changing their request protocol.
-4. Four relay-service advantages: one account and connection, public Marketplace pricing,
-   Group-scoped routing with fail-forward, and request-level usage and charge records.
-5. Six customer tasks: call text and image models, connect compatible SDKs and coding
-   tools, control API keys, use organization workspaces, purchase balance or plans, and
-   inspect requests and usage.
-6. Three-step connection flow: create an API key, select a Marketplace model, and send a
-   request.
-7. Operations explanation covering public Provider status, request records, and balance
-   accounting.
-8. Raw HTTP API example.
-9. Final Console and public-status actions.
+1. Product statement and two actions.
+2. Supported API families.
+3. Group and pricing explanation.
+4. Three-step connection flow.
+5. Status-page action.
 
 PS-W2. The welcome page MUST NOT display model, Provider, Channel, or Group counts.
 
-PS-W3. The primary actions MUST link to `/dashboard` and `/apidocs`. The Marketplace
-action MUST link to `/marketplace`. The final actions MUST link to `/dashboard` and
-`/status`.
+PS-W3. The primary actions MUST link to Model Marketplace and API Docs. The status action
+MUST link to `/status`.
 
-PS-W4. Welcome-page claims MUST describe LynShen as a hosted AI API relay service. They
-MUST NOT present Monoize internals, self-hosting, Provider administration, Channel
-configuration, URP, transforms, or Rust implementation details as customer benefits.
+PS-W4. Each numbered welcome-page section (`01` through `03`) MUST render its section index
+as a decorative marker:
 
-PS-W5. The welcome page MUST use section-level borders and background changes to separate
-content. It MUST NOT place every advantage in an independent floating Card.
-
-PS-W6. The low-price model section MUST load public Marketplace pages through SWR. It MUST
-request pages of 50 items and follow cursors until the snapshot ends. It MUST stop and show
-the failure fallback if more than 19 Marketplace requests would be required.
-
-PS-W7. The section MUST consider only items whose input rate exists and uses the `token`
-unit. It MUST keep the cheapest input-price item per model name and sort the result by
-input price ascending (ties broken by Group name, then model name, both by UTF-8 byte
-order). The section MUST display exactly four cells at a time and advance the window by
-one model every 5 seconds, wrapping to the start; a catalog shorter than four renders
-every model with no rotation. Each available item MUST show model, Group, minimum input
-price, minimum output price when its unit is `token`, offer count, and the item's
-`input_rate_multiplier` as an `x<decimal>` chip beside the Group name when present. The
-section MUST NOT pin fixed vendors or model families.
-
-PS-W8. The section MUST state that prices update in real time and that discounts vary with
-upstream costs. It MUST state that each request is settled using the real-time discount at
-request time. Displayed values use USD per one million tokens. The section MUST convert
-Marketplace nano-CNY values through the response `cny_per_usd` using exact decimal
-arithmetic. It MUST NOT claim a fixed discount percentage or compare with an official list
-price unless the server provides that comparison. Loading MUST render four Skeleton cells.
-Empty or failed loading MUST retain an action to
-`/marketplace`. The rotation transition MUST be a smooth slide: the entering card slides in
-from the trailing edge, the leaving card slides out at the leading edge, and the carried
-cards glide to their new slots, all in one spring; under reduced motion only opacity
-animates.
-
-PS-W9. Every welcome-page section reveals its content once when it enters the viewport:
-a fade with a small upward rise (about 0.55s, ease-out). Cell grids (families, advantages,
-tasks, steps, operations) reveal their cells staggered by about 60ms per cell. Under
-reduced motion the reveals animate opacity only, per `DESIGN_SYSTEM.md`. Reveals play once
-per page load and MUST NOT re-run on scroll-up.
-
-PS-W10. The hero choreographs on load: the headline rises with a blur-to-sharp fade, the
-description and the two actions follow with increasing delays, and the terminal card rises
-last with a slight rotation that settles. The terminal reveals its command line by line
-(about 0.28s apart) ending in a blinking block caret; its traffic dots pulse on staggered
-delays. The grid backdrop pans one cell in a slow loop and parallaxes upward at roughly
-0.2x scroll speed; a blurred primary glow orb pulses behind it. Every section label
-(`NN · NAME`) slides in beside an accent line that draws left-to-right. Bordered grid
-cells tint their background and scale their icon on hover; client-example chips pop in
-with a slight rotation and tint on hover; the primary call-to-action nudges its arrow on
-hover. All of these degrade under reduced motion: loops and parallax stop, transforms
-reduce to opacity fades, and CSS animations are disabled by the `prefers-reduced-motion`
-media rule in `index.css`.
+- the marker MUST be typeset larger than the section heading and MUST render behind the
+  section label, heading, and description;
+- the marker MUST use the `primary` token at low opacity and MUST NOT reduce the contrast of
+  the section text below WCAG AA (`PS-V5`);
+- the marker MUST be hidden from assistive technology and MUST NOT receive pointer events;
+- the marker and the section intro block MUST enter with an opacity fade of at most 300 ms
+  when the section scrolls into view;
+- the fade MUST NOT use positional motion (`PS-V3`).
 
 ## 5. API documentation page
 
@@ -255,8 +203,11 @@ nouns, endpoint paths, and environment-variable names MUST remain English in eve
 PS-L3. The built-in `site_name` default MUST be `LynShen Console`. The static HTML fallback
 title MUST be `LynShen Console`.
 
-PS-L4. The login page, Console layout, welcome page, Marketplace, API Docs, and status page
-MUST render the runtime `site_name`.
+PS-L4. The login page and Console layout MUST render the runtime `site_name`. The welcome
+page, Marketplace, API Docs, usage-ranking page, and status page MUST render the public
+brand name. The public brand name equals `site_name` with one trailing ` Console` suffix
+removed (ASCII case-insensitive, surrounding whitespace ignored). When removal produces an
+empty string, the runtime `site_name` MUST be used unchanged.
 
 PS-L6. On every route the browser tab title MUST equal the runtime `site_name` once the
 public site settings response arrives. The static HTML `<title>` element is the
