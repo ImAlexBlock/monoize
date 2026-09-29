@@ -1,14 +1,23 @@
 import { useEffect, useRef } from "react";
 import { useReducedMotion } from "framer-motion";
 
-// Decorative "character ocean" canvas (PS-V7). A grid of monospace glyphs rides
-// layered sine waves; the pointer adds a ripple that follows its trajectory.
-// Everything is bounded: the cell grid is capped, the loop pauses when the
-// canvas is off-screen or the document is hidden, and reduced motion renders a
-// single static frame with no event listeners.
-const CELL = 10;
-const MAX_CELLS = 16000;
-const GLYPHS = ["·", "˙", ".", "ˑ", "﹒", "·", "•", "~"];
+// Decorative "character ocean" canvas (PS-V7).
+//
+// The surface is drawn as stacked wavy character lines in perspective: lines
+// near the horizon are small, dim, and widely spaced (blank space reads as
+// distance); lines toward the viewer are larger, bolder, and brighter. The
+// pointer raises a traveling bump, so a ripple follows the cursor.
+//
+// Everything is bounded: the line/column loop is fixed size, the loop pauses
+// when off-screen or hidden, and reduced motion renders one static frame with
+// no pointer listeners.
+const GLYPHS = ["·", ".", "˙", "-", "~", "≈", "﹏"];
+const LINES = 24;
+
+function glyphAt(x: number, row: number) {
+  const h = Math.abs(Math.sin(x * 0.37 + row * 12.9) * 43758.5453) % 1;
+  return GLYPHS[(h * GLYPHS.length) | 0];
+}
 
 export function CharacterOcean({ className = "" }: { className?: string }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -22,11 +31,6 @@ export function CharacterOcean({ className = "" }: { className?: string }) {
 
     let width = 0;
     let height = 0;
-    let cols = 0;
-    let rows = 0;
-    let cell = CELL;
-    let glyphs: string[] = [];
-    let phases = new Float32Array(0);
     let raf = 0;
     let onScreen = true;
     let running = true;
@@ -47,25 +51,12 @@ export function CharacterOcean({ className = "" }: { className?: string }) {
       canvas.width = Math.floor(width * dpr);
       canvas.height = Math.floor(height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-      // Grow the cell size when the grid would exceed the cap, so cost stays bounded.
-      cell = CELL;
-      while (Math.ceil(width / cell) * Math.ceil(height / cell) > MAX_CELLS) cell += 2;
-      cols = Math.ceil(width / cell);
-      rows = Math.ceil(height / cell);
-      glyphs = new Array(cols * rows);
-      phases = new Float32Array(cols * rows);
-      for (let i = 0; i < glyphs.length; i++) {
-        glyphs[i] = GLYPHS[(Math.random() * GLYPHS.length) | 0];
-        phases[i] = Math.random() * Math.PI * 2;
-      }
       color = readColor();
     };
 
     const draw = (time: number) => {
       const t = time / 1000;
       ctx.clearRect(0, 0, width, height);
-      ctx.font = `${cell - 3}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
       ctx.textBaseline = "middle";
       ctx.fillStyle = color;
 
@@ -73,37 +64,39 @@ export function CharacterOcean({ className = "" }: { className?: string }) {
       pointer.y += (pointer.ty - pointer.y) * 0.14;
       pointer.vx *= 0.9;
       pointer.vy *= 0.9;
-      const speed = Math.min(1, Math.hypot(pointer.vx, pointer.vy) / 26);
+      const pointerSpeed = Math.min(1, Math.hypot(pointer.vx, pointer.vy) / 26);
 
-      for (let cy = 0; cy < rows; cy++) {
-        const y = cy * cell;
-        for (let cx = 0; cx < cols; cx++) {
-          const x = cx * cell;
-          const i = cy * cols + cx;
+      const horizon = height * 0.26;
+      const sea = height - horizon;
 
-          // Sum of directional swells that travel across the surface.
-          const swell =
-            Math.sin(x * 0.013 + t * 0.75) +
-            Math.sin(y * 0.022 - t * 0.5) +
-            Math.sin((x * 0.6 + y) * 0.009 + t * 0.4);
+      for (let row = 0; row < LINES; row++) {
+        const depth = row / (LINES - 1); // 0 = far (horizon), 1 = near
+        const y0 = horizon + sea * Math.pow(depth, 1.7);
+        const size = 8 + depth * 10;
+        const amplitude = 3 + depth * 26;
+        const frequency = 0.022 - depth * 0.012;
+        const speed = 0.7 + depth * 0.6;
+        const weight = depth > 0.66 ? 700 : depth > 0.33 ? 500 : 400;
+        const baseAlpha = 0.05 + depth * 0.5;
+        const step = size * (1.4 + (1 - depth) * 1.1);
 
-          const dx = x - pointer.x;
-          const dy = y - pointer.y;
-          const dist = Math.hypot(dx, dy);
-          const influence = Math.max(0, 1 - dist / 220) * (0.4 + speed);
+        ctx.font = `${weight} ${Math.round(size)}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
 
-          // Water lights up on the crests. The pointer raises a local swell, so
-          // the ripple pulls a band of sparkles along its trajectory.
-          const crest = Math.max(0, swell + influence * 1.8 * Math.cos(dist * 0.05 - t * 4));
-          const base = Math.pow(Math.min(1, crest / 2.0), 2);
+        for (let x = -step; x < width + step; x += step) {
+          const phase = row * 0.7;
+          const wave =
+            Math.sin(x * frequency + t * speed + phase) +
+            0.5 * Math.sin(x * frequency * 2.2 - t * speed * 0.8 + phase * 1.3);
+          const waveY = y0 + wave * amplitude;
 
-          const speckle = 0.5 + 0.5 * Math.sin(x * 0.33 + y * 0.5 + t * 3.0 + phases[i]);
-          const twinkle = 0.45 + 0.55 * Math.sin(t * 3.8 + phases[i] * 3);
-          const alpha = base * (0.35 + 0.65 * speckle) * (0.55 + 0.45 * twinkle) * (1.0 + influence * 1.8);
-          if (alpha <= 0.045) continue;
+          const dist = Math.hypot(x - pointer.x, waveY - pointer.y);
+          const influence = Math.max(0, 1 - dist / 260) * (0.4 + pointerSpeed);
 
-          ctx.globalAlpha = Math.min(0.95, alpha * 1.7);
-          ctx.fillText(glyphs[i], x, y + swell * 2.4);
+          const alpha = Math.min(0.95, baseAlpha + influence * 0.55);
+          if (alpha < 0.04) continue;
+
+          ctx.globalAlpha = alpha;
+          ctx.fillText(glyphAt(x, row), x, waveY + influence * 16);
         }
       }
       ctx.globalAlpha = 1;
