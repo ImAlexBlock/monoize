@@ -704,11 +704,9 @@ pub(super) async fn collect_provider_attempts(
     routing_config_revision: u64,
     out: &mut Vec<MonoizeAttempt>,
 ) {
-    if !provider.enabled {
-        return;
+    if !provider.enabled {        return;
     }
-    if !crate::users::is_provider_group_eligible(&provider.group_id, effective_groups) {
-        return;
+    if !crate::users::is_provider_group_eligible(&provider.group_id, effective_groups) {        return;
     }
     // RTA-9: cache-capability static filter. Placement matters: after group
     // eligibility, before the model-entry check, and outside the health filter
@@ -716,11 +714,9 @@ pub(super) async fn collect_provider_attempts(
     if provider
         .max_input_tokens
         .is_some_and(|limit| urp.estimated_input_tokens > limit)
-    {
-        return;
+    {        return;
     }
-    if provider.prompt_cache_incompatible_with_tools && urp.has_tools {
-        return;
+    if provider.prompt_cache_incompatible_with_tools && urp.has_tools {        return;
     }
     let supporting_channels: Vec<crate::monoize_routing::MonoizeChannel> =
         std::iter::once(&provider.channel)
@@ -743,8 +739,7 @@ pub(super) async fn collect_provider_attempts(
             .then_some(urp.model.as_str()),
     )
     .await;
-    if channels.is_empty() {
-        return;
+    if channels.is_empty() {        return;
     }
 
     let ordered = channels;
@@ -914,8 +909,7 @@ pub(super) async fn filter_eligible_channels(
     if health.len() < health_limit {
         crate::monoize_routing::reset_channel_health_saturation_warning();
     }
-    for channel in channels {
-        if !channel.enabled {
+    for channel in channels {        if !channel.enabled {
             continue;
         }
         if !circuit_breaker_enabled {
@@ -1434,6 +1428,13 @@ pub(super) fn classify_channel_health_failure(
         return Some(RetryableFailureClass::RateLimited);
     }
 
+    // RTA-5c: a model-scoped signal says this Channel does not serve the requested
+    // model. It is not evidence about Channel health for other models, so it never
+    // updates passive health state in any class — including over an HTTP `404`.
+    if has_signal(&["model_not_found", "model_not_supported", "unsupported_model"]) {
+        return None;
+    }
+
     if matches!(
         http_status,
         Some(401 | 402 | 403 | 404 | 405 | 407 | 410 | 415 | 426 | 451)
@@ -1459,12 +1460,9 @@ pub(super) fn classify_channel_health_failure(
         "insufficient_balance",
         "insufficient_quota",
         "invalid_api_key",
-        "model_not_found",
-        "model_not_supported",
         "no_available_account",
         "permission_denied",
         "quota_exceeded",
-        "unsupported_model",
     ]) {
         return Some(RetryableFailureClass::Persistent);
     }
@@ -1484,6 +1482,23 @@ pub(super) fn classify_channel_health_failure(
     None
 }
 
+/// RTA-5c: model-scoped signals state that this Channel does not serve the requested
+/// model. They never update Channel passive health, regardless of HTTP status or any
+/// status-derived passive class.
+pub(super) fn carries_model_scoped_signal(
+    error_code: Option<&str>,
+    error_type: Option<&str>,
+) -> bool {
+    let signals = [
+        normalized_failure_signal(error_code),
+        normalized_failure_signal(error_type),
+    ];
+    signals
+        .iter()
+        .flatten()
+        .any(|signal| matches!(signal.as_str(), "model_not_found" | "model_not_supported" | "unsupported_model"))
+}
+
 pub(super) async fn record_upstream_attempt_failure(
     state: &AppState,
     attempt: &MonoizeAttempt,
@@ -1501,6 +1516,9 @@ pub(super) async fn record_upstream_attempt_failure(
         execution_state.last_attempt_duration_ms(),
         mask_sensitive_info,
     ));
+    if carries_model_scoped_signal(app_err.upstream_code.as_deref(), app_err.upstream_type.as_deref()) {
+        return;
+    }
     let Some(failure_class) = classify_channel_health_failure(
         app_err.upstream_status,
         app_err.upstream_code.as_deref(),
@@ -1751,8 +1769,7 @@ pub(super) fn upstream_error_to_app(err: UpstreamCallError, mask_sensitive_info:
     let status = err.status.unwrap_or(StatusCode::BAD_GATEWAY);
     // SAN-3: the raw unmasked upstream detail (transport text with the full
     // upstream URL, raw unparsed error bodies) exists in the server log only.
-    tracing::warn!(status = %status, upstream_error = %err.message, "upstream request failed");
-    // SAN-2a: a quota-classified error collapses to the fixed generic text
+    tracing::warn!(status = %status, upstream_error = %err.message, "upstream request failed");    // SAN-2a: a quota-classified error collapses to the fixed generic text
     // before the per-source SAN-1 rules run.
     let quota = crate::error_sanitize::error_value_is_quota(
         Some(&err.message),

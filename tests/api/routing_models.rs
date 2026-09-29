@@ -1235,3 +1235,147 @@ async fn exhausted_route_without_history_keeps_the_original_error() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("model_not_found"), "{body}");
 }
+
+/// RTA-5c / RTF-1 incident regression: an upstream 503 `model_not_found` for a helper
+/// model must not cool the Channel, so the recent-model fallback (and any other model
+/// on that Channel) still routes to it.
+#[tokio::test]
+async fn model_not_found_does_not_cool_the_channel_for_other_models() {
+    let ctx = setup().await;
+    seed_test_model_pricing(&ctx.state, &["gpt-5-main-model", "gpt-5-helper-missing-model"]).await;
+
+    let helper_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits = helper_hits.clone();
+    async fn route(
+        axum::extract::State(hits): axum::extract::State<Arc<std::sync::atomic::AtomicUsize>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::response::Response {
+        if body["model"].as_str() == Some("gpt-5-helper-missing-model") {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": {
+                        "code": "model_not_found",
+                        "message": "当前模型服务暂不可用，请稍后重试",
+                        "type": "new_api_error"
+                    }
+                })),
+            )
+                .into_response()
+        }
+        (
+            StatusCode::OK,
+            Json(json!({
+                "id": "chatcmpl-test", "object": "chat.completion", "created": 1,
+                "model": body["model"].clone(),
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+            })),
+        )
+            .into_response()
+    }
+    let router = Router::new().route("/v1/chat/completions", post(route)).with_state(hits);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+
+    let mut models = HashMap::new();
+    for model in ["gpt-5-main-model", "gpt-5-helper-missing-model"] {
+        models.insert(
+            model.to_string(),
+            monoize::monoize_routing::MonoizeModelEntry {
+                redirect: None,
+                pricing_profile_mode: Default::default(),
+                pricing_profile_override: None,
+                multiplier_override: Some(monoize::exact_decimal::Multiplier::ONE),
+            },
+        );
+    }
+    let created = ctx
+        .state
+        .monoize_store
+        .create_provider(monoize::monoize_routing::CreateMonoizeProviderInput {
+            confirm_public_exposure: true,
+            pricing_profile: Some("openai".to_string()),
+            multiplier: Default::default(),
+            name: "model-scoped-failure-provider".to_string(),
+            api_type_overrides: Vec::new(),
+            group_id: String::new(),
+            channel: monoize::monoize_routing::CreateMonoizeChannelInput {
+                name: "model-scoped-failure-ch".to_string(),
+                provider_type: monoize::monoize_routing::MonoizeProviderType::ChatCompletion,
+                base_url: format!("http://{address}"),
+                api_key: Some("upstream-key".to_string()),
+                enabled: true,
+                allow_missing_usage: false,
+                passive_failure_count_threshold_override: Some(1),
+                passive_cooldown_seconds_override: None,
+                passive_window_seconds_override: None,
+                passive_rate_limit_cooldown_seconds_override: None,
+                models,
+                active_probe_enabled_override: None,
+                active_probe_interval_seconds_override: None,
+                active_probe_success_threshold_override: None,
+                active_probe_model_override: None,
+                affinity_enabled_override: None,
+                affinity_idle_ttl_seconds_override: None,
+                affinity_failback_mode_override: None,
+                affinity_failback_delay_seconds_override: None,
+                proxy_url: None,
+                extra_headers: None,
+                session_affinity_auto: None,
+            },
+            channel_max_retries: 0,
+            channel_retry_interval_ms: 0,
+            circuit_breaker_enabled: true,
+            per_model_circuit_break: false,
+            transforms: Vec::new(),
+            active_probe_enabled_override: None,
+            active_probe_interval_seconds_override: None,
+            active_probe_success_threshold_override: None,
+            active_probe_model_override: None,
+            request_timeout_ms_override: None,
+            max_input_tokens: None,
+            prompt_cache_incompatible_with_tools: None,
+            extra_fields_whitelist: None,
+            strip_cross_protocol_nested_extra: None,
+            enabled: true,
+            priority: Some(-10),
+        })
+        .await
+        .expect("create provider");
+    let channel_id = created.channel.id.clone();
+    // Establish the key's recent successful model on this channel.
+    let (status, body) = json_post(
+        &ctx,
+        "/v1/chat/completions",
+        json!({"model":"gpt-5-main-model","messages":[{"role":"user","content":"hi"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    wait_for_success_log(&ctx, "gpt-5-main-model").await;
+
+    // The helper model is not served upstream; the 503 model_not_found must not cool
+    // the channel, so the RTF fallback to gpt-5-main-model succeeds on the same channel.
+    let (status, body) = json_post(
+        &ctx,
+        "/v1/chat/completions",
+        json!({"model":"gpt-5-helper-missing-model","messages":[{"role":"user","content":"title"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let value: Value = serde_json::from_str(&body).expect("chat json");
+    assert_eq!(value["model"], json!("gpt-5-main-model"));
+    assert!(
+        helper_hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the helper model must have been attempted upstream"
+    );
+
+    let health = ctx.state.channel_health.lock().await;
+    let entry = health.get(&channel_id);
+    assert!(
+        entry.is_none_or(|entry| entry.healthy),
+        "a model_not_found failure must not mark the channel unhealthy: {entry:?}"
+    );
+}

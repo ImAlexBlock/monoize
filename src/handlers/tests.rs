@@ -3716,9 +3716,10 @@ fn midstream_terminal_failure_class_maps_breaker_relevant_signals() {
         );
     }
 
+    // RTA-5c: model-scoped signals never update Channel health in any class.
     assert_eq!(
         routing::midstream_terminal_failure_class(400, None, Some("model_not_found")),
-        Some(routing::RetryableFailureClass::Persistent)
+        None
     );
     assert_eq!(
         routing::midstream_terminal_failure_class(400, Some("rate_limit_exceeded"), None),
@@ -3734,6 +3735,19 @@ fn midstream_terminal_failure_class_maps_breaker_relevant_signals() {
     );
     assert_eq!(
         routing::midstream_terminal_failure_class(503, None, Some("model_not_found")),
+        None
+    );
+    assert_eq!(
+        routing::midstream_terminal_failure_class(404, Some("model_not_found"), None),
+        None
+    );
+    assert_eq!(
+        routing::midstream_terminal_failure_class(503, None, Some("unsupported_model")),
+        None
+    );
+    // Non-model-scoped signals keep their RTA-5a classes.
+    assert_eq!(
+        routing::midstream_terminal_failure_class(503, Some("invalid_api_key"), None),
         Some(routing::RetryableFailureClass::Persistent)
     );
 }
