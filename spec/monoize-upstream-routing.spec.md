@@ -335,6 +335,16 @@ missed on the third repetition, which places the defect at the upstream and outs
 control; routing the affected request shapes to a different upstream is the only gateway-side
 remedy.
 
+### 4.9 Recent-model fallback (RTF)
+
+RTF-1. A request routed by `forward_stream_typed` or `forward_nonstream_typed_with_task_state` (Responses, Chat Completions, and Messages) is *routing-exhausted* when it ends with the RTA-8b no-attempt error (`404 model_not_found` or `503 no_healthy_upstream`) or with the exhausted-attempts error of `build_exhausted_upstream_error`, before any byte reaches the client. The `thinking_signature_invalid` exception of that function is not routing-exhausted.
+
+RTF-2. On a routing-exhausted request, Monoize MUST select the fallback model `F` as the `model` of the most recent `request_logs` row with the same `api_key_id`, `status = 'success'`, `model` different from the requested model, and `created_at_unix_ms` within the last 24 hours. If the request has no API key, no row matches, the lookup fails, or `F` fails the key's model limits, Monoize MUST return the original error unchanged.
+
+RTF-3. When `F` exists and the client is still connected, Monoize MUST run the request once more with `model = F`. The retry is a complete new routing pass: it applies pricing, admission, transforms, and billing for `F`. The retry MUST NOT fall back again. Its request ID is the original request ID with the suffix `-fallback`; a request without a client request ID keeps none. The retry MUST NOT persist the request-capture session a second time.
+
+RTF-4. The first pass keeps its own error request-log row. The retry writes its own row. The client receives only the retry's result or error.
+
 ## 5. Streaming-specific Rule
 
 STRM-1. If downstream streaming has emitted a protocol data or error event, router MUST NOT switch provider/channel for that request. An SSE comment or protocol keep-alive event emitted before the first protocol data or error event does not disable fallback.

@@ -1200,19 +1200,49 @@ pub(super) async fn forward_nonstream_typed_with_task_state(
     capture: RequestCaptureContext,
     task_state: Option<&AdmittedRequestTaskState>,
 ) -> AppResult<Value> {
-    let (resp, logical_model) = execute_nonstream_typed_owned(
+    let first = execute_nonstream_typed_owned(
         state,
         auth,
-        req,
+        req.clone(),
         max_multiplier,
         downstream,
-        request_id,
-        request_ip,
-        client_session_id,
-        capture,
+        request_id.clone(),
+        request_ip.clone(),
+        client_session_id.clone(),
+        capture.clone(),
         task_state,
     )
-    .await?;
+    .await;
+    // RTF-1: nothing has reached the client yet, so an exhausted route may retry
+    // once with the key's recent successful model.
+    let (resp, logical_model) = match first {
+        Err(error) if error.routing_exhausted => {
+            let Some(fallback) = routing_fallback_model(state, auth, &req.model).await else {
+                return Err(error);
+            };
+            tracing::info!(
+                requested_model = %req.model,
+                fallback_model = %fallback,
+                "RTF-1 routing exhausted; retrying with the key's recent model"
+            );
+            let mut req = req;
+            req.model = fallback;
+            execute_nonstream_typed_owned(
+                state,
+                auth,
+                req,
+                max_multiplier,
+                downstream,
+                routing_fallback_request_id(request_id),
+                request_ip,
+                client_session_id,
+                capture.without_session(),
+                task_state,
+            )
+            .await?
+        }
+        other => other?,
+    };
     encode_response_for_downstream(downstream, &resp, &logical_model)
 }
 

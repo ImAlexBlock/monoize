@@ -29,6 +29,17 @@ Monoize tries the selected Provider's Channel, then falls forward to the next Pr
 | Other upstream errors (for example `400`, `401`, `404`) | No | Yes, at once |
 | Monoize-side errors (auth, balance, validation, billing) | No | No; routing stops |
 
+### Fallback to the key's recent model
+
+When every route for the requested model fails before any output, or no route exists, Monoize retries the request once with a different model.
+
+- The fallback model is the model of the API key's most recent successful request in the last 24 hours, other than the requested model.
+- Monoize does not retry when the key has no such request, when the key's model limits exclude that model, or when the client has disconnected.
+- The retry does not fall back again. Monoize bills the retry at the fallback model's price.
+- Request Logs show two rows: the failed request and the retry. The retry's request ID ends with `-fallback`.
+
+This keeps client helper tasks working. For example, Codex requests `gpt-6-luna` for thread titles. If no route serves that model, the request uses your main model.
+
 ## Streaming guarantee
 
 Fallback ends when the first response byte reaches the client. Before that byte, Monoize can switch Channels and Providers freely. After that byte, Monoize never switches. A visible stream therefore always comes from one generation.

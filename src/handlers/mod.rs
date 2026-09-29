@@ -1520,6 +1520,16 @@ pub(crate) struct RequestCaptureContext {
     session: Option<RequestCaptureSession>,
 }
 
+impl RequestCaptureContext {
+    /// A fallback retry (RTF-1) must not persist the capture session a second time.
+    pub(crate) fn without_session(&self) -> Self {
+        Self {
+            raw_input: self.raw_input.clone(),
+            session: None,
+        }
+    }
+}
+
 impl DownstreamProtocol {
     pub(crate) fn is_same_family(self, upstream: ProviderType) -> bool {
         matches!(

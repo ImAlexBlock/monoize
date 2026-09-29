@@ -1163,3 +1163,75 @@ async fn exhausted_upstream_error_preserves_last_upstream_error_fields() {
         Some("forced_daily_limit")
     );
 }
+
+async fn wait_for_success_log(ctx: &TestContext, model: &str) {
+    let user = ctx
+        .state
+        .user_store
+        .get_user_by_username("tenant-1")
+        .await
+        .expect("query user")
+        .expect("user exists");
+    for _ in 0..40 {
+        ctx.state.user_store.flush_all_batchers().await;
+        let (logs, _, _) = ctx
+            .state
+            .user_store
+            .list_request_logs_by_user(&user.id, 10, 0, Some(model), Some("success"), None, None, None, None)
+            .await
+            .expect("list request logs");
+        if !logs.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("success log for {model} was not persisted");
+}
+
+/// RTF-1: a model with no route falls back to the key's recent successful model.
+#[tokio::test]
+async fn exhausted_route_falls_back_to_the_keys_recent_model() {
+    let ctx = setup().await;
+    let (status, body) = json_post(
+        &ctx,
+        "/v1/chat/completions",
+        json!({"model":"gpt-5-mini-chat","messages":[{"role":"user","content":"hi"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    wait_for_success_log(&ctx, "gpt-5-mini-chat").await;
+
+    let (status, body) = json_post(
+        &ctx,
+        "/v1/chat/completions",
+        json!({"model":"auxiliary-model-without-route","messages":[{"role":"user","content":"title"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let value: Value = serde_json::from_str(&body).expect("chat json");
+    assert_eq!(value["model"], json!("gpt-5-mini-chat"));
+
+    let (status, body) = json_post(
+        &ctx,
+        "/v1/chat/completions",
+        json!({"model":"auxiliary-model-without-route","stream":true,"messages":[{"role":"user","content":"title"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("gpt-5-mini-chat"), "{body}");
+    assert!(!body.contains("\"error\""), "{body}");
+}
+
+/// RTF-1: without a recent successful model the exhausted error is returned unchanged.
+#[tokio::test]
+async fn exhausted_route_without_history_keeps_the_original_error() {
+    let ctx = setup().await;
+    let (status, body) = json_post(
+        &ctx,
+        "/v1/chat/completions",
+        json!({"model":"auxiliary-model-without-route","messages":[{"role":"user","content":"title"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("model_not_found"), "{body}");
+}

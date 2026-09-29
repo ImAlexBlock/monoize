@@ -1089,12 +1089,6 @@ fn extract_reasoning(obj: &Map<String, Value>) -> Option<ReasoningConfig> {
     })
 }
 
-#[cfg(test)]
-#[cfg(test)]
-pub(crate) fn parse_chat_reasoning_fields_probe(msg_obj: &Map<String, Value>, parts: &mut Vec<Part>) {
-    parse_chat_reasoning_fields(msg_obj, parts, true)
-}
-
 fn parse_chat_reasoning_fields(msg_obj: &Map<String, Value>, parts: &mut Vec<Part>, request_history: bool) {
     if let Some(details) = msg_obj.get("reasoning_details").and_then(|v| v.as_array()) {
         for detail in details {

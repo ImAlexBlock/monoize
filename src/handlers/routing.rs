@@ -1318,6 +1318,7 @@ pub(super) async fn no_attempt_error(
             format!("Model not found: {model}"),
         )
     }
+    .with_routing_exhausted()
 }
 
 pub(super) fn build_exhausted_upstream_error(model: &str, tried: &[TriedProvider]) -> AppError {
@@ -1352,6 +1353,9 @@ pub(super) fn build_exhausted_upstream_error(model: &str, tried: &[TriedProvider
         build_exhausted_error_detail(model, tried)
     };
     let mut err = AppError::new(status, code, message).with_internal_message(internal_message);
+    // A rejected thinking signature is a client-history error; another model would
+    // not repair it, so it never triggers the RTF-1 fallback.
+    err.routing_exhausted = !signature_invalid;
     if let Some(last) = last {
         err.upstream_status = last.upstream_status;
         err.upstream_code = last.upstream_code.clone();
@@ -1846,4 +1850,45 @@ fn merge_extra_fields_whitelist(
             Some(merged)
         }
     }
+}
+
+/// RTF-1 lookback window for the fallback model.
+const ROUTING_FALLBACK_LOOKBACK_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// RTF-1: the model of this API key's most recent successful request within the
+/// lookback window, excluding `failed_model`. Returns `None` when the request has no
+/// API key, no such request exists, the lookup fails, or the key's model limits
+/// forbid the candidate. The query runs only after routing is exhausted.
+pub(super) async fn routing_fallback_model(
+    state: &AppState,
+    auth: &crate::auth::AuthResult,
+    failed_model: &str,
+) -> Option<String> {
+    use sea_orm::ConnectionTrait;
+    let key_id = auth.api_key_id.as_deref()?;
+    let since = chrono::Utc::now().timestamp_millis() - ROUTING_FALLBACK_LOOKBACK_MS;
+    let db = &state.db_pool;
+    let row = db
+        .read()
+        .query_one(db.stmt(
+            "SELECT model FROM request_logs
+             WHERE api_key_id = $1 AND status = 'success' AND model <> $2
+               AND created_at_unix_ms >= $3
+             ORDER BY created_at_unix_ms DESC LIMIT 1",
+            vec![key_id.into(), failed_model.into(), since.into()],
+        ))
+        .await
+        .ok()??;
+    let model: String = row.try_get("", "model").ok()?;
+    if model.is_empty() || ensure_model_allowed(auth, &model).is_err() {
+        return None;
+    }
+    Some(model)
+}
+
+/// RTF-1: the first attempt's request-log admission stays active until its error log
+/// is written, so the retry needs its own identity. The suffix keeps both log rows
+/// traceable to one client request.
+pub(super) fn routing_fallback_request_id(request_id: Option<String>) -> Option<String> {
+    request_id.map(|id| format!("{id}-fallback"))
 }

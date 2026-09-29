@@ -17,6 +17,9 @@ pub struct AppError {
     /// receives sanitized text while internal logs retain full detail.
     pub internal_message: Option<String>,
     pub downstream_stream_terminal_sent: bool,
+    /// RTF-1: routing ended with no attempt or with every attempt failed before any
+    /// downstream output, so the request may be retried with a fallback model.
+    pub routing_exhausted: bool,
 }
 
 impl AppError {
@@ -33,6 +36,7 @@ impl AppError {
             upstream_param: None,
             internal_message: None,
             downstream_stream_terminal_sent: false,
+            routing_exhausted: false,
         }
     }
 
@@ -42,6 +46,11 @@ impl AppError {
     }
     pub fn with_downstream_stream_terminal_sent(mut self, sent: bool) -> Self {
         self.downstream_stream_terminal_sent = sent;
+        self
+    }
+
+    pub fn with_routing_exhausted(mut self) -> Self {
+        self.routing_exhausted = true;
         self
     }
 

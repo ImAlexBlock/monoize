@@ -332,7 +332,70 @@ where
     receiver_event_stream(rx).boxed()
 }
 
+/// RTF-1: forward once; when routing is exhausted before any downstream output and the
+/// client is still connected, retry once with the key's recent successful model.
 pub(super) async fn forward_stream_typed(
+    state: AppState,
+    auth: crate::auth::AuthResult,
+    req: urp::UrpRequest,
+    max_multiplier: Option<Multiplier>,
+    downstream: DownstreamProtocol,
+    request_id: Option<String>,
+    request_ip: Option<String>,
+    client_session_id: Option<String>,
+    capture: RequestCaptureContext,
+    downstream_gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> AppResult<
+    impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> + Send + 'static,
+> {
+    let first = forward_stream_typed_once(
+        state.clone(),
+        auth.clone(),
+        req.clone(),
+        max_multiplier,
+        downstream,
+        request_id.clone(),
+        request_ip.clone(),
+        client_session_id.clone(),
+        capture.clone(),
+        downstream_gone.clone(),
+    )
+    .await;
+    let error = match first {
+        Err(error)
+            if error.routing_exhausted
+                && !downstream_gone.load(std::sync::atomic::Ordering::Acquire) =>
+        {
+            error
+        }
+        other => return other,
+    };
+    let Some(fallback) = routing_fallback_model(&state, &auth, &req.model).await else {
+        return Err(error);
+    };
+    tracing::info!(
+        requested_model = %req.model,
+        fallback_model = %fallback,
+        "RTF-1 routing exhausted; retrying with the key's recent model"
+    );
+    let mut req = req;
+    req.model = fallback;
+    forward_stream_typed_once(
+        state,
+        auth,
+        req,
+        max_multiplier,
+        downstream,
+        routing_fallback_request_id(request_id),
+        request_ip,
+        client_session_id,
+        capture.without_session(),
+        downstream_gone,
+    )
+    .await
+}
+
+async fn forward_stream_typed_once(
     state: AppState,
     auth: crate::auth::AuthResult,
     mut req: urp::UrpRequest,
