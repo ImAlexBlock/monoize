@@ -7,7 +7,7 @@ import { useReducedMotion } from "framer-motion";
 // canvas is off-screen or the document is hidden, and reduced motion renders a
 // single static frame with no event listeners.
 const CELL = 10;
-const MAX_CELLS = 9000;
+const MAX_CELLS = 16000;
 const GLYPHS = ["·", "˙", ".", "ˑ", "﹒", "·", "•", "~"];
 
 export function CharacterOcean({ className = "" }: { className?: string }) {
@@ -50,7 +50,7 @@ export function CharacterOcean({ className = "" }: { className?: string }) {
 
       // Grow the cell size when the grid would exceed the cap, so cost stays bounded.
       cell = CELL;
-      while (Math.ceil(width / cell) * Math.ceil(height / cell) > MAX_CELLS) cell += 4;
+      while (Math.ceil(width / cell) * Math.ceil(height / cell) > MAX_CELLS) cell += 2;
       cols = Math.ceil(width / cell);
       rows = Math.ceil(height / cell);
       glyphs = new Array(cols * rows);
@@ -81,11 +81,11 @@ export function CharacterOcean({ className = "" }: { className?: string }) {
           const x = cx * cell;
           const i = cy * cols + cx;
 
-          // Sum of slow directional swells: the surface height field.
+          // Sum of directional swells that travel across the surface.
           const swell =
-            Math.sin(x * 0.013 + t * 0.5) +
-            Math.sin(y * 0.022 - t * 0.33) +
-            Math.sin((x * 0.6 + y) * 0.009 + t * 0.24);
+            Math.sin(x * 0.013 + t * 0.75) +
+            Math.sin(y * 0.022 - t * 0.5) +
+            Math.sin((x * 0.6 + y) * 0.009 + t * 0.4);
 
           const dx = x - pointer.x;
           const dy = y - pointer.y;
@@ -95,15 +95,15 @@ export function CharacterOcean({ className = "" }: { className?: string }) {
           // Water lights up on the crests. The pointer raises a local swell, so
           // the ripple pulls a band of sparkles along its trajectory.
           const crest = Math.max(0, swell + influence * 1.8 * Math.cos(dist * 0.05 - t * 4));
-          const base = Math.pow(Math.min(1, crest / 2.4), 2.4);
+          const base = Math.pow(Math.min(1, crest / 2.0), 2);
 
-          const speckle = 0.5 + 0.5 * Math.sin(x * 0.33 + y * 0.5 + t * 2.4 + phases[i]);
-          const twinkle = 0.4 + 0.6 * Math.sin(t * 3.2 + phases[i] * 3);
-          const alpha = base * (0.3 + 0.7 * speckle) * (0.5 + 0.5 * twinkle) * (0.9 + influence * 1.8);
-          if (alpha <= 0.05) continue;
+          const speckle = 0.5 + 0.5 * Math.sin(x * 0.33 + y * 0.5 + t * 3.0 + phases[i]);
+          const twinkle = 0.45 + 0.55 * Math.sin(t * 3.8 + phases[i] * 3);
+          const alpha = base * (0.35 + 0.65 * speckle) * (0.55 + 0.45 * twinkle) * (1.0 + influence * 1.8);
+          if (alpha <= 0.045) continue;
 
-          ctx.globalAlpha = Math.min(0.9, alpha * 1.5);
-          ctx.fillText(glyphs[i], x, y + swell * 2.2);
+          ctx.globalAlpha = Math.min(0.95, alpha * 1.7);
+          ctx.fillText(glyphs[i], x, y + swell * 2.4);
         }
       }
       ctx.globalAlpha = 1;

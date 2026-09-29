@@ -185,7 +185,7 @@ accessible names for icon-only controls, and touch targets of at least 44 by 44 
 
 PS-V6. Hover, focus, active, and selected states MUST NOT shift layout.
 
-PS-V7. The welcome hero MAY render a decorative character-ocean background. The background
+PS-V7. The welcome page MAY render a decorative character-ocean background. The background
 MUST be hidden from assistive technology and MUST NOT receive pointer events. Its cell grid
 MUST be bounded. The animation MUST pause when the canvas is off-screen or the document is
 hidden. Under `prefers-reduced-motion: reduce` it MUST render a single static frame and

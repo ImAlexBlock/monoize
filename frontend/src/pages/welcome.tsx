@@ -82,11 +82,12 @@ export function WelcomePage() {
   const exampleBase = base.baseUrl || "https://lynshen.org/v1";
 
   return (
-    <div>
-      <section className="relative isolate overflow-hidden border-b border-border">
-        <CharacterOcean className="pointer-events-none absolute inset-0 h-full w-full" />
-        <div className="relative mx-auto max-w-5xl px-5 sm:px-8 lg:px-10">
-          <header className="pb-12 pt-24 text-center sm:pt-28">
+    <div className="relative">
+      <CharacterOcean className="pointer-events-none fixed inset-0 z-0 h-full w-full" />
+      <div className="relative z-10">
+        <section className="relative overflow-hidden border-b border-border">
+          <div className="mx-auto max-w-5xl px-5 sm:px-8 lg:px-10">
+            <header className="pb-12 pt-24 text-center sm:pt-28">
         <motion.p
           className="font-mono text-xs uppercase tracking-[0.16em] text-muted-foreground"
           initial={{ opacity: 0 }}
@@ -141,11 +142,11 @@ export function WelcomePage() {
         >
           {t("publicSite.home.hint")}
         </motion.p>
-          </header>
-        </div>
-      </section>
+            </header>
+          </div>
+        </section>
 
-      <div className="mx-auto max-w-5xl px-5 sm:px-8 lg:px-10">
+        <div className="mx-auto max-w-5xl px-5 sm:px-8 lg:px-10">
       <div className="home-marquee mb-6 mt-2" aria-hidden="true">
         <div className="home-marquee-track">
           {[...modelChips, ...modelChips].map((chip, index) => (
@@ -249,6 +250,7 @@ export function WelcomePage() {
           ))}
         </div>
       </ScrollReveal>
+        </div>
       </div>
     </div>
   );
