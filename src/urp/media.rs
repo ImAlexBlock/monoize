@@ -505,22 +505,16 @@ pub fn prepare_tool_result_content(
                 source, metadata, ..
             } => {
                 if target == ProviderProtocol::ChatCompletion {
-                    return Err(
-                        "Chat tool results support text only; image content cannot be discarded."
-                            .into(),
-                    );
+                    // MT15b/MT15c: the Chat encoder relocates tool-result images
+                    // into a synthesized user message; keep them typed here.
+                    result.push(part);
+                    continue;
                 }
                 image(source, metadata, target, true)?;
             }
             ToolResultContent::File {
                 source, metadata, ..
             } => {
-                file(source, metadata, target, true)?;
-                if target != ProviderProtocol::Messages {
-                    result.extend(document_prefix(metadata));
-                    metadata.document_title = None;
-                    metadata.document_context = None;
-                }
                 if matches!(source, FileSource::Text { .. } | FileSource::Content { .. })
                     && target != ProviderProtocol::Messages
                 {
@@ -530,10 +524,21 @@ pub fn prepare_tool_result_content(
                     continue;
                 }
                 if target == ProviderProtocol::ChatCompletion {
-                    return Err(
-                        "Chat tool results support text only; file content cannot be discarded."
-                            .into(),
-                    );
+                    // MT15b: keep the MT12 title/context text, then mark the payload
+                    // itself instead of failing the request or validating media the
+                    // Chat wire shape cannot carry.
+                    result.extend(document_prefix(metadata));
+                    result.push(ToolResultContent::Text {
+                        text: "[file omitted: chat tool results are text only]".to_string(),
+                        extra_body: Default::default(),
+                    });
+                    continue;
+                }
+                file(source, metadata, target, true)?;
+                if target != ProviderProtocol::Messages {
+                    result.extend(document_prefix(metadata));
+                    metadata.document_title = None;
+                    metadata.document_context = None;
                 }
             }
             _ => {}

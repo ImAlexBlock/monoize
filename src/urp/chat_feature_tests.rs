@@ -953,7 +953,15 @@ fn chat_request_media_metadata_and_role_constraints() {
         let native = super::decode::openai_responses::decode_request(&json!({"model":"test","stream":stream,"input":[{
             "type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"keep"},{"type":"input_image","image_url":"https://example.com/image.png"}]
         }]})).unwrap();
-        assert!(encode::encode_request_checked(&native, "chat-test").is_err());
+        // MT15c: the image relocates to a synthesized user message instead of failing.
+        let encoded = encode::encode_request_checked(&native, "chat-test").unwrap();
+        let messages = encoded["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], json!("keep[image moved to the following message]"));
+        assert_eq!(messages[1]["role"], json!("user"));
+        assert_eq!(
+            messages[1]["content"][1],
+            json!({"type":"image_url","image_url":{"url":"https://example.com/image.png"}})
+        );
     }
 }
 
@@ -1096,7 +1104,22 @@ fn chat_compatible_tool_media_preserves_blocks_and_following_user() {
                 );
                 let roundtrip = super::decode::openai_responses::decode_request(&encoded).unwrap();
                 assert!(roundtrip.input.iter().any(|node| matches!(node,Node::ToolResult {content,..} if content.iter().any(|p|matches!(p,ToolResultContent::Image {..}|ToolResultContent::File {..})))));
-                assert!(encode::encode_request_checked(&canonical, "chat-test").is_err());
+                // MT15c: encoding succeeds; the tool image relocates to a synthesized
+                // user message right after the tool message.
+                {
+                    let chat = encode::encode_request_checked(&canonical, "chat-test").unwrap();
+                    let messages = chat["messages"].as_array().unwrap();
+                    let tool_index = messages
+                        .iter()
+                        .position(|message| {
+                            message["role"] == json!("tool") || message["role"] == json!("function")
+                        })
+                        .unwrap();
+                    if parts.iter().any(|part| matches!(part, ToolResultContent::Image { source: super::ImageSource::Url { .. }, .. })) {
+                        assert_eq!(messages[tool_index + 1]["role"], json!("user"));
+                        assert!(messages[tool_index + 1]["content"].to_string().contains("https://example.com/tool.png"));
+                    }
+                }
                 for node in &mut canonical.input {
                     if let Node::ToolResult { content, .. } = node {
                         for part in content {
@@ -1973,3 +1996,35 @@ async fn chat_equal_raw_and_summary_bytes_are_not_semantic_duplicates() {
 
 
 
+
+#[test]
+fn chat_tool_result_images_relocate_to_a_following_user_message() {
+    let req = decode::decode_request(&json!({
+        "model":"chat-test",
+        "messages":[
+            {"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"snap","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"call_1","content":[
+                {"type":"text","text":"shot: "},
+                {"type":"image_url","image_url":{"url":"https://example.com/a.png"}},
+                {"type":"text","text":" done"}
+            ]}
+        ]
+    }))
+    .unwrap();
+    let encoded = encode::encode_request(&req, "chat-test");
+    let messages = encoded["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["role"], json!("tool"));
+    assert_eq!(
+        messages[1]["content"],
+        json!("shot: [image moved to the following message] done")
+    );
+    assert_eq!(messages[2]["role"], json!("user"));
+    assert_eq!(
+        messages[2]["content"][0],
+        json!({"type":"text","text":"Images from the preceding tool result:"})
+    );
+    assert_eq!(
+        messages[2]["content"][1],
+        json!({"type":"image_url","image_url":{"url":"https://example.com/a.png"}})
+    );
+}

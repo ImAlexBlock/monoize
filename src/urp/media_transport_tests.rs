@@ -660,8 +660,19 @@ fn media_nested_tool_result_metadata_has_one_canonical_owner_and_survives_prepar
         let before = serde_json::to_value(content).unwrap();
         for target in TARGETS {
             if target == ProviderProtocol::ChatCompletion {
-                assert!(media::prepare_tool_result_content(content, target).is_err());
-                assert!(encode_request(target, &request).is_err());
+                // MT15b/MT15c: images stay typed through preparation and the encoder
+                // relocates them into a synthesized user message.
+                let prepared = media::prepare_tool_result_content(content, target).unwrap();
+                assert!(prepared
+                    .iter()
+                    .any(|part| matches!(part, crate::urp::ToolResultContent::Image { .. })));
+                let encoded = encode_request(target, &request).unwrap();
+                let messages = encoded["messages"].as_array().unwrap();
+                // assistant(tool_use), tool(text markers), synthesized user(images)
+                assert_eq!(messages.len(), 3);
+                assert_eq!(messages[1]["role"], json!("tool"));
+                assert_eq!(messages[2]["role"], json!("user"));
+                assert!(messages[2]["content"].to_string().contains("data:image/png;base64,"));
                 continue;
             }
             let prepared = media::prepare_tool_result_content(content, target).unwrap();

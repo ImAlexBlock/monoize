@@ -32,7 +32,23 @@ MT13. Messages MUST encode PDF bytes as a base64 PDF source. UTF-8 text-like byt
 MT14. Unsupported Messages binary files, unsupported image MIME types, and unsupported audio inputs MUST produce explicit errors.
 MT14a. A Messages URL document MUST have PDF evidence from typed MIME, the source document contract, or its URL extension. Other file URLs MUST fail.
 MT14b. Image preparation MUST validate MIME syntax and use its type and subtype. Parameters MUST NOT enter a target's fixed image MIME field.
-MT15. When encoding a Chat request, file URLs and unsupported media roles MUST produce explicit errors. Chat tool-result media MUST fail at target encoding.
+MT15. When encoding a Chat request, file URLs and unsupported media roles MUST produce explicit errors.
+
+MT15b. A Chat tool result carries only text. Target preparation MUST NOT validate or strip
+image parts of a Chat tool result (the encoder relocates them under MT15c). File parts keep
+their MT12 document title and context text followed by exactly
+`[file omitted: chat tool results are text only]`; text files still expand to text parts.
+Text parts keep their content and relative order. Non-Chat targets are unchanged.
+
+MT15c. Encoding a Chat request MUST emit each tool result as one `role:"tool"` message whose
+content joins its text parts with, per image part, the placeholder
+`[image moved to the following message]` in position. Immediately after that tool message the
+encoder MUST insert one synthesized `role:"user"` message whose content is one text part
+`Images from the preceding tool result:` followed by one `image_url` part per relocated image,
+in original order: URL sources use their URL, Base64 sources use a data URL of their MIME and
+bytes. An image with a file-ID source and no URL or Base64 form has no carrier and contributes
+only its placeholder. No other message may be inserted between the tool message and its
+synthesized user message.
 MT15a. Chat tool and function result decoders MUST accept compatible text, image, and file content. They MUST preserve content order and typed metadata.
 MT16. Responses assistant history MAY use stable easy-input messages with input media. Output-message content MUST contain only supported output types.
 MT17. Gemini FunctionResponsePart MUST use the GenerateContent schema. URL media requiring unsupported nested fileData MUST produce an explicit error.

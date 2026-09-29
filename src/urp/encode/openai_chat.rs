@@ -1130,14 +1130,36 @@ fn encode_messages(messages: &[Item]) -> Vec<Value> {
                 extra_body,
                 ..
             } => {
-                let text = content
-                    .iter()
-                    .filter_map(|content| match content {
-                        ToolResultContent::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
+                // MT15c: a Chat tool message is text-only; images relocate to a
+                // synthesized user message directly after the tool message.
+                let mut text = String::new();
+                let mut relocated_images = Vec::new();
+                for content in content {
+                    match content {
+                        ToolResultContent::Text { text: part, .. } => text.push_str(part),
+                        ToolResultContent::Image { source, .. } => {
+                            text.push_str("[image moved to the following message]");
+                            match source {
+                                crate::urp::ImageSource::Url { url, .. } => {
+                                    relocated_images.push(json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": url }
+                                    }));
+                                }
+                                crate::urp::ImageSource::Base64 { media_type, data } => {
+                                    relocated_images.push(json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": format!("data:{media_type};base64,{data}")
+                                        }
+                                    }));
+                                }
+                                crate::urp::ImageSource::FileId { .. } => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 let mut m = Map::new();
                 if extra_body.contains_key(CHAT_LEGACY_FUNCTION_RESULT_EXTRA_KEY) {
                     m.insert("role".to_string(), Value::String("function".to_string()));
@@ -1157,6 +1179,17 @@ fn encode_messages(messages: &[Item]) -> Vec<Value> {
                     m.insert("name".to_string(), Value::String(name.clone()));
                 }
                 out.push(Value::Object(m));
+                if !relocated_images.is_empty() {
+                    let mut image_message = vec![json!({
+                        "type": "text",
+                        "text": "Images from the preceding tool result:"
+                    })];
+                    image_message.extend(relocated_images);
+                    out.push(json!({
+                        "role": "user",
+                        "content": image_message
+                    }));
+                }
             }
             Item::Message {
                 id: _,
