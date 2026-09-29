@@ -191,6 +191,7 @@ TF-7. Built-ins that MUST exist are exactly:
 - `reasoning_effort_to_model_suffix`
 - `reasoning_from_think_xml`
 - `reasoning_inject_content_field`
+- `reasoning_strip_config`
 - `reasoning_strip_encrypted`
 - `reasoning_strip_input`
 - `reasoning_strip_output`
@@ -203,6 +204,12 @@ TF-7. Built-ins that MUST exist are exactly:
 - `role_system_to_developer`
 - `stream_force`
 - `stream_split_sse_frames`
+
+TF-SCR1. `reasoning_strip_config` applies in the request phase. Applying it MUST set
+`UrpRequest.reasoning` to none; it MUST NOT alter input nodes, tools, or sampling. It has no
+configuration and no state. Its purpose is upstream compatibility: an upstream that rejects
+carried thinking configuration (for example `requires adaptive thinking`) receives a plain
+non-thinking request.
 
 TF-7a. Every canonical transform ID MUST take the form `<domain>_<subject>` where `<domain>` is the first `_`-separated segment and MUST be one of exactly these seven values:
 1. `cache` — provider prompt-cache optimization;

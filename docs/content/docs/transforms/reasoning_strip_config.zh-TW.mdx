@@ -1,0 +1,39 @@
+---
+title: "推理：清除請求設定"
+description: 在上游編碼前清除請求層級的推理設定。
+---
+
+## What it does
+
+該轉換在上游編碼前移除請求層級的推理設定（thinking、effort、budget）。上游收到不帶思考設定的普通請求。輸入歷史中的推理節點不會被移除；需要移除時使用 `reasoning_strip_input`。
+
+## Reference
+
+| Property | Value |
+| --- | --- |
+| Type ID | `reasoning_strip_config` |
+| Phase | `request` |
+| Scopes | Provider, API key |
+
+## When to use
+
+- 上游拒絕攜帶 thinking 設定的請求。例如某些中轉對 `claude-opus-5-5` 回應「requires adaptive thinking」，只有完全不帶 thinking 才能通過。
+- 希望某個渠道始終發送不帶思考的請求，而其他渠道保留用戶端的推理設定。
+
+## Configuration
+
+This transform has no options. Use an empty `config` object.
+
+### Example rule
+
+```json
+{
+  "transform": "reasoning_strip_config",
+  "enabled": true,
+  "phase": "request",
+  "models": [
+    "*"
+  ],
+  "config": {}
+}
+```

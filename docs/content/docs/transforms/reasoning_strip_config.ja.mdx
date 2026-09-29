@@ -1,0 +1,39 @@
+---
+title: "推論：リクエスト設定を除去"
+description: 上流エンコード前にリクエストレベルの推論設定を除去します。
+---
+
+## What it does
+
+この変換は上流エンコード前のリクエストレベルの推論設定（thinking、effort、budget）を取り除きます。上流は思考設定のない通常のリクエストを受け取ります。入力履歴の推論ノードは削除されません。削除するには `reasoning_strip_input` を使います。
+
+## Reference
+
+| Property | Value |
+| --- | --- |
+| Type ID | `reasoning_strip_config` |
+| Phase | `request` |
+| Scopes | Provider, API key |
+
+## When to use
+
+- 上流が thinking 設定付きのリクエストを拒否する場合。たとえば一部の中継は `claude-opus-5-5` に対して「requires adaptive thinking」を返し、thinking を完全に省略しない限り通りません。
+- 特定チャネルだけ思考なしのリクエストを送り、他のチャネルはクライアントの推論設定を保持したい場合。
+
+## Configuration
+
+This transform has no options. Use an empty `config` object.
+
+### Example rule
+
+```json
+{
+  "transform": "reasoning_strip_config",
+  "enabled": true,
+  "phase": "request",
+  "models": [
+    "*"
+  ],
+  "config": {}
+}
+```

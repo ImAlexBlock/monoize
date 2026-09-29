@@ -1,0 +1,39 @@
+---
+title: "Reasoning: strip request config"
+description: Drop the request-level reasoning configuration before upstream encoding.
+---
+
+## What it does
+
+This transform removes the request-level reasoning configuration (thinking, effort, budget) before Monoize encodes the request for the upstream. The upstream receives a plain non-thinking request. Reasoning nodes in the input history are not removed; use `reasoning_strip_input` for that.
+
+## Reference
+
+| Property | Value |
+| --- | --- |
+| Type ID | `reasoning_strip_config` |
+| Phase | `request` |
+| Scopes | Provider, API key |
+
+## When to use
+
+- An upstream rejects requests that carry a thinking configuration. For example, an upstream answers `claude-opus-5-5 requires adaptive thinking` unless the request omits thinking entirely.
+- You want one channel to always send non-thinking requests, while other channels keep the client configuration.
+
+## Configuration
+
+This transform has no options. Use an empty `config` object.
+
+### Example rule
+
+```json
+{
+  "transform": "reasoning_strip_config",
+  "enabled": true,
+  "phase": "request",
+  "models": [
+    "*"
+  ],
+  "config": {}
+}
+```

@@ -33,6 +33,7 @@ pub mod reasoning_effort_to_budget;
 pub mod reasoning_effort_to_model_suffix;
 pub mod reasoning_from_think_xml;
 pub mod reasoning_inject_content_field;
+pub mod reasoning_strip_config;
 pub mod reasoning_strip_encrypted;
 pub mod reasoning_strip_input;
 pub mod reasoning_strip_output;
@@ -293,6 +294,7 @@ fn builtin_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(reasoning_from_think_xml::ReasoningFromThinkXmlTransform),
         Box::new(reasoning_inject_content_field::ReasoningInjectContentFieldTransform),
         Box::new(reasoning_strip_encrypted::ReasoningStripEncryptedTransform),
+        Box::new(reasoning_strip_config::ReasoningStripConfigTransform),
         Box::new(reasoning_strip_input::ReasoningStripInputTransform),
         Box::new(reasoning_strip_output::ReasoningStripOutputTransform),
         Box::new(reasoning_summary_heading::ReasoningSummaryHeadingTransform),
@@ -619,6 +621,7 @@ mod registry_tests {
         "reasoning_effort_to_model_suffix",
         "reasoning_from_think_xml",
         "reasoning_inject_content_field",
+        "reasoning_strip_config",
         "reasoning_strip_encrypted",
         "reasoning_strip_input",
         "reasoning_strip_output",

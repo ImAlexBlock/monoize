@@ -1,0 +1,39 @@
+---
+title: "推理：清除请求配置"
+description: 在上游编码前清除请求级的推理配置。
+---
+
+## What it does
+
+该转换在上游编码前移除请求级的推理配置（thinking、effort、budget）。上游收到不带思考配置的普通请求。输入历史中的推理节点不会被移除；需要移除时使用 `reasoning_strip_input`。
+
+## Reference
+
+| Property | Value |
+| --- | --- |
+| Type ID | `reasoning_strip_config` |
+| Phase | `request` |
+| Scopes | Provider, API key |
+
+## When to use
+
+- 上游拒绝携带 thinking 配置的请求。例如某些中转对 `claude-opus-5-5` 返回 “requires adaptive thinking”，只有完全不带 thinking 才能通过。
+- 希望某个渠道始终发送不带思考的请求，而其他渠道保留客户端的推理配置。
+
+## Configuration
+
+This transform has no options. Use an empty `config` object.
+
+### Example rule
+
+```json
+{
+  "transform": "reasoning_strip_config",
+  "enabled": true,
+  "phase": "request",
+  "models": [
+    "*"
+  ],
+  "config": {}
+}
+```
