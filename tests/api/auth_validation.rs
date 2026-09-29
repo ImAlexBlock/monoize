@@ -335,7 +335,7 @@ async fn public_site_settings_publish_exactly_the_public_site_allow_list() {
         .collect::<Vec<_>>();
     keys.sort_unstable();
     assert_eq!(keys, ["api_base_url", "site_description", "site_name"]);
-    assert_eq!(body["site_name"], json!("LingShenAI Console"));
+    assert_eq!(body["site_name"], json!("LynShen Console"));
 }
 
 #[tokio::test]
@@ -370,7 +370,7 @@ async fn settings_startup_rebrands_only_the_old_builtin_site_name() {
         .expect("settings initialize");
     assert_eq!(
         store.get("site_name").await.unwrap().as_deref(),
-        Some("LingShenAI Console")
+        Some("LynShen Console")
     );
 
     store

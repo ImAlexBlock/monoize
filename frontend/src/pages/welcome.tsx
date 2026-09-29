@@ -230,7 +230,7 @@ export function WelcomePage() {
       return item;
     });
   }, [featuredMarketplace, featuredOffset]);
-  const siteName = site?.site_name || "LingShenAI Console";
+  const siteName = site?.site_name || "LynShen Console";
   const base = resolvePublicApiBaseUrl(site?.api_base_url || "", window.location.origin);
   const exampleBase = base.baseUrl || "https://lynshen.org/v1";
 

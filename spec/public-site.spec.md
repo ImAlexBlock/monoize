@@ -1,10 +1,10 @@
-# LingShenAI Public Site Specification
+# LynShen Public Site Specification
 
 ## 0. Scope
 
 PS-0.1. This specification defines the public browser routes, the public site-settings API,
 the shared public API controls, the welcome page, the API documentation page, localization,
-and LingShenAI branding.
+and LynShen branding.
 
 PS-0.2. `model-marketplace.spec.md` defines Marketplace payloads and pagination.
 `public-provider-status.spec.md` defines Provider status payloads and aggregation.
@@ -149,7 +149,7 @@ PS-W3. The primary actions MUST link to `/dashboard` and `/apidocs`. The Marketp
 action MUST link to `/marketplace`. The final actions MUST link to `/dashboard` and
 `/status`.
 
-PS-W4. Welcome-page claims MUST describe LingShenAI as a hosted AI API relay service. They
+PS-W4. Welcome-page claims MUST describe LynShen as a hosted AI API relay service. They
 MUST NOT present Monoize internals, self-hosting, Provider administration, Channel
 configuration, URP, transforms, or Rust implementation details as customer benefits.
 
@@ -252,8 +252,8 @@ i18next catalog. Public browser paths MUST NOT gain locale prefixes.
 PS-L2. Every public user-visible string MUST exist in all four catalogs. Canonical product
 nouns, endpoint paths, and environment-variable names MUST remain English in every locale.
 
-PS-L3. The built-in `site_name` default MUST be `LingShenAI Console`. The static HTML fallback
-title MUST be `LingShenAI Console`.
+PS-L3. The built-in `site_name` default MUST be `LynShen Console`. The static HTML fallback
+title MUST be `LynShen Console`.
 
 PS-L4. The login page, Console layout, welcome page, Marketplace, API Docs, and status page
 MUST render the runtime `site_name`.

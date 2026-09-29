@@ -171,7 +171,7 @@ function Sidebar({
   const showOrgEntries = hasOrgs || (orgOverview?.can_create ?? false);
   const inOrgMode = window.location.pathname.startsWith("/org");
   const { data: publicSite } = usePublicSiteSettings();
-  const siteName = publicSite?.site_name || "LingShenAI Console";
+  const siteName = publicSite?.site_name || "LynShen Console";
 
   const navItems = [
     { to: "/dashboard", icon: LayoutDashboard, label: t("nav.dashboard"), exact: true },

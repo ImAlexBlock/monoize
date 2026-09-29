@@ -50,7 +50,7 @@
       "clientsTitle": "Connect common SDKs and coding tools directly.",
       "clientsDescription": "A client can connect when it accepts a custom Base URL and API key. Model availability depends on its Group and the Model Marketplace.",
       "advantagesTitle": "Routing, prices, billing, and records in one relay.",
-      "advantagesDescription": "Stop managing separate model platforms. LingShenAI puts model selection, Provider routing, balance, and usage records under one account.",
+      "advantagesDescription": "Stop managing separate model platforms. LynShen puts model selection, Provider routing, balance, and usage records under one account.",
       "tasksTitle": "Build, collaborate, fund, and audit from one Console.",
       "tasksDescription": "Developers can connect models quickly. Teams can share balance and keys while tracking member usage and controlling budgets separately.",
       "lowPriceTitle": "Live prices · Current low-price models",
@@ -68,7 +68,7 @@
       "operationsTitle": "Every request has a status, usage record, and charge.",
       "operationsDescription": "Public Provider status, personal request records, and account balance use one set of operational pages.",
       "codeTitle": "Send standard HTTP from any runtime.",
-      "codeDescription": "Authenticate with a LingShenAI API key. Keep the request body in the protocol your client already uses.",
+      "codeDescription": "Authenticate with a LynShen API key. Keep the request body in the protocol your client already uses.",
       "finalTitle": "Create a key and send your first request.",
       "finalDescription": "Open Console to manage keys and balance, or review public Provider status first.",
       "viewStatus": "View status"

@@ -146,7 +146,7 @@ export function PublicUsageRankingPage() {
     <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
       <header className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
         <div className="max-w-3xl">
-          <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-primary">{site.data?.site_name || "LingShenAI Console"}</p>
+          <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-primary">{site.data?.site_name || "LynShen Console"}</p>
           <h1 className="mt-3 text-balance font-display text-3xl font-semibold tracking-tight sm:text-4xl">{t("publicSite.usageRanking.title")}</h1>
           <p className="mt-3 text-pretty text-base leading-7 text-muted-foreground">{t("publicSite.usageRanking.description")}</p>
         </div>

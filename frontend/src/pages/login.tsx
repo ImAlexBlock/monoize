@@ -49,7 +49,7 @@ export function LoginPage() {
     isLoading: publicSettingsLoading,
   } = usePublicSettings();
   const registrationEnabled = publicSettings?.registration_enabled ?? true;
-  const siteName = publicSettings?.site_name ?? "LingShenAI Console";
+  const siteName = publicSettings?.site_name ?? "LynShen Console";
 
   const { login, register, user } = useAuth();
   const navigate = useNavigate();

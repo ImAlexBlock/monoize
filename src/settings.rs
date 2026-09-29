@@ -193,7 +193,7 @@ impl Default for SystemSettings {
             default_user_role: "user".to_string(),
             session_ttl_days: 7,
             api_key_max_per_user: 1000,
-            site_name: "LingShenAI Console".to_string(),
+            site_name: "LynShen Console".to_string(),
             site_description: "Unified Responses Proxy".to_string(),
             api_base_url: String::new(),
             global_transforms: Vec::new(),
@@ -504,11 +504,11 @@ impl SettingsStore {
         let _write_guard = self.db.write().await;
         // PS-L5: only superseded built-in defaults are replaced; an
         // administrator-edited site_name is never overwritten.
-        for superseded in ["Monoize Dashboard", "LynShen Console"] {
+        for superseded in ["Monoize Dashboard"] {
             system_settings::Entity::update_many()
                 .col_expr(
                     system_settings::Column::Value,
-                    sea_orm::sea_query::Expr::value("LingShenAI Console"),
+                    sea_orm::sea_query::Expr::value("LynShen Console"),
                 )
                 .col_expr(
                     system_settings::Column::UpdatedAt,

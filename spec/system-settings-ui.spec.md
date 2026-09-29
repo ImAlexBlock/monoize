@@ -10,9 +10,9 @@ SS-MIG-2. A committed change that can alter `reasoning_suffix_map` bytes MUST ad
 Marketplace generation under `model-marketplace.spec.md` MM-G7 through MM-G13. An
 unrelated setting write or an `updated_at`-only write MUST NOT advance that generation.
 
-SS-MIG-3. The built-in `site_name` default is `LingShenAI Console`. A migration may replace a
-stored value only when it exactly equals an old built-in default (`Monoize Dashboard`,
-`LynShen Console`). The settings UI MUST
+SS-MIG-3. The built-in `site_name` default is `LynShen Console`. A migration may replace a
+stored value only when it exactly equals an old built-in default (`Monoize Dashboard`).
+The settings UI MUST
 preserve an administrator-defined site name.
 
 ## 0. Scope
