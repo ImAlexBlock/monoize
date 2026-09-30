@@ -98,3 +98,18 @@ logged TTFB p50 4685 ms, p95 9105.6 ms, p99 10425.12 ms.
 The same window contained 42 client-disconnect records and 6 errors.
 No pool-acquire warning appeared in the sampled five-minute application log.
 Logged TTFB is not yet verified as first-content-token latency.
+
+## Authorized Connection Closure
+
+At 23:08 Asia/Shanghai on 2026-09-30, the operator authorized closing the stalled stream.
+The exact source socket was `127.0.0.1:8080 -> 127.0.0.1:38510`.
+Ownership and its unchanged 2549509-byte send queue were checked before closure.
+Only this socket was closed. Caddy was not restarted or reloaded.
+The queued response bytes were not delivered; this was an operator-approved interruption.
+
+At 23:09 Asia/Shanghai, all monitored application ports had zero accepted connections.
+The active Monoize spool contained zero files and zero admission records.
+Request logs remained at 667398 rows.
+Application containers still run. Background writes are not fenced.
+Final backups, final database comparison, target production activation, and DNS restoration
+remain outstanding.
