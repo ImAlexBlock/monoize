@@ -218,7 +218,7 @@ fn postgres_rebuild_statements() -> Vec<String> {
                 created_by_user_id, created_at
          FROM store_redemption_codes_legacy"
             .to_string(),
-        "DROP TABLE store_redemption_codes_legacy".to_string(),
+        "DROP TABLE store_redemption_codes_legacy CASCADE".to_string(),
         "ALTER TABLE store_redemption_codes_v2 RENAME TO store_redemption_codes".to_string(),
         "ALTER TABLE store_payment_channels RENAME TO store_payment_channels_legacy".to_string(),
         "CREATE TABLE store_payment_channels (
@@ -240,7 +240,6 @@ fn postgres_rebuild_statements() -> Vec<String> {
                 icon_value, sort_order, 0, 1, created_at, updated_at
          FROM store_payment_channels_legacy"
             .to_string(),
-        "DROP TABLE store_payment_channels_legacy".to_string(),
         "INSERT INTO store_payment_channels
             (id, adapter_kind, name, icon_kind, icon_value, sort_order, enabled, revision, created_at, updated_at)
          VALUES ('store-channel-stripe', 'stripe', 'Stripe', 'builtin', 'stripe', 30, 0, 1,
@@ -271,8 +270,14 @@ fn postgres_rebuild_statements() -> Vec<String> {
                 NULL, NULL
          FROM store_orders"
             .to_string(),
-        "DROP TABLE store_orders".to_string(),
+        "DROP TABLE store_orders CASCADE".to_string(),
         "ALTER TABLE store_orders_v2 RENAME TO store_orders".to_string(),
+        // Dropping the legacy channels table must happen after store_orders was
+        // rebuilt: the old store_orders foreign key still references the
+        // renamed legacy table, and PostgreSQL enforces the dependency.
+        // CASCADE drops only the stale referencing constraints carried over by
+        // the rename (fresh schema replay path; SQLite builds never hit this).
+        "DROP TABLE store_payment_channels_legacy CASCADE".to_string(),
     ]
 }
 

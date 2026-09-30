@@ -650,6 +650,10 @@ pub struct UserStore {
     pub(crate) api_key_cache: crate::db_cache::ApiKeyCache,
     pub(crate) balance_cache: crate::db_cache::BalanceCache,
     pub(crate) usage_read_cache: crate::db_cache::UsageReadCache,
+    pub(crate) spend_key_window_cache:
+        crate::db_cache::SpendWindowCache<Option<org_limits::OrgSpendWindows>>,
+    pub(crate) spend_org_level_cache:
+        crate::db_cache::SpendWindowCache<org_limits::OrgLimitLevels>,
     pub(crate) registration_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     pub(crate) api_key_creation_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
@@ -1009,7 +1013,7 @@ pub struct AdminUsageTotals {
     pub output_tokens: i128,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChannelTodayUsage {
     pub channel_id: String,
     pub today_calls: i64,

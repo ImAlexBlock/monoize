@@ -163,38 +163,75 @@ pub async fn get_admin_overview(
 
     // AD-2: the embedded ranking covers the current Asia/Shanghai local day,
     // aligned with the `today` aggregate window.
-    let ranking_window_from = crate::beijing_time::beijing_today_start_utc(now).to_rfc3339();
-    let ranking = state
-        .user_store
-        .get_users_usage_ranking(&ranking_window_from, &now.to_rfc3339(), 20)
-        .await
-        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e))?;
-    let users_ranking: Vec<Value> = ranking
-        .into_iter()
-        .map(|row| {
-            json!({
-                "user_id": row.user_id,
-                "username": row.username,
-                "call_count": row.call_count,
-                "cost_nano_usd": row.cost_nano_usd.to_string(),
-            })
-        })
-        .collect();
+    // DPT-DA1: the three overview aggregates are the widest admin scans; one
+    // cached bundle serves every poll inside the TTL window.
+    let overview_cache_key = "admin_overview|agg";
+    let overview_agg = match state.dashboard_agg_cache.get(overview_cache_key) {
+        Some(cached) => cached,
+        None => {
+            let ranking_window_from =
+                crate::beijing_time::beijing_today_start_utc(now).to_rfc3339();
+            let ranking = state
+                .user_store
+                .get_users_usage_ranking(&ranking_window_from, &now.to_rfc3339(), 20)
+                .await
+                .map_err(|e| {
+                    AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e)
+                })?;
+            let users_ranking: Vec<Value> = ranking
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "user_id": row.user_id,
+                        "username": row.username,
+                        "call_count": row.call_count,
+                        "cost_nano_usd": row.cost_nano_usd.to_string(),
+                    })
+                })
+                .collect();
 
-    let today_start = crate::beijing_time::beijing_today_start_utc(Utc::now()).to_rfc3339();
-    let (today_calls, today_cost_nano_usd) = state
-        .user_store
-        .get_today_usage_totals(&today_start)
-        .await
-        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e))?;
-    let channel_today: HashMap<String, crate::users::ChannelTodayUsage> = state
-        .user_store
-        .get_channels_today_usage(&today_start)
-        .await
-        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e))?
-        .into_iter()
-        .map(|row| (row.channel_id.clone(), row))
-        .collect();
+            let today_start =
+                crate::beijing_time::beijing_today_start_utc(Utc::now()).to_rfc3339();
+            let (today_calls, today_cost_nano_usd) = state
+                .user_store
+                .get_today_usage_totals(&today_start)
+                .await
+                .map_err(|e| {
+                    AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e)
+                })?;
+            let channel_today: HashMap<String, crate::users::ChannelTodayUsage> = state
+                .user_store
+                .get_channels_today_usage(&today_start)
+                .await
+                .map_err(|e| {
+                    AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e)
+                })?
+                .into_iter()
+                .map(|row| (row.channel_id.clone(), row))
+                .collect();
+            let agg = json!({
+                "users_ranking": users_ranking,
+                "today_calls": today_calls,
+                "today_cost_nano_usd": today_cost_nano_usd.to_string(),
+                "channel_today": channel_today,
+            });
+            state
+                .dashboard_agg_cache
+                .put(overview_cache_key, agg.clone());
+            agg
+        }
+    };
+    let users_ranking: Vec<Value> = overview_agg["users_ranking"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let today_calls: i64 = overview_agg["today_calls"].as_i64().unwrap_or(0);
+    let today_cost_display: String = overview_agg["today_cost_nano_usd"]
+        .as_str()
+        .unwrap_or("0")
+        .to_string();
+    let channel_today: HashMap<String, crate::users::ChannelTodayUsage> =
+        serde_json::from_value(overview_agg["channel_today"].clone()).unwrap_or_default();
 
     let providers = state
         .monoize_store
@@ -332,7 +369,7 @@ pub async fn get_admin_overview(
         },
         "today": {
             "calls": today_calls,
-            "cost_nano_usd": today_cost_nano_usd.to_string(),
+            "cost_nano_usd": today_cost_display,
         },
         "users_ranking": users_ranking,
         "channel_health": channel_health,
@@ -395,6 +432,20 @@ async fn build_usage_ranking(
     is_admin: bool,
     window: UsageRankingWindow,
 ) -> AppResult<Value> {
+    // DPT-DA1: the ranking aggregate scans the whole time range per call; one
+    // cached response serves every poller inside the TTL window.
+    let window_tag = match window {
+        UsageRankingWindow::Today => "today".to_string(),
+        UsageRankingWindow::RollingHours(hours) => format!("h{hours}"),
+    };
+    let cache_key = format!(
+        "usage_ranking|{}|{}|{window_tag}",
+        caller.map(|user| user.id.as_str()).unwrap_or("anon"),
+        is_admin,
+    );
+    if let Some(cached) = state.dashboard_agg_cache.get(&cache_key) {
+        return Ok(cached);
+    }
     let now = Utc::now();
     let (time_from, time_to) = match window {
         UsageRankingWindow::Today => {
@@ -583,6 +634,7 @@ async fn build_usage_ranking(
         response["current_user_rank"] = json!(current_user_rank);
     }
     insert_admin_usage_cost(&mut response, totals.cost_nano_usd, is_admin);
+    state.dashboard_agg_cache.put(&cache_key, response.clone());
     Ok(response)
 }
 

@@ -206,6 +206,7 @@ pub struct AppState {
     pub replica_heartbeats: Arc<DashMap<String, crate::replica::metering::ReplicaHeartbeatRecord>>,
     pub metrics: PrometheusHandle,
     pub user_store: UserStore,
+    pub dashboard_agg_cache: crate::dashboard_agg_cache::DashboardAggCache,
     pub settings_store: SettingsStore,
     pub monoize_store: MonoizeRoutingStore,
     pub monoize_runtime: Arc<tokio::sync::RwLock<MonoizeRuntimeConfig>>,
@@ -1287,6 +1288,7 @@ pub async fn load_state_with_runtime(runtime: RuntimeConfig) -> AppResult<AppSta
         replica_heartbeats: Arc::new(DashMap::new()),
         metrics,
         user_store,
+        dashboard_agg_cache: crate::dashboard_agg_cache::DashboardAggCache::from_env(),
         settings_store,
         monoize_store,
         monoize_runtime,
@@ -2588,7 +2590,105 @@ fn build_v1_router() -> Router<AppState> {
             "/images/edits",
             post(crate::handlers::image_api::create_image_edit),
         )
+        .route_layer(axum::middleware::from_fn(forward_admission_middleware))
         .layer(CorsLayer::permissive())
+}
+
+fn forward_inflight_limit() -> Option<usize> {
+    std::env::var("MONOIZE_FORWARD_INFLIGHT_LIMIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn forward_queue_timeout() -> std::time::Duration {
+    let millis = std::env::var("MONOIZE_FORWARD_QUEUE_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(5_000);
+    std::time::Duration::from_millis(millis)
+}
+
+fn forward_inflight_semaphore() -> Option<std::sync::Arc<tokio::sync::Semaphore>> {
+    static SLOTS: std::sync::OnceLock<
+        Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    > = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| {
+            forward_inflight_limit()
+                .map(|limit| std::sync::Arc::new(tokio::sync::Semaphore::new(limit)))
+        })
+        .clone()
+}
+
+/// RRB-FA1: the admission middleware guards only the forwarding generation
+/// endpoints. Dashboard, auth, and admin routes never consume slots (RRB-FA5).
+fn is_forwarding_generation_request(method: &axum::http::Method, path: &str) -> bool {
+    if method != axum::http::Method::POST {
+        return false;
+    }
+    matches!(
+        path,
+        "/v1/responses"
+            | "/responses"
+            | "/v1/codex/responses"
+            | "/v1/responses/compact"
+            | "/responses/compact"
+            | "/v1/chat/completions"
+            | "/chat/completions"
+            | "/v1/completions"
+            | "/completions"
+            | "/v1/messages"
+            | "/messages"
+            | "/v1/images/generations"
+            | "/images/generations"
+            | "/v1/images/edits"
+            | "/images/edits"
+    )
+}
+
+/// Permit holder placed into the response extensions: hyper drops the response
+/// and its extensions when the body is fully sent or aborted (RRB-FA3), which
+/// releases the slot.
+#[derive(Clone)]
+struct ForwardInflightPermit(std::sync::Arc<tokio::sync::OwnedSemaphorePermit>);
+
+async fn forward_admission_middleware(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Some(semaphore) = forward_inflight_semaphore() else {
+        return next.run(request).await;
+    };
+    if !is_forwarding_generation_request(request.method(), request.uri().path()) {
+        return next.run(request).await;
+    }
+    let permit = match tokio::time::timeout(
+        forward_queue_timeout(),
+        semaphore.acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            let mut response = crate::error::AppError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "gateway_saturated",
+                "gateway is saturated; retry shortly",
+            )
+            .into_response();
+            response
+                .headers_mut()
+                .insert("retry-after", axum::http::HeaderValue::from_static("2"));
+            return response;
+        }
+    };
+    let mut response = next.run(request).await;
+    response.extensions_mut().insert(ForwardInflightPermit(std::sync::Arc::new(
+        permit,
+    )));
+    response
 }
 
 fn build_root_api_router(metrics_path: &str) -> Router<AppState> {

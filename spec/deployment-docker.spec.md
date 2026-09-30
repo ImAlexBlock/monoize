@@ -56,6 +56,11 @@ entries for `MONOIZE_LISTEN`, `MONOIZE_BOOT_STANDBY_LEASE`,
 `MONOIZE_DEPLOYMENT_CONTROL_TOKEN` before supplying exactly one replacement
 for each. Reuse the serving restart policy, host network, UID 1000, and data
 mount. Do not print the deployment control token or other environment values.
+After the replacements, append `KEY=VALUE` lines from `/opt/monoize/env-extra.txt`
+to the environment file when that file exists. An absent file changes nothing.
+`env-extra.txt` lets an operator add or override candidate environment without
+editing the swap script; entries never persist back into the serving container
+environment.
 
 BG6. Each candidate MUST have its own persistent request-log spool, under
 `/app/data/request-log-spool-<rev>-<timestamp>`. Create its host directory with

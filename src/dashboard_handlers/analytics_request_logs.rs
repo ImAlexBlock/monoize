@@ -386,6 +386,19 @@ pub async fn get_dashboard_analytics(
         }
     };
 
+    // DPT-DA1: the bucketed aggregate is one of the widest dashboard scans;
+    // serve it from the server-side result cache when fresh. Timestamp fields
+    // inside the payload reflect the moment the entry was built (staleness
+    // bounded by MONOIZE_DASHBOARD_AGG_CACHE_TTL_MS).
+    let cache_key = format!(
+        "analytics|{}|{}|{buckets}|{range_hours}",
+        user_id_filter.as_deref().unwrap_or("-"),
+        group_id_filter.as_deref().unwrap_or("-"),
+    );
+    if let Some(cached) = state.dashboard_agg_cache.get(&cache_key) {
+        return Ok(Json(cached));
+    }
+
     let raw = state
         .user_store
         .get_dashboard_analytics(
@@ -401,14 +414,9 @@ pub async fn get_dashboard_analytics(
         .await
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e))?;
 
-    Ok(Json(render_analytics_json(
-        &raw,
-        buckets,
-        range_hours,
-        now,
-        &time_from,
-        &time_to,
-    )?))
+    let rendered = render_analytics_json(&raw, buckets, range_hours, now, &time_from, &time_to)?;
+    state.dashboard_agg_cache.put(&cache_key, rendered.clone());
+    Ok(Json(rendered))
 }
 
 #[derive(Debug, Deserialize)]
@@ -437,13 +445,18 @@ pub async fn get_cache_hit_rate_by_users(
         ));
     }
     let range_hours = query.range_hours.clamp(1, 720);
+    // DPT-DA1: super-admin cache table aggregate, cached per range.
+    let cache_key = format!("cache_users|{range_hours}");
+    if let Some(cached) = state.dashboard_agg_cache.get(&cache_key) {
+        return Ok(Json(cached));
+    }
     let time_from_unix_ms = (Utc::now() - chrono::Duration::hours(range_hours)).timestamp_millis();
     let rows = state
         .user_store
         .get_cache_hit_rate_by_users(time_from_unix_ms)
         .await
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e))?;
-    Ok(Json(json!({
+    let rendered = json!({
         "range_hours": range_hours,
         "users": rows
             .iter()
@@ -457,7 +470,9 @@ pub async fn get_cache_hit_rate_by_users(
                 })
             })
             .collect::<Vec<_>>(),
-    })))
+    });
+    state.dashboard_agg_cache.put(&cache_key, rendered.clone());
+    Ok(Json(rendered))
 }
 
 /// Shared response shape for every analytics consumer (self, admin, org space).

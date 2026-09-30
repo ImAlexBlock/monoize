@@ -33,7 +33,8 @@ RRB-R1. The following process-local limits parse per RRB-C1 with the listed defa
 |---|---|---|
 | `MONOIZE_SQLITE_CACHE_KIB` | 16384 | SQLite per-connection page cache (KiB) |
 | `MONOIZE_SQLITE_MMAP_BYTES` | 67108864 | SQLite `mmap_size` |
-| `MONOIZE_SQLITE_READ_CONNECTIONS` | 4 | SQLite read pool size |
+| `MONOIZE_SQLITE_READ_CONNECTIONS` | 8 | SQLite read pool size |
+| `MONOIZE_SQLITE_JOURNAL_SIZE_LIMIT_BYTES` | 268435456 | SQLite `journal_size_limit` (WAL file ceiling after checkpoint) |
 | `MONOIZE_TOKIO_WORKER_THREADS` | 6 | async runtime worker threads |
 | `MONOIZE_TOKIO_MAX_BLOCKING_THREADS` | 64 | async runtime blocking pool bound |
 | `MONOIZE_UPSTREAM_RESPONSE_MAX_BYTES` | 67108864 | bounded read of non-stream upstream response bodies |
@@ -44,4 +45,31 @@ RRB-R1. The following process-local limits parse per RRB-C1 with the listed defa
 | `MONOIZE_ACTIVE_PROBE_TICK_SECONDS` | 5 | active-probe scheduler tick |
 | `MONOIZE_HTTP_CLIENT_POOL_IDLE` | 90 | reqwest idle-connection timeout (seconds) |
 | `MONOIZE_HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST` | 32 | reqwest idle connections per host |
+| `MONOIZE_SPEND_WINDOW_CACHE_TTL_MS` | 5000 | spend-window preflight cache TTL (`0` disables) |
+| `MONOIZE_SPEND_WINDOW_CACHE_CAPACITY` | 10000 | spend-window cache entry capacity |
+| `MONOIZE_REGISTRY_SNAPSHOT_TTL_MS` | 60000 | routing registry snapshot TTL (`0` disables) |
+| `MONOIZE_DASHBOARD_AGG_CACHE_TTL_MS` | 10000 | dashboard aggregate cache TTL (`0` disables) |
+| `MONOIZE_DASHBOARD_AGG_CACHE_CAPACITY` | 256 | dashboard aggregate cache entry capacity |
+| `MONOIZE_FORWARD_INFLIGHT_LIMIT` | 0 | global forwarding admission slots (`0` disables) |
+| `MONOIZE_FORWARD_QUEUE_TIMEOUT_MS` | 5000 | forwarding admission queue budget |
 | `MONOIZE_STUDIO_BRIDGE_*` | — | see `studio-bridge.spec.md` §1 |
+
+## 4. Forwarding admission control
+
+RRB-FA1. When `MONOIZE_FORWARD_INFLIGHT_LIMIT` is a positive integer, every forwarded
+generation request (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, and their
+protocol variants) MUST acquire one slot from a process-global counting semaphore
+before the routing phase begins.
+
+RRB-FA2. A request that cannot acquire a slot within `MONOIZE_FORWARD_QUEUE_TIMEOUT_MS`
+MUST receive HTTP `503` with code `gateway_saturated` and header `Retry-After: 2`. It
+MUST NOT reach the upstream dispatch phase.
+
+RRB-FA3. The slot MUST be released when the downstream response reaches a terminal
+state: response body fully sent, stream closed, or request aborted. A dropped future
+(client disconnect) MUST release the slot via guard drop.
+
+RRB-FA4. `MONOIZE_FORWARD_INFLIGHT_LIMIT` equal to `0` (the default) MUST disable the
+semaphore entirely; requests then proceed without admission control.
+
+RRB-FA5. Dashboard, auth, and admin endpoints MUST NOT consume forwarding slots.

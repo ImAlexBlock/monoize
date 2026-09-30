@@ -1768,10 +1768,13 @@ async fn ensure_balance_before_forward(
     }
     // ORGL-19: admission preflight for personal-key spend windows. Same limit
     // set as the settlement check; advisory-fast so a race is closed there.
+    // DPT-SW5: preflight reads through the short-TTL single-flight cache; the
+    // settlement check re-reads the database directly.
     if auth.org_key.is_none()
         && let Some(api_key_id) = auth.api_key_id.as_deref()
     {
-        match crate::users::org_limits::load_key_windows(&state.user_store, api_key_id).await {
+        match crate::users::org_limits::load_key_windows_cached(&state.user_store, api_key_id).await
+        {
             Ok(Some(windows)) => {
                 if let Err(breach) = crate::users::org_limits::evaluate_key_windows(&windows) {
                     return Err(AppError::new(
@@ -1798,7 +1801,7 @@ async fn ensure_balance_before_forward(
             .created_by
             .clone()
             .unwrap_or_else(|| org_key.org_id.clone());
-        match crate::users::org_limits::load_limit_levels(
+        match crate::users::org_limits::load_limit_levels_cached(
             &state.user_store,
             &org_key.org_id,
             &member_id,

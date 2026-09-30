@@ -9,6 +9,7 @@ pub mod captcha;
 pub mod client_ip;
 pub mod config;
 pub mod content_firewall;
+pub mod dashboard_agg_cache;
 pub mod dashboard_handlers;
 pub mod db;
 pub mod db_cache;

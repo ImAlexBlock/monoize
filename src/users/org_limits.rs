@@ -321,6 +321,48 @@ pub async fn load_key_windows(
         .transpose()?)
 }
 
+/// DPT-SW5: cached variant for forwarding admission preflight only. Settlement,
+/// balance mutation, and admin views call `load_key_windows` directly.
+pub async fn load_key_windows_cached(
+    store: &UserStore,
+    api_key_id: &str,
+) -> Result<Option<OrgSpendWindows>, String> {
+    let cache = store.spend_key_window_cache.clone();
+    let key_id = api_key_id.to_string();
+    cache
+        .get_or_load(&format!("key:{api_key_id}"), || {
+            load_key_windows(store, &key_id)
+        })
+        .await
+}
+
+/// DPT-SW5: cached variant for forwarding admission preflight only.
+pub async fn load_limit_levels_cached(
+    store: &UserStore,
+    org_id: &str,
+    member_id: &str,
+    api_key_id: &str,
+) -> Result<OrgLimitLevels, String> {
+    let cache = store.spend_org_level_cache.clone();
+    let (org, member, key) = (org_id.to_string(), member_id.to_string(), api_key_id.to_string());
+    cache
+        .get_or_load(&format!("org:{org_id}:{member_id}:{api_key_id}"), || {
+            load_limit_levels(store, &org, &member, &key)
+        })
+        .await
+}
+
+/// DPT-SW8: best-effort convergence after settlement attributes spend to the key.
+pub fn invalidate_spend_windows_for_key(store: &UserStore, api_key_id: &str) {
+    store.spend_key_window_cache.invalidate_for_api_key(api_key_id);
+    store.spend_org_level_cache.invalidate_for_api_key(api_key_id);
+}
+
+/// DPT-SW9: after an org's spend limits change, drop its org-level entries.
+pub fn invalidate_spend_windows_for_org(store: &UserStore, org_id: &str) {
+    store.spend_org_level_cache.invalidate_org(org_id);
+}
+
 /// ORGL-19: key-level evaluation for a personal key. Delegates to
 /// `evaluate_limits` with empty space/member levels, so the breach ordering
 /// and the `key` level name stay identical to the org path.
@@ -624,6 +666,7 @@ pub async fn apply_org_limit_patch(
                 .await
                 .map_err(|e| e.to_string())?;
             tx.commit().await.map_err(|e| e.to_string())?;
+            invalidate_spend_windows_for_org(store, org_id);
         }
     }
 

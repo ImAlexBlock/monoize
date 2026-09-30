@@ -1,3 +1,4 @@
+use sea_orm::DbBackend;
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -8,6 +9,13 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // The entity maps `enabled` to a Rust bool. SQLite accepts `DEFAULT 1`
+        // for a BOOLEAN-affinity column; PostgreSQL requires a boolean literal.
+        let enabled_default = if manager.get_database_backend() == DbBackend::Sqlite {
+            "1"
+        } else {
+            "true"
+        };
         manager
             .get_connection()
             .execute_unprepared(
@@ -25,7 +33,7 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .get_connection()
-            .execute_unprepared(
+            .execute_unprepared(&format!(
                 "CREATE TABLE IF NOT EXISTS studio_templates (
                     id TEXT PRIMARY KEY,
                     source TEXT NOT NULL,
@@ -33,12 +41,12 @@ impl MigrationTrait for Migration {
                     description TEXT NOT NULL DEFAULT '',
                     graph_json TEXT NOT NULL,
                     params_json TEXT NOT NULL,
-                    price_nano_usd_map TEXT NOT NULL DEFAULT '{}',
-                    enabled BOOLEAN NOT NULL DEFAULT 1,
+                    price_nano_usd_map TEXT NOT NULL DEFAULT '{{}}',
+                    enabled BOOLEAN NOT NULL DEFAULT {enabled_default},
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )",
-            )
+            ))
             .await?;
         manager
             .get_connection()

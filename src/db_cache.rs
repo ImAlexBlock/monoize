@@ -1808,6 +1808,128 @@ impl UsageReadCache {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SpendWindowCache: short-TTL single-flight cache for preflight spend-window
+// aggregates (db-performance-tuning.spec.md §7). Cached values serve
+// admission preflight only; settlement and admin views read the database.
+// ---------------------------------------------------------------------------
+
+struct SpendWindowEntry<T> {
+    value: T,
+    cached_at: Instant,
+}
+
+#[derive(Clone)]
+pub struct SpendWindowCache<T> {
+    cache: Arc<DashMap<String, SpendWindowEntry<T>>>,
+    inflight: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// `None` disables caching: every lookup loads from the database (DPT-SW2).
+    ttl: Option<Duration>,
+    capacity: usize,
+}
+
+impl<T: Clone> SpendWindowCache<T> {
+    /// `ttl_env` parses as whole milliseconds; a value of `0` disables the cache.
+    /// A missing or unparsable value selects `default_ms` (DPT-SW2).
+    pub fn from_env(ttl_env: &str, default_ms: u64, capacity_env: &str) -> Self {
+        let ttl = match std::env::var(ttl_env) {
+            Ok(raw) => match raw.trim().parse::<u64>() {
+                Ok(0) => None,
+                Ok(ms) => Some(Duration::from_millis(ms)),
+                Err(_) => Some(Duration::from_millis(default_ms)),
+            },
+            Err(_) => Some(Duration::from_millis(default_ms)),
+        };
+        Self {
+            cache: Arc::new(DashMap::new()),
+            inflight: Arc::new(DashMap::new()),
+            ttl,
+            capacity: positive_env_usize(capacity_env, 10_000).max(1),
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_ttl(ttl: Option<Duration>, capacity: usize) -> Self {
+        Self {
+            cache: Arc::new(DashMap::new()),
+            inflight: Arc::new(DashMap::new()),
+            ttl,
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub async fn get_or_load<F, Fut>(&self, key: &str, load: F) -> Result<T, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, String>>,
+    {
+        let Some(ttl) = self.ttl else {
+            return load().await;
+        };
+        if let Some(value) = self.fresh(key, ttl) {
+            return Ok(value);
+        }
+        let gate = self
+            .inflight
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = gate.lock().await;
+        if let Some(value) = self.fresh(key, ttl) {
+            return Ok(value);
+        }
+        let value = load().await;
+        // Errors are never cached (DPT-SW6): a transient database failure must
+        // not poison the window for the whole TTL.
+        if let Ok(inner) = &value {
+            if self.cache.len() >= self.capacity {
+                // Bound the map by recycling one arbitrary entry; the window data
+                // is advisory for preflight, so eviction order is irrelevant.
+                if let Some(victim) = self.cache.iter().next().map(|e| e.key().clone()) {
+                    self.cache.remove(&victim);
+                }
+            }
+            self.cache.insert(
+                key.to_string(),
+                SpendWindowEntry {
+                    value: inner.clone(),
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+        self.inflight.remove(key);
+        value
+    }
+
+    fn fresh(&self, key: &str, ttl: Duration) -> Option<T> {
+        let entry = self.cache.get(key)?;
+        if entry.cached_at.elapsed() > ttl {
+            return None;
+        }
+        Some(entry.value.clone())
+    }
+
+    pub fn invalidate(&self, key: &str) {
+        self.cache.remove(key);
+    }
+
+    /// DPT-SW8: removes `key:{api_key_id}` entries. On the org-level typed
+    /// instance this removes `org:*:*:{api_key_id}` entries.
+    pub fn invalidate_for_api_key(&self, api_key_id: &str) {
+        let key_exact = format!("key:{api_key_id}");
+        let org_suffix = format!(":{api_key_id}");
+        self.cache.retain(|k, _| {
+            k != &key_exact && !(k.starts_with("org:") && k.ends_with(&org_suffix))
+        });
+    }
+
+    /// DPT-SW9: removes `org:{org_id}:*` entries on the org-level instance.
+    pub fn invalidate_org(&self, org_id: &str) {
+        let prefix = format!("org:{org_id}:");
+        self.cache.retain(|k, _| !k.starts_with(&prefix));
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CachedBalanceEntry {
     balance: UserBalance,
@@ -3112,5 +3234,123 @@ mod tests {
             second.is_ok(),
             "a transient failure must not be replayed for the whole window"
         );
+    }
+
+    #[tokio::test]
+    async fn spend_window_cache_round_trip_and_invalidation() {
+        let cache: SpendWindowCache<u64> = SpendWindowCache::with_ttl(
+            Some(Duration::from_secs(30)),
+            16,
+        );
+        let loads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loads_for_load = loads.clone();
+        let value = cache
+            .get_or_load("key:k1", || {
+                let loads = loads_for_load.clone();
+                async move {
+                    loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(7u64)
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(value, 7);
+        let again = cache.get_or_load("key:k1", || async { Ok(9u64) }).await;
+        assert_eq!(again.unwrap(), 7, "second lookup must hit the cache");
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        cache.invalidate_for_api_key("k1");
+        let reloaded = cache.get_or_load("key:k1", || async { Ok(11u64) }).await;
+        assert_eq!(reloaded.unwrap(), 11, "after invalidation the load runs again");
+    }
+
+    #[tokio::test]
+    async fn spend_window_cache_does_not_cache_errors() {
+        let cache: SpendWindowCache<u64> =
+            SpendWindowCache::with_ttl(Some(Duration::from_secs(30)), 16);
+        let first = cache.get_or_load("key:k2", || async { Err("db down".to_string()) }).await;
+        assert!(first.is_err());
+        let second = cache.get_or_load("key:k2", || async { Ok(3u64) }).await;
+        assert_eq!(second.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn spend_window_cache_disabled_ttl_always_loads() {
+        let cache: SpendWindowCache<u64> = SpendWindowCache::with_ttl(None, 16);
+        cache.get_or_load("key:k3", || async { Ok(1u64) }).await.unwrap();
+        let loads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loads_for_load = loads.clone();
+        let value = cache
+            .get_or_load("key:k3", || {
+                let loads = loads_for_load.clone();
+                async move {
+                    loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(2u64)
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(value, 2);
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn spend_window_cache_single_flight_collapses_concurrent_loads() {
+        let cache: SpendWindowCache<u64> =
+            SpendWindowCache::with_ttl(Some(Duration::from_secs(30)), 16);
+        let loads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let cache = cache.clone();
+            let loads = loads.clone();
+            handles.push(tokio::spawn(async move {
+                cache
+                    .get_or_load("key:k4", || {
+                        let loads = loads.clone();
+                        async move {
+                            loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            Ok(42u64)
+                        }
+                    })
+                    .await
+                    .unwrap()
+            }));
+        }
+        for handle in handles {
+            assert_eq!(handle.await.unwrap(), 42);
+        }
+        assert_eq!(
+            loads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "concurrent lookups for one key must collapse into one load (DPT-SW4)"
+        );
+    }
+
+    #[tokio::test]
+    async fn spend_window_cache_expiry_forces_reload() {
+        let cache: SpendWindowCache<u64> =
+            SpendWindowCache::with_ttl(Some(Duration::from_millis(20)), 16);
+        cache.get_or_load("key:k5", || async { Ok(1u64) }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let value = cache.get_or_load("key:k5", || async { Ok(2u64) }).await;
+        assert_eq!(value.unwrap(), 2, "an expired entry must not be served");
+    }
+
+    #[tokio::test]
+    async fn spend_window_cache_org_prefix_invalidation() {
+        let cache: SpendWindowCache<u64> =
+            SpendWindowCache::with_ttl(Some(Duration::from_secs(30)), 16);
+        cache.get_or_load("org:o1:m1:k9", || async { Ok(1u64) }).await.unwrap();
+        cache.get_or_load("org:o2:m1:k9", || async { Ok(2u64) }).await.unwrap();
+        cache.get_or_load("org:o1:m2:k8", || async { Ok(3u64) }).await.unwrap();
+        cache.invalidate_org("o1");
+        // o1 entries dropped for both members; o2 entry survives.
+        let v = cache.get_or_load("org:o1:m1:k9", || async { Ok(10u64) }).await;
+        assert_eq!(v.unwrap(), 10);
+        let v = cache.get_or_load("org:o1:m2:k8", || async { Ok(30u64) }).await;
+        assert_eq!(v.unwrap(), 30);
+        let v = cache.get_or_load("org:o2:m1:k9", || async { Ok(99u64) }).await;
+        assert_eq!(v.unwrap(), 2, "other orgs must not be invalidated");
     }
 }

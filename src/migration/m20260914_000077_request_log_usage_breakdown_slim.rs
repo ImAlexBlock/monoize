@@ -1,4 +1,4 @@
-use sea_orm::{ConnectionTrait, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -19,17 +19,30 @@ pub struct Migration;
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let backend = manager.get_database_backend();
-        manager
-            .get_connection()
-            .execute(Statement::from_string(
-                backend,
+        let sql = match backend {
+            // `instr` + `json_valid` guard the SQLite parse so untouched rows stay
+            // byte-identical, which also makes the migration idempotent.
+            DbBackend::Sqlite => {
                 "UPDATE request_logs
                  SET usage_breakdown_json = json_remove(usage_breakdown_json, '$.raw_usage_extra')
                  WHERE usage_breakdown_json IS NOT NULL
                    AND json_valid(usage_breakdown_json)
                    AND instr(usage_breakdown_json, '\"raw_usage_extra\"') > 0"
-                    .to_string(),
-            ))
+            }
+            // PostgreSQL has no json_valid/json_remove; cast through jsonb and
+            // pre-filter malformed rows with a shape regex so the cast cannot
+            // abort the statement.
+            _ => {
+                "UPDATE request_logs
+                 SET usage_breakdown_json = (usage_breakdown_json::jsonb - 'raw_usage_extra')::text
+                 WHERE usage_breakdown_json IS NOT NULL
+                   AND usage_breakdown_json ~ '^[[:space:]]*\\{.*\\}[[:space:]]*$'
+                   AND usage_breakdown_json::jsonb ? 'raw_usage_extra'"
+            }
+        };
+        manager
+            .get_connection()
+            .execute(Statement::from_string(backend, sql.to_string()))
             .await?;
         Ok(())
     }

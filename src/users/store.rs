@@ -405,6 +405,16 @@ impl UserStore {
             api_key_cache: crate::db_cache::ApiKeyCache::new(Duration::from_secs(60)),
             balance_cache: crate::db_cache::BalanceCache::new(Duration::from_secs(30)),
             usage_read_cache: crate::db_cache::UsageReadCache::new(),
+            spend_key_window_cache: crate::db_cache::SpendWindowCache::from_env(
+                "MONOIZE_SPEND_WINDOW_CACHE_TTL_MS",
+                5_000,
+                "MONOIZE_SPEND_WINDOW_CACHE_CAPACITY",
+            ),
+            spend_org_level_cache: crate::db_cache::SpendWindowCache::from_env(
+                "MONOIZE_SPEND_WINDOW_CACHE_TTL_MS",
+                5_000,
+                "MONOIZE_SPEND_WINDOW_CACHE_CAPACITY",
+            ),
             registration_lock: Arc::new(tokio::sync::Mutex::new(())),
             api_key_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
@@ -3467,6 +3477,12 @@ impl UserStore {
         }
 
         self.api_key_cache.invalidate_by_key_id(key_id);
+        // DPT-SW9: spend limits may have changed; preflight windows must not
+        // serve the previous limits past this point.
+        self.spend_key_window_cache
+            .invalidate_for_api_key(key_id);
+        self.spend_org_level_cache
+            .invalidate_for_api_key(key_id);
 
         self.get_api_key_by_id(key_id)
             .await?

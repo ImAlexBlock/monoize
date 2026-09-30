@@ -301,7 +301,132 @@ same process.
 
 DPT-IDX3. `request_logs` MUST carry `(user_id, created_at)` for the same reason.
 
-## 7. Concurrency Properties
+## 7. SpendWindowCache
+
+### 7.1 Purpose
+
+DPT-SW0. `SpendWindowCache` exists so that forwarding preflight does not run the
+`request_logs` window aggregates (`load_key_windows`, `load_limit_levels`) on every
+request. Those aggregates scan the key's or org's full `request_logs` history and are
+the dominant read-pool load under burst traffic.
+
+### 7.2 State
+
+DPT-SW1. Two typed `SpendWindowCache` instances MUST exist:
+- A key-level cache: `DashMap` keyed by `key:{api_key_id}`, value `Option<OrgSpendWindows>`
+  (a cached `None` means the key row does not exist and MUST also be cached).
+- An org-level cache: `DashMap` keyed by `org:{org_id}:{member_id}:{api_key_id}`, value
+  `OrgLimitLevels`.
+
+Each entry MUST carry `cached_at: Instant`.
+
+DPT-SW2. The TTL MUST be 5000 ms by default, selected by `MONOIZE_SPEND_WINDOW_CACHE_TTL_MS`.
+A value of `0` MUST disable caching (every lookup loads from the database). Parsing
+follows RRB-C1 except that `0` is meaningful.
+
+DPT-SW3. Entry capacity MUST be 10000 by default, selected by
+`MONOIZE_SPEND_WINDOW_CACHE_CAPACITY`. Insertion at capacity MUST evict before publishing.
+
+### 7.3 Single-flight
+
+DPT-SW4. Concurrent lookups for the same cache key MUST collapse into at most one
+database load. A lookup that arrives while a load for the same key is in flight MUST
+await that load and use its result. After the awaited load completes, the waiter MUST
+re-check the cache before loading again.
+
+### 7.4 Semantics
+
+DPT-SW5. Cached values MUST be used only by forwarding admission preflight
+(`ensure_balance_before_forward` and its replica equivalent). Settlement, balance
+mutation, quota reservation, and admin views MUST read the database directly and MUST
+NOT consult this cache.
+
+DPT-SW6. A load error MUST NOT be cached. The error MUST propagate to the caller, which
+keeps its existing fail-open behavior.
+
+DPT-SW7. The admitted staleness bound is the TTL: preflight may evaluate a window that
+excludes spend settled within the last `TTL` milliseconds. This is safe because
+(a) settlement re-evaluates the exact windows against fresh data and records breaches,
+and (b) the in-flight spend ceiling (`InFlightSpend`) bounds how far one request can
+overdraft beyond a cached negative.
+
+DPT-SW8. After a successful wallet charge or plan settlement for api key `K` of user
+`U`, the cache MUST invalidate `key:{K}` and every `org:{*}:{*}:{K}` entry, and every
+`org:{O}:*` entry where `O` is an org of `U`, best-effort. Invalidation accelerates
+convergence; correctness relies on DPT-SW7, not on invalidation.
+
+DPT-SW9. Mutations that change `api_keys.spend_limit_*` columns or org spend limits
+MUST invalidate the affected `key:{id}` / `org:{org_id}:*` entries after the database
+write succeeds.
+
+## 8. Registry Snapshot Cache
+
+### 8.1 Purpose
+
+DPT-RR0. The routing hot path reads the provider/channel/model registry
+(`monoize_providers`, `monoize_provider_models`, `monoize_groups`) on every request.
+These tables change only through admin mutation. A process-local snapshot serves
+hot-path reads.
+
+### 8.2 State
+
+DPT-RR1. A registry snapshot MUST contain: the full `list_providers()` result (ordered
+by priority ASC, created_at ASC), the full `load_channels_bulk(None)` result keyed by
+provider id, and the group-id to account-class mapping from `monoize_groups`. The
+served reads are: `list_providers()`, `list_providers_by_account_class()`,
+`available_model_names()`, `available_model_names_for_account_class()`, and
+`load_channels_bulk(None)`. Model-registry and billing-rate lookups remain direct
+indexed point reads; they are outside this snapshot.
+
+DPT-RR2. Snapshot refresh MUST trigger when either:
+1. The registry generation counter changes, or
+2. The snapshot age exceeds `MONOIZE_REGISTRY_SNAPSHOT_TTL_MS` (default 60000; `0`
+   selects refresh-on-every-read).
+
+DPT-RR3. Every write to `monoize_providers` or `monoize_provider_models` (provider
+create/update/delete/reorder) and every write to `monoize_groups` (group
+create/update/reorder/delete) MUST increment the registry generation after the write
+commits. The generation counter is process-wide.
+
+DPT-RR4. Snapshot rebuild MUST single-flight per DPT-SW4. While a rebuild is in
+flight, readers MUST continue to be served by the previous snapshot. A rebuild that
+fails MUST leave the previous snapshot installed and MUST propagate the error to the
+triggering reader; the next reader retries the rebuild.
+
+DPT-RR5. A reader whose snapshot is older than the generation it observed MUST NOT
+serve registry data newer than its snapshot: the reader either waits for the rebuild
+(single-flight) or serves the previous snapshot. Staleness is bounded by the TTL in
+DPT-RR2.
+
+DPT-RR6. The snapshot holds whole tables whose row counts are bounded by admin input
+(thousands). No per-request allocation growth is permitted.
+
+### 8.3 Placement
+
+DPT-RR7. The snapshot MUST live in the routing store layer (`MonoizeRoutingStore`) so
+every caller of the covered read functions shares one snapshot.
+
+## 9. Dashboard Aggregate Cache
+
+DPT-DA1. The following dashboard reads MUST be served through a server-side result
+cache: admin usage ranking (per user and per model, plus the totals and global model
+ranking it embeds), the admin overview's embedded aggregates (usage ranking, today
+totals, channels-today), bucketed dashboard analytics, and cache-hit-rate by users.
+The revenue report reads pre-aggregated rollup tables plus a bounded live-day window
+and is outside this cache.
+
+DPT-DA2. The cache key MUST be the endpoint identity plus the serialized query
+parameters. The TTL MUST be 10000 ms by default, selected by
+`MONOIZE_DASHBOARD_AGG_CACHE_TTL_MS`; `0` disables caching. Capacity MUST be 256
+entries by default, selected by `MONOIZE_DASHBOARD_AGG_CACHE_CAPACITY`; insertion at
+capacity MUST evict before publishing.
+
+DPT-DA3. Only successful query results MUST be cached. Errors propagate uncached.
+
+DPT-DA4. Cache entries hold the serialized response payload. A cache hit MUST not
+re-run the aggregate query.
+
+## 10. Concurrency Properties
 
 DPT-C1. `LastUsedBatcher` and `ApiKeyCache` use `DashMap` for lock-free concurrent reads and sharded writes. No contention between readers and writers except on the same shard.
 

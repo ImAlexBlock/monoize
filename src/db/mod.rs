@@ -125,7 +125,7 @@ impl DbPool {
             format!("{dsn}?mode=rwc")
         };
 
-        let read_connections = positive_env_u32("MONOIZE_SQLITE_READ_CONNECTIONS", 4);
+        let read_connections = positive_env_u32("MONOIZE_SQLITE_READ_CONNECTIONS", 8);
         let write_opts = Self::sqlite_connect_options(&base_dsn, 1);
         let read_opts = Self::sqlite_connect_options(&base_dsn, read_connections);
 
@@ -153,6 +153,11 @@ impl DbPool {
         // co-located deployment can bound the pool's aggregate memory.
         let cache_kib = positive_env_u64("MONOIZE_SQLITE_CACHE_KIB", 16384);
         let mmap_bytes = positive_env_u64("MONOIZE_SQLITE_MMAP_BYTES", 67108864);
+        // RRB-R1: cap the WAL file so a burst that outruns checkpointing cannot
+        // leave a multi-gigabyte WAL behind; SQLite truncates at the next
+        // checkpoint after the limit is set.
+        let journal_size_limit =
+            positive_env_u64("MONOIZE_SQLITE_JOURNAL_SIZE_LIMIT_BYTES", 268_435_456);
         opts.map_sqlx_sqlite_opts(move |opts| {
             opts.journal_mode(SqliteJournalMode::Wal)
                 .synchronous(SqliteSynchronous::Normal)
@@ -160,6 +165,7 @@ impl DbPool {
                 .foreign_keys(true)
                 .pragma("cache_size", format!("-{cache_kib}"))
                 .pragma("mmap_size", mmap_bytes.to_string())
+                .pragma("journal_size_limit", journal_size_limit.to_string())
         });
         opts
     }

@@ -2004,6 +2004,9 @@ async fn maybe_charge_usage_with_output(
             .map_err(map_plan_quota_error)?
             .is_some()
     {
+        if let Some(key_id) = auth.api_key_id.as_deref() {
+            crate::users::org_limits::invalidate_spend_windows_for_key(&state.user_store, key_id);
+        }
         return Ok(ChargeComputation {
             charge_nano_usd: (charge_nano > 0).then_some(charge_nano),
             billing_breakdown: Some(billing_breakdown),
@@ -2149,6 +2152,12 @@ async fn maybe_charge_usage_with_output(
             .await
         {
             Ok(()) => {
+                if let Some(key_id) = auth.api_key_id.as_deref() {
+                    crate::users::org_limits::invalidate_spend_windows_for_key(
+                        &state.user_store,
+                        key_id,
+                    );
+                }
                 return Ok(ChargeComputation {
                     charge_nano_usd: Some(charge_nano),
                     billing_breakdown: Some(billing_breakdown),
@@ -2185,10 +2194,15 @@ async fn maybe_charge_usage_with_output(
         .charge_user_balance_nano(user_id, charge_nano, &meta)
         .await
     {
-        Ok(()) => Ok(ChargeComputation {
-            charge_nano_usd: Some(charge_nano),
-            billing_breakdown: Some(billing_breakdown),
-        }),
+        Ok(()) => {
+            if let Some(key_id) = auth.api_key_id.as_deref() {
+                crate::users::org_limits::invalidate_spend_windows_for_key(&state.user_store, key_id);
+            }
+            Ok(ChargeComputation {
+                charge_nano_usd: Some(charge_nano),
+                billing_breakdown: Some(billing_breakdown),
+            })
+        }
         Err(err) => match err.kind {
             BillingErrorKind::InsufficientBalance => Err(AppError::new(
                 StatusCode::PAYMENT_REQUIRED,

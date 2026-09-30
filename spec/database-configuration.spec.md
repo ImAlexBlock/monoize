@@ -244,3 +244,40 @@ DB25. `monoize_providers` MUST persist nullable embedded-Channel columns
 `channel_affinity_failback_delay_seconds_override`.
 
 DB26. SQLite connection pragmas and pool shape MUST be env-tunable, parsed per RRB-C1: `MONOIZE_SQLITE_CACHE_KIB` (default 16384, negative `cache_size` pragma in KiB), `MONOIZE_SQLITE_MMAP_BYTES` (default 67108864, `mmap_size` pragma), `MONOIZE_SQLITE_READ_CONNECTIONS` (default 4, read-pool size). The prior hardcoded values were 65536 KiB per connection across 10 read connections plus a 256 MiB mmap window; the defaults change to a co-location profile that bounds the page cache to roughly 80 MiB across the pool while remaining individually overridable.
+
+## 12. SQLite to PostgreSQL Migration Runbook
+
+PGMS1. The migration tool MUST exist as the `sqlite-to-pg` binary. Given
+`--sqlite` and `--postgres` DSNs, it copies every user table (excluding
+`sqlite_*`, `seaql_migrations`, and its own helper table) from the SQLite source
+into the PostgreSQL target. Each row upserts by the PostgreSQL primary key with
+SQLite as the source of truth, so re-running the tool is idempotent.
+
+PGMS2. Cell conversion MUST map by the PostgreSQL column type: `boolean` from
+SQLite `0/1`, `bigint`/`integer`/`smallint` from SQLite integers or numeric text,
+`double precision` from SQLite reals, `bytea` from SQLite blobs, and `text` from
+everything else (including SQLite integers stored into PostgreSQL text columns).
+
+PGMS3. `--incremental 1` MUST consult the `_monoize_migration_watermarks` helper
+table. For `request_logs` the watermark column is `created_at_unix_ms` (numeric)
+and for `billing_ledger` it is `created_at` (RFC3339 text, lexicographically
+ordered). Tables without a watermark specification MUST fall back to a full
+idempotent upsert. A pass MUST advance the watermark to the largest copied value.
+
+PGMS4. The PostgreSQL target MUST have the complete application schema created by
+the embedded migrations before the tool runs. The test
+`tests/pg_migration_smoke.rs` guards the empty-database full migration chain and
+MUST pass before any production migration attempt.
+
+PGMS5. Zero-downtime cutover order:
+1. bulk pass on the live SQLite database while production still serves;
+2. blue-green swap of the application with `MONOIZE_DATABASE_DSN` pointing at
+   PostgreSQL (the candidate must start against PostgreSQL and pass readiness);
+3. after the old container's drain completes (all in-flight requests finished),
+   one final `--incremental 1` pass moves the rows the old container wrote into
+   SQLite during the drain window.
+
+PGMS6. During the drain window the old container keeps writing only to SQLite;
+the final pass is what reconciles both stores. No pass may run against
+PostgreSQL as a source. After the final pass the SQLite file is read-only
+evidence and MUST be archived, not deleted.

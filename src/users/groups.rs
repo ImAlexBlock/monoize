@@ -351,6 +351,7 @@ impl UserStore {
             return Err(GroupStoreError::Storage(message));
         }
 
+        crate::monoize_routing::bump_registry_generation();
         Ok(Group {
             id,
             name,
@@ -460,6 +461,7 @@ impl UserStore {
 
         // GR-A6: cached authentication results are keyed to registry state.
         self.api_key_cache.invalidate_all();
+        crate::monoize_routing::bump_registry_generation();
 
         Ok(Group {
             id: existing.id,
@@ -561,6 +563,7 @@ impl UserStore {
         .map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         self.api_key_cache.invalidate_all();
+        crate::monoize_routing::bump_registry_generation();
         Ok(())
     }
 
@@ -666,6 +669,7 @@ impl UserStore {
 
         tx.commit().await.map_err(storage)?;
         self.api_key_cache.invalidate_all();
+        crate::monoize_routing::bump_registry_generation();
         Ok(())
     }
 

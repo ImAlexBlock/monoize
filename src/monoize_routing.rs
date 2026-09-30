@@ -770,6 +770,51 @@ impl ChannelHealthState {
 #[derive(Clone)]
 pub struct MonoizeRoutingStore {
     db: DbPool,
+    snapshot: RegistrySnapshotState,
+}
+
+/// Process-wide registry generation (DPT-RR3): every write to the provider,
+/// channel-model, or group registry bumps it so routing snapshots rebuild.
+static REGISTRY_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn bump_registry_generation() {
+    REGISTRY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+pub fn registry_generation() -> u64 {
+    REGISTRY_GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[allow(dead_code)]
+struct RegistrySnapshot {
+    generation: u64,
+    built_at: std::time::Instant,
+    /// `list_providers()` result: priority ASC, created_at ASC.
+    providers: Vec<MonoizeProvider>,
+    /// `load_channels_bulk(None)` result keyed by provider id.
+    channels: HashMap<String, MonoizeChannel>,
+    /// group_id -> account_class string, for class-scoped filtering.
+    group_class: HashMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+struct RegistrySnapshotState {
+    installed: std::sync::Arc<
+        std::sync::RwLock<Option<std::sync::Arc<RegistrySnapshot>>>,
+    >,
+    rebuild: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+fn registry_snapshot_ttl() -> Option<std::time::Duration> {
+    match std::env::var("MONOIZE_REGISTRY_SNAPSHOT_TTL_MS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(ms) => Some(std::time::Duration::from_millis(ms)),
+            Err(_) => Some(std::time::Duration::from_millis(60_000)),
+        },
+        Err(_) => Some(std::time::Duration::from_millis(60_000)),
+    }
 }
 
 fn default_enabled() -> bool {
@@ -1230,7 +1275,10 @@ fn provider_projection(alias: &str) -> String {
 
 impl MonoizeRoutingStore {
     pub async fn new(db: DbPool) -> Result<Self, String> {
-        let store = Self { db };
+        let store = Self {
+            db,
+            snapshot: RegistrySnapshotState::default(),
+        };
         store.migrate_transform_rule_ids().await?;
         Ok(store)
     }
@@ -1238,7 +1286,87 @@ impl MonoizeRoutingStore {
     /// Replica-side constructor per PRP11: skips canonicalization writes that the
     /// primary already performed on the shared database.
     pub async fn new_read_only(db: DbPool) -> Result<Self, String> {
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            snapshot: RegistrySnapshotState::default(),
+        })
+    }
+
+    /// DPT-RR2/RR4: serve the installed snapshot when it is younger than the TTL
+    /// and was built at the current generation; otherwise rebuild it once while
+    /// waiters keep being served by the previous snapshot.
+    async fn registry_snapshot(&self) -> Result<std::sync::Arc<RegistrySnapshot>, String> {
+        let ttl = registry_snapshot_ttl();
+        if let Some(inst) = Self::snapshot_is_current(&self.snapshot, ttl) {
+            return Ok(inst);
+        }
+        let _guard = self.snapshot.rebuild.lock().await;
+        if let Some(inst) = Self::snapshot_is_current(&self.snapshot, ttl) {
+            return Ok(inst);
+        }
+        let generation = registry_generation();
+        let channels = self.load_channels_bulk_uncached(None).await?;
+        let rows = self
+            .db
+            .read()
+            .query_all(self.db.stmt(
+                &format!(
+                    "{} FROM monoize_providers ORDER BY priority ASC, created_at ASC",
+                    provider_projection("")
+                ),
+                vec![],
+            ))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut channels_by_provider = channels.clone();
+        let mut providers = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: String = row.try_get("", "id").map_err(|e| e.to_string())?;
+            let channel = channels_by_provider
+                .remove(&id)
+                .ok_or_else(|| format!("provider {id} missing embedded channel"))?;
+            providers.push(decode_provider_row(row, channel)?);
+        }
+        let group_rows = self
+            .db
+            .read()
+            .query_all(
+                self.db
+                    .stmt("SELECT id, account_class FROM monoize_groups", vec![]),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut group_class = HashMap::with_capacity(group_rows.len());
+        for row in group_rows {
+            let id: String = row.try_get("", "id").map_err(|e| e.to_string())?;
+            let class: String = row.try_get("", "account_class").map_err(|e| e.to_string())?;
+            group_class.insert(id, class);
+        }
+        let inst = std::sync::Arc::new(RegistrySnapshot {
+            generation,
+            built_at: std::time::Instant::now(),
+            providers,
+            channels,
+            group_class,
+        });
+        *self.snapshot.installed.write().expect("registry snapshot lock") = Some(inst.clone());
+        Ok(inst)
+    }
+
+    fn snapshot_is_current(
+        state: &RegistrySnapshotState,
+        ttl: Option<std::time::Duration>,
+    ) -> Option<std::sync::Arc<RegistrySnapshot>> {
+        let installed = state.installed.read().expect("registry snapshot lock");
+        let inst = installed.as_ref()?;
+        let fresh = ttl
+            .map(|ttl| inst.built_at.elapsed() <= ttl)
+            .unwrap_or(false);
+        if fresh && inst.generation == registry_generation() {
+            Some(inst.clone())
+        } else {
+            None
+        }
     }
 
     async fn migrate_transform_rule_ids(&self) -> Result<(), String> {
@@ -1381,6 +1509,16 @@ impl MonoizeRoutingStore {
         &self,
         provider_id: Option<&str>,
     ) -> Result<HashMap<String, MonoizeChannel>, String> {
+        match provider_id {
+            None => Ok(self.registry_snapshot().await?.channels.clone()),
+            Some(id) => self.load_channels_bulk_uncached(Some(id)).await,
+        }
+    }
+
+    async fn load_channels_bulk_uncached(
+        &self,
+        provider_id: Option<&str>,
+    ) -> Result<HashMap<String, MonoizeChannel>, String> {
         let filter = provider_id.map(|_| " WHERE id = $1").unwrap_or("");
         let values = provider_id.map(|id| vec![id.into()]).unwrap_or_default();
         let rows = self
@@ -1482,29 +1620,9 @@ impl MonoizeRoutingStore {
     }
 
     pub async fn list_providers(&self) -> Result<Vec<MonoizeProvider>, String> {
-        let rows = self
-            .db
-            .read()
-            .query_all(self.db.stmt(
-                &format!(
-                    "{} FROM monoize_providers ORDER BY priority ASC, created_at ASC",
-                    provider_projection("")
-                ),
-                vec![],
-            ))
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let mut channels_by_provider = self.load_channels_bulk(None).await?;
-        rows.iter()
-            .map(|row| {
-                let id: String = row.try_get("", "id").map_err(|e| e.to_string())?;
-                let channel = channels_by_provider
-                    .remove(&id)
-                    .ok_or_else(|| format!("provider {id} missing embedded channel"))?;
-                decode_provider_row(row, channel)
-            })
-            .collect()
+        // DPT-RR1: the routing hot path must not scan the registry tables per
+        // request; serve the process snapshot instead.
+        Ok(self.registry_snapshot().await?.providers.clone())
     }
 
     /// PP-ENT6: reports every account class that already reaches each named pricing Profile,
@@ -1569,72 +1687,27 @@ impl MonoizeRoutingStore {
         &self,
         account_class: crate::users::AccountClass,
     ) -> Result<Vec<MonoizeProvider>, String> {
-        let rows = self
-            .db
-            .read()
-            .query_all(self.db.stmt(
-                &format!(
-                    "{} FROM monoize_providers p JOIN monoize_groups g ON g.id = p.group_id \
-                     WHERE g.account_class = $1 ORDER BY p.priority ASC, p.created_at ASC",
-                    provider_projection("p.")
-                ),
-                vec![account_class.as_str().into()],
-            ))
-            .await
-            .map_err(|error| error.to_string())?;
-
-        let mut channels_by_provider = self.load_channels_bulk(None).await?;
-        rows.iter()
-            .map(|row| {
-                let id: String = row.try_get("", "id").map_err(|error| error.to_string())?;
-                let channel = channels_by_provider
-                    .remove(&id)
-                    .ok_or_else(|| format!("provider {id} missing embedded channel"))?;
-                decode_provider_row(row, channel)
+        let snapshot = self.registry_snapshot().await?;
+        let class = account_class.as_str();
+        Ok(snapshot
+            .providers
+            .iter()
+            .filter(|provider| {
+                snapshot
+                    .group_class
+                    .get(&provider.group_id)
+                    .map(|value| value.as_str())
+                    == Some(class)
             })
-            .collect()
+            .cloned()
+            .collect())
     }
 
     pub async fn available_model_names(
         &self,
         candidates: &[String],
     ) -> Result<HashSet<String>, String> {
-        if candidates.is_empty() {
-            return Ok(HashSet::new());
-        }
-        let candidates = candidates
-            .iter()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut available = HashSet::new();
-        const LOOKUP_CHUNK_SIZE: usize = 400;
-        for chunk in candidates.chunks(LOOKUP_CHUNK_SIZE) {
-            let placeholders = (0..chunk.len())
-                .map(|index| format!("${}", index + 1))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "SELECT DISTINCT pm.model_name FROM monoize_provider_models pm
-                 JOIN monoize_providers p ON p.id = pm.provider_id
-                 WHERE p.enabled = 1 AND p.channel_enabled = 1
-                   AND pm.model_name IN ({placeholders})"
-            );
-            let rows = self
-                .db
-                .read()
-                .query_all(
-                    self.db
-                        .stmt(&sql, chunk.iter().cloned().map(Into::into).collect()),
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            for row in rows {
-                available.insert(row.try_get("", "model_name").map_err(|e| e.to_string())?);
-            }
-        }
-        Ok(available)
+        self.available_model_names_filtered(candidates, None).await
     }
 
     pub async fn available_model_names_for_account_class(
@@ -1642,43 +1715,41 @@ impl MonoizeRoutingStore {
         candidates: &[String],
         account_class: crate::users::AccountClass,
     ) -> Result<HashSet<String>, String> {
+        self.available_model_names_filtered(candidates, Some(account_class.as_str()))
+            .await
+    }
+
+    /// Snapshot-served intersection of the candidate models with the models of
+    /// enabled providers (optionally restricted to one group account class).
+    /// Equivalent to the previous per-request DISTINCT SQL scan (DPT-RR1).
+    async fn available_model_names_filtered(
+        &self,
+        candidates: &[String],
+        account_class: Option<&str>,
+    ) -> Result<HashSet<String>, String> {
         if candidates.is_empty() {
             return Ok(HashSet::new());
         }
-        let candidates = candidates
-            .iter()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
+        let snapshot = self.registry_snapshot().await?;
+        let wanted: HashSet<&str> = candidates.iter().map(String::as_str).collect();
         let mut available = HashSet::new();
-        const LOOKUP_CHUNK_SIZE: usize = 399;
-        for chunk in candidates.chunks(LOOKUP_CHUNK_SIZE) {
-            let placeholders = (0..chunk.len())
-                .map(|index| format!("${}", index + 2))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "SELECT DISTINCT pm.model_name FROM monoize_provider_models pm
-                 JOIN monoize_providers p ON p.id = pm.provider_id
-                 JOIN monoize_groups g ON g.id = p.group_id
-                 WHERE p.enabled = 1 AND p.channel_enabled = 1
-                   AND g.account_class = $1
-                   AND pm.model_name IN ({placeholders})"
-            );
-            let mut values: Vec<sea_orm::Value> = vec![account_class.as_str().into()];
-            values.extend(chunk.iter().cloned().map(Into::into));
-            let rows = self
-                .db
-                .read()
-                .query_all(self.db.stmt(&sql, values))
-                .await
-                .map_err(|error| error.to_string())?;
-            for row in rows {
-                available.insert(
-                    row.try_get("", "model_name")
-                        .map_err(|error| error.to_string())?,
-                );
+        for provider in &snapshot.providers {
+            if !provider.enabled || !provider.channel.enabled {
+                continue;
+            }
+            if let Some(class) = account_class
+                && snapshot
+                    .group_class
+                    .get(&provider.group_id)
+                    .map(|value| value.as_str())
+                    != Some(class)
+            {
+                continue;
+            }
+            for model in provider.channel.models.keys() {
+                if wanted.contains(model.as_str()) {
+                    available.insert(model.clone());
+                }
             }
         }
         Ok(available)
@@ -2057,6 +2128,7 @@ impl MonoizeRoutingStore {
         self.replace_channel_on(&*txn, &id, &input.channel).await?;
         txn.commit().await.map_err(|e| e.to_string())?;
 
+        bump_registry_generation();
         self.get_provider(&id)
             .await?
             .ok_or_else(|| "provider not found after create".to_string())
@@ -2288,6 +2360,7 @@ impl MonoizeRoutingStore {
 
         txn.commit().await.map_err(|e| e.to_string())?;
 
+        bump_registry_generation();
         self.get_provider(id)
             .await?
             .ok_or_else(|| "provider not found after update".to_string())
@@ -2309,6 +2382,7 @@ impl MonoizeRoutingStore {
             return Err("provider not found".to_string());
         }
 
+        bump_registry_generation();
         Ok(())
     }
 
@@ -2520,6 +2594,7 @@ impl MonoizeRoutingStore {
                          now.clone().into()],
                 )).await.map_err(|e| e.to_string())?;
         }
+        bump_registry_generation();
         Ok(())
     }
 }
