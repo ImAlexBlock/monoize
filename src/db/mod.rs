@@ -171,8 +171,13 @@ impl DbPool {
     }
 
     async fn connect_postgres(dsn: &str) -> Result<Self, DbErr> {
+        // The gateway's read load under 2000 RPM needs well more than the
+        // SeaORM default pool; 48 balances headroom against the PostgreSQL
+        // per-instance connection budget and stays env-tunable.
+        let pool_connections =
+            positive_env_u32("MONOIZE_PG_POOL_CONNECTIONS", 48).clamp(8, 128);
         let opts = ConnectOptions::new(dsn)
-            .max_connections(20)
+            .max_connections(pool_connections)
             .acquire_timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
             .sqlx_logging(false)

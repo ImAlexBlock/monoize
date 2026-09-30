@@ -73,7 +73,8 @@ DB8. If the SQLite DSN does not contain a `?` query string, `?mode=rwc` MUST be 
 
 DB9. PostgreSQL MUST use a single connection pool shared for both reads and writes:
 
-- `max_connections=20`, `acquire_timeout=10s`, `connect_timeout=5s`, `sqlx_logging=false`.
+- `max_connections=48`, selected by `MONOIZE_PG_POOL_CONNECTIONS` (default 48, clamped to [8, 128]),
+- `acquire_timeout=10s`, `connect_timeout=5s`, `sqlx_logging=false`.
 
 DB10. The same `DatabaseConnection` instance is returned for both `read()` and `write()` accessors.
 
