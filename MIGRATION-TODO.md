@@ -255,6 +255,47 @@ Do not equate protocol completion with compliance with the requested answer form
 Reported completion tokens exceeded the requested 1024 budget on three responses;
 that field can include reasoning and must not be represented as visible-output tokens per second.
 
+### Source Credential Revocation and Bounded Continuous Run
+
+The source retained Monoize PostgreSQL password has also been rotated.
+There were zero client backends and the source Monoize application was stopped before the change.
+Only the `postgres` role's loopback TCP authentication was changed from trust to SCRAM.
+The new password succeeds; the previous password and a random wrong password are rejected.
+Local Unix-socket administration remains available.
+No SSH password or unrelated service was changed.
+Original HBA and protected recovery material remain on the source in `final/source-credential-revocation`.
+Old application environments and role dumps contain obsolete credentials and are not restart instructions.
+
+Report `sustained-stream-3639212e.json` completed 60 short requests over 120.21 seconds.
+Submissions were two seconds apart with at most eight in flight.
+All 60 returned text, successful stream termination, EOF, and server-side success records.
+First-content p50/p95/p99 were 2638.52/6876.46/12893.57 ms.
+This verifies a bounded 30-RPM sample, not long-duration endurance or maximum system capacity.
+
+The active TRAE backup was gracefully stopped after verifying zero accepted sockets.
+It restarted with the same image, became healthy, and passed a real streaming request.
+The active primary was not restarted.
+Full-host reboot recovery remains untested.
+
+Final target health inspection found all three application containers healthy.
+The target host's resolver still returned a separate frontend address for `www.lynshen.org`,
+no addresses for `api.lynshen.org`, and the old host for `trae.joinreso.com`.
+This observation does not override the operator's intentional DNS withdrawal.
+Public DNS and any separate frontend's origin routing require operator action or confirmation.
+If `www` intentionally remains behind a frontend, update that frontend's origin instead of replacing its DNS blindly.
+Manual TLS currently works, but automatic certificate renewal remains disabled and unverified.
+
+### Repository Privacy Gate
+
+A fresh authenticated GitHub API check reports `Libra1337/trae2api` as public.
+Earlier claims that this repository was private were not adequately verified.
+Its visibility-change time is unknown.
+The current collaborator cannot change repository visibility.
+Do not push further deployment documents or credentials to that repository.
+The current local TRAE documentation updates remain unpushed.
+Store operational evidence only in verified-private `Libra1337/monoizeovo`.
+Ask the owner to make TRAE private or supply a private replacement, then verify through the API.
+
 ## Final Synchronization Progress
 
 The source applications subsequently exited gracefully with code 0.

@@ -161,4 +161,27 @@ Retained containers and archived dumps can contain obsolete credentials.
 The PostgreSQL container's captured initialization environment can also contain an obsolete value;
 the database role and updated environment file are authoritative.
 Do not recreate an initialized database from an old container environment.
-Source-cluster credential rotation and historical-secret cleanup remain separate outstanding tasks.
+The source retained Monoize PostgreSQL password was subsequently rotated as well.
+Its `postgres` loopback TCP authentication now requires SCRAM.
+New credentials were accepted; the old credential and a random wrong credential were rejected.
+Local Unix-socket administration remains available.
+Source recovery material is in `final/source-credential-revocation`.
+Historical-secret cleanup and any other credentials found during a broader audit remain separate tasks.
+
+## Latest Recovery and Routing Evidence
+
+The active TRAE backup exited normally and restarted using its unchanged image.
+It became healthy and completed a real inference stream afterward.
+The primary remained running. This is not a full-host reboot test.
+
+A continuous sample submitted 60 short requests two seconds apart over 120.21 seconds.
+All client streams and corresponding server records succeeded.
+First-content p50/p95/p99 were 2638.52/6876.46/12893.57 ms.
+These results supplement, but do not replace, the finite 32-concurrent burst test.
+
+The target resolver does not yet direct all three public domains to the target.
+Ask the operator to confirm whether `www` uses an intentional frontend.
+For a retained frontend, change and verify its origin instead of replacing its DNS automatically.
+For direct service names, restore the operator-managed records to the target only after approval.
+Verify IPv4 and any IPv6 records independently.
+Then validate public access without resolver overrides and configure certificate renewal.
