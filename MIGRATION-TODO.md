@@ -145,6 +145,24 @@ Remaining: public TLS and routing, authenticated Monoize end-to-end inference, b
 restart persistence tests, role/grant verification, complete file verification, and updated deployment scripts.
 Keep DNS disabled until ingress tests pass and the operator restores it.
 
+### TLS and Bounded Readiness Checks
+
+The target `migration-ingress.service` now serves TLS on loopback port 443.
+`www.lynshen.org`, `api.lynshen.org`, and `trae.joinreso.com` each returned HTTP 200
+with successful certificate verification using explicit loopback resolution.
+No public DNS change occurred. Public ingress is not yet open.
+The `/tw2a` route forwards to the retained source service with certificate verification;
+that forwarding path still requires its own acceptance test.
+Certificates are loaded manually; automatic renewal is not yet configured.
+The earliest certificate expiry is 2026-11-23 for `www.lynshen.org`.
+
+Authenticated `/v1/models` returned HTTP 200 and 19 models.
+Bounded `/readyz` tests completed 256 requests at each concurrency level:
+8, 32, and 64. All 768 responses were HTTP 200.
+At concurrency 64, p95 was 80.03 ms and p99 was 310.69 ms.
+These Python-client measurements are readiness-endpoint evidence, not inference capacity.
+Full authenticated inference, streaming concurrency, public access, and renewal remain unverified.
+
 ## Final Synchronization Progress
 
 The source applications subsequently exited gracefully with code 0.
