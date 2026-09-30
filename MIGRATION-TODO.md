@@ -189,6 +189,23 @@ The independent tw2a service remains on the old host.
 Certificate renewal, higher inference concurrency, restart recovery, filesystem/role audits,
 and deployment/runbook consolidation remain outstanding.
 
+### Capacity Failure and Persistence Audit
+
+The larger probe did not meet acceptance and must not be described as successful:
+
+- Requested budget 64: eight concurrent requests returned content in 8/8 cases;
+  sixteen concurrent requests returned content in 14/16 cases.
+- Requested budget 256: eight concurrent requests returned content in 6/8 cases.
+  The empty responses ended with `stop`, `[DONE]`, and EOF.
+- The test stopped on the first failing stage. No 32-concurrent stage was run.
+- Direct TRAE-proxy isolation using the same internal channel returned content in 8/8 cases.
+- No key, provider, or global custom transform was found for the tested path.
+- The root cause remains unproven. Successful server accounting records do not prove visible output delivery.
+
+The source TRAE cluster's missing `monoize` login role is now restored without superuser privilege.
+Persistent mounts, restart policies, systemd enablement, and two immutable encryption files were checked.
+See `MIGRATION-RUNBOOK.md` for active resource names, data locations, checks, and reverse-cutover safeguards.
+
 ## Final Synchronization Progress
 
 The source applications subsequently exited gracefully with code 0.
