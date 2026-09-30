@@ -285,6 +285,19 @@ Public DNS and any separate frontend's origin routing require operator action or
 If `www` intentionally remains behind a frontend, update that frontend's origin instead of replacing its DNS blindly.
 Manual TLS currently works, but automatic certificate renewal remains disabled and unverified.
 
+### Post-Cutover Restore Drill
+
+After target writes began, the current databases were backed up independently at
+`/opt/migration-20260930/postcutover-backups/20260930T222838Z-997dd8`.
+The Monoize dump restored into a temporary database with 87 tables, 106 users,
+5 public functions, and 6 non-internal triggers.
+The trae2api dump restored into a temporary database with 100 tables, 1 user,
+40 public functions, and 9 non-internal triggers.
+Both temporary databases were dropped after verification.
+The active `migration_final` databases remained reachable.
+The backup and manifest contain credentials and remain only on the target.
+The drill does not prove Redis, mutable file, full-host boot, or reverse-cutover recovery.
+
 ### Repository Privacy Gate
 
 A fresh authenticated GitHub API check reports `Libra1337/trae2api` as public.

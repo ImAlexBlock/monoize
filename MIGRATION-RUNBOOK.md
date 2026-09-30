@@ -185,3 +185,15 @@ For a retained frontend, change and verify its origin instead of replacing its D
 For direct service names, restore the operator-managed records to the target only after approval.
 Verify IPv4 and any IPv6 records independently.
 Then validate public access without resolver overrides and configure certificate renewal.
+
+## Post-Cutover Backup Drill
+
+The latest independent backup is
+`/opt/migration-20260930/postcutover-backups/20260930T222838Z-997dd8`.
+It was created after target writes began.
+Both PostgreSQL dumps restored successfully into separate temporary databases.
+The temporary databases were dropped after verification.
+The active databases remained reachable.
+The report and SHA-256 manifest remain in the same private directory.
+The backup includes secrets and must never enter Git or public storage.
+Redis and mutable application data need a coordinated reverse-cutover backup.
