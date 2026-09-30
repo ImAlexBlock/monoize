@@ -16,15 +16,16 @@ Public-IP HTTPS probes pass with explicit domain resolution.
 The old host still serves Apeiron and the separate `/tw2a` application.
 Do not decommission the old host.
 
-High-concurrency acceptance is incomplete.
-Some Monoize short-request responses end normally without visible content.
-Preserve the failed test reports and investigate before claiming capacity.
+Sustained high-concurrency acceptance is incomplete.
+The TRAE empty-answer fix passed short-request bursts through 32 concurrency.
+Preserve earlier failed reports; finite bursts do not establish sustained capacity.
 
 ## Target Components
 
 - `monoize`: image `monoize:9efeaee7`, host network, UID/GID 1000, loopback port 8080.
-- `trae2api-primary`: image `sub2api:20260930-quota-guard`, loopback port 7883.
-- `trae2api-backup`: the same image, loopback port 7882.
+- `trae2api-empty-answer-candidate`: image `sub2api:20261001-empty-answer-90e3235`, loopback port 17884; active primary.
+- `trae2api-empty-answer-backup`: the same image, loopback port 17885; active backup.
+- `trae2api-primary` and `trae2api-backup`: old images retained, stopped with restart disabled.
 - `final-redis`: loopback port 16379; persistent RDB and AOF data.
 - `migration-monoize-postgres`: loopback port 5433; application database `migration_final`.
 - `migration-sub2api-dev-postgres`: loopback port 5434; application database `migration_final`.
@@ -61,8 +62,8 @@ Run these commands on the target:
 systemctl is-active docker migration-ingress final-trae-proxy
 docker ps --format '{{.Names}} {{.Status}}'
 curl -fsS http://127.0.0.1:8080/readyz
-curl -fsS http://127.0.0.1:7883/health
-curl -fsS http://127.0.0.1:7882/health
+curl -fsS http://127.0.0.1:17884/health
+curl -fsS http://127.0.0.1:17885/health
 curl -fsS http://127.0.0.1:7869/health
 curl --resolve www.lynshen.org:443:40.160.141.21 https://www.lynshen.org/readyz
 curl --resolve api.lynshen.org:443:40.160.141.21 https://api.lynshen.org/readyz
@@ -82,9 +83,9 @@ Do not replace the URLs with loopback addresses; the SSRF guard rejects them.
 Do not enable the global private-upstream override to bypass this restriction.
 
 The local proxy disables request and response buffering.
-Its primary is port 7883; port 7882 is backup.
+Its primary is port 17884; port 17885 is backup.
 Keep database pools within the PostgreSQL connection budget.
-Current TRAE pools allow 32 open and 8 idle connections per instance.
+Current TRAE pools allow 16 open and 4 idle connections per active instance.
 The Monoize pool allows 48 connections in its separate PostgreSQL instance.
 
 Container restart policies and systemd enablement were inspected.
@@ -140,7 +141,24 @@ Automatic renewal is not configured or tested.
 The earliest expiry is 2026-11-23 for `www.lynshen.org`.
 DNS ownership or a working ACME challenge path is required before renewal acceptance.
 
-Remaining gates include the empty-response investigation, higher inference concurrency,
+Remaining gates include sustained inference concurrency,
 long-response throughput, disconnect accounting, boot recovery, and certificate renewal.
 The historical source blue-green script still reads SQLite.
 Do not run it unchanged against this PostgreSQL deployment.
+
+## Target Credential Rotation
+
+The active target Monoize PostgreSQL password was rotated after the public-history exposure.
+A host-network client verified that the new password succeeds and the previous password fails.
+Monoize was recreated after empty-connection and empty-spool checks.
+Its environment file and the database initialization environment file were updated.
+External certificate-verified health probes passed after rotation.
+No SSH credentials were changed.
+
+Protected state and recovery material reside in `final/credential-rotation`.
+Do not print or commit these files.
+Retained containers and archived dumps can contain obsolete credentials.
+The PostgreSQL container's captured initialization environment can also contain an obsolete value;
+the database role and updated environment file are authoritative.
+Do not recreate an initialized database from an old container environment.
+Source-cluster credential rotation and historical-secret cleanup remain separate outstanding tasks.

@@ -233,6 +233,28 @@ These finite short-request batches do not establish sustained throughput or long
 Preserve pre-fix failed reports. Continue credential rotation, renewal, boot recovery,
 long-output testing, and sustained-load acceptance before marking the full goal complete.
 
+### Credential Rotation and Output Test
+
+The active target Monoize PostgreSQL password was rotated.
+Tests on the application's host-network authentication path accepted the new password
+and rejected the previous password. A random wrong password was rejected before rotation.
+The updated Monoize container is healthy and its database is reachable.
+External Linux TLS probes for all three service domains returned HTTP 200.
+No secret values were printed or committed; SSH credentials were not changed.
+The source retained cluster and obsolete configuration archives still require separate remediation.
+
+Old target TRAE instances exited with code 0 after drain checks and now have restart disabled.
+The active repaired instances use ports 17884/17885 and pools of 16 open / 4 idle connections each.
+
+Four concurrent longer-output probes produced 1010-1060 visible characters and 46-48 content chunks each.
+All received `stop`, `[DONE]`, and EOF. First content took 6056.9-7214.5 ms.
+Inter-chunk p95 was 64.62-68.25 ms; largest observed inter-chunk gap was 97.15 ms.
+Three responses did not meet the requested final-marker check.
+Report `long-output-acceptance-46b06dfd.json` therefore remains failed.
+Do not equate protocol completion with compliance with the requested answer format.
+Reported completion tokens exceeded the requested 1024 budget on three responses;
+that field can include reasoning and must not be represented as visible-output tokens per second.
+
 ## Final Synchronization Progress
 
 The source applications subsequently exited gracefully with code 0.
