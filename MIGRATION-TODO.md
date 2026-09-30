@@ -163,6 +163,32 @@ At concurrency 64, p95 was 80.03 ms and p99 was 310.69 ms.
 These Python-client measurements are readiness-endpoint evidence, not inference capacity.
 Full authenticated inference, streaming concurrency, public access, and renewal remain unverified.
 
+### End-to-End Acceptance Update
+
+The initial loopback channel URL failed the existing SSRF guard.
+Do not enable `MONOIZE_ALLOW_PRIVATE_UPSTREAM` as a workaround.
+All three TRAE channels now use their original `https://trae.joinreso.com` URL.
+The target Monoize container has persistent Docker ExtraHosts mapping that hostname
+to `40.160.141.21`; no public DNS record was modified.
+TLS ingress binds both loopback and the target public address.
+External Linux probes verified all three domain certificates and HTTP 200 health responses.
+
+One request followed by four concurrent requests passed the complete
+Monoize-to-TRAE streaming path with real credentials and a 64-token output budget.
+All five received content, `[DONE]`, and EOF; server logs recorded `success`.
+The four concurrent first-content times were 3024.85, 3175.48, 3410.79, and 4254.68 ms.
+These are short-request measurements, not proof of sustained high-concurrency capacity.
+An earlier client stopped at `[DONE]` and produced `client_gone` records;
+the corrected verifier reads through EOF and rejects missing completion.
+
+The container was gracefully recreated only after verifying zero accepted sockets
+and an empty spool. ExtraHosts is now part of its Docker configuration.
+Readiness after recreation confirmed PostgreSQL reachable and primary role.
+`/tw2a/` returns the same 404 at source and target; its complete API behavior is not verified.
+The independent tw2a service remains on the old host.
+Certificate renewal, higher inference concurrency, restart recovery, filesystem/role audits,
+and deployment/runbook consolidation remain outstanding.
+
 ## Final Synchronization Progress
 
 The source applications subsequently exited gracefully with code 0.
