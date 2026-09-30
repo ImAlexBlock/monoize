@@ -298,6 +298,26 @@ The active `migration_final` databases remained reachable.
 The backup and manifest contain credentials and remain only on the target.
 The drill does not prove Redis, mutable file, full-host boot, or reverse-cutover recovery.
 
+### Final Runtime Audit
+
+On the latest audit, Monoize and both repaired TRAE instances were running and healthy.
+The local proxy targets `127.0.0.1:17884` with backup `127.0.0.1:17885`.
+The ingress and local proxy systemd units were active.
+Monoize readiness and both TRAE health endpoints returned 200.
+Current database counts were 667572 request logs and 536460 billing ledger rows.
+The migrated trae2api database contained 114 accounts and 16 API keys.
+
+Public DNS was not changed:
+`www.lynshen.org` resolved to `51.81.222.39`,
+`trae.joinreso.com` resolved to `64.90.22.212`,
+and `api.lynshen.org` did not resolve on the target.
+Do not claim public cutover until the operator confirms the frontend origin and DNS plan.
+
+The local trae2api worktree contains an unpushed documentation update.
+The GitHub repository currently reports `public`.
+Do not push deployment or credential documentation there.
+Push it only after the owner makes the repository private or supplies a private replacement.
+
 ### Repository Privacy Gate
 
 A fresh authenticated GitHub API check reports `Libra1337/trae2api` as public.
