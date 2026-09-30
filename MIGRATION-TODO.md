@@ -2,8 +2,8 @@
 
 Date: 2026-09-30 (Asia/Shanghai).
 Source: 64.90.22.212. Target: 40.160.141.21.
-Status: restored candidate validated; awaiting final writer drain and synchronization.
-No production traffic or database cutover has occurred in this task.
+Status: final databases restored; target applications running on loopback only.
+Source applications are stopped. Public ingress and end-to-end acceptance remain pending.
 
 ## Verified
 
@@ -113,3 +113,57 @@ Request logs remained at 667398 rows.
 Application containers still run. Background writes are not fenced.
 Final backups, final database comparison, target production activation, and DNS restoration
 remain outstanding.
+
+## Current State: 2026-10-01
+
+This section supersedes the intermediate status notes below.
+
+- Source application containers exited with code 0 and remain retained with restart disabled.
+- Source PostgreSQL, Redis, Caddy, Apeiron, and traework2api remain available.
+- Final stopped-writer backups were checksum-verified on the target.
+- Final databases restored separately as `migration_final` in the two target PostgreSQL containers.
+- Monoize table hashes, indexes, constraints, and sequences match the final source manifest.
+- All 855 Monoize columns match after normalizing dropped-column ordinal gaps; relative order matches.
+- All 1423 trae2api columns match after relative-order and UTC normalization.
+- All 29 differing trae2api CHECK definitions reparse identically in PostgreSQL temporary tables.
+  No business tables were changed by this comparison; the validation transaction rolled back.
+- The raw manifests retain these metadata differences rather than concealing them.
+- Target Monoize is healthy on `127.0.0.1:8080`.
+- Target trae2api primary and backup are healthy on `127.0.0.1:7883` and `:7882`.
+- Their pool limits are 32 open and 8 idle connections per instance.
+- Redis runs on `127.0.0.1:16379`; AOF is active and enabled in the persisted configuration.
+- The systemd-managed local proxy runs on `127.0.0.1:7869` with request/response buffering disabled.
+- Exactly three TRAE channel URLs now use that local proxy; original URLs are preserved in the final backup directory.
+- A real, 64-token-budget TRAE stream returned HTTP 200, first content at 3674.9 ms, and `[DONE]`.
+  This is a single short-request sample, not a capacity benchmark or a latency improvement claim.
+
+Target applications have started background writes. Do not restart source writers as a rollback shortcut.
+Before a reverse cutover, drain target requests, stop target writers, and reconcile or migrate target changes.
+The source pre-cutover data no longer represents a guaranteed current rollback database.
+
+Remaining: public TLS and routing, authenticated Monoize end-to-end inference, bounded concurrency tests,
+restart persistence tests, role/grant verification, complete file verification, and updated deployment scripts.
+Keep DNS disabled until ingress tests pass and the operator restores it.
+
+## Final Synchronization Progress
+
+The source applications subsequently exited gracefully with code 0.
+An application-scoped admission rule rejects new loopback connections.
+The original containers, restart policies, firewall snapshot, and databases remain available.
+Apeiron, traework2api, Caddy, Redis, and PostgreSQL remain running.
+
+Final backups are under `/opt/migration-20260930/final` on both hosts.
+Both final database dumps, roles, Redis snapshot, and application data archives
+transferred with matching SHA-256 checksums.
+The backup process confirmed zero other database clients before each dump.
+
+The final Monoize dump restored into target database `migration_final`.
+All table-content hashes, constraints, indexes, extensions, and sequence metadata matched.
+The raw column metadata digest differed because historical dropped columns left ordinal gaps.
+A separate comparison covered all 855 columns: 45 physical ordinal differences,
+zero type/default/nullability differences, and identical relative live-column order.
+The manifest tool still needs ordinal normalization before issuing an unqualified equality report.
+
+The final trae2api restore has not yet run because the first comparison stopped the job.
+Target production applications remain stopped.
+Do not restore DNS or restart old application writers while completing this migration.
