@@ -206,6 +206,33 @@ The source TRAE cluster's missing `monoize` login role is now restored without s
 Persistent mounts, restart policies, systemd enablement, and two immutable encryption files were checked.
 See `MIGRATION-RUNBOOK.md` for active resource names, data locations, checks, and reverse-cutover safeguards.
 
+### Private Repository and Empty-Answer Fix Acceptance
+
+The canonical remote is now the private repository `Libra1337/monoizeovo`.
+All three source branches migrated with identical commit IDs and complete history.
+The current GitHub account has push permission but cannot delete the old public repository.
+The latest API check returns 404 for the old repository; deletion versus access removal is not independently confirmed.
+Exposed-credential rotation remains outstanding.
+Do not push deployment information to the previous public remote.
+
+An exact replay of the synthetic upstream request reproduced reasoning-only empty answers
+directly at TRAE, without Monoize. Reasoning was preserved by Monoize as `reasoning_details`.
+The earlier inference that reasoning disappeared was incorrect.
+The TRAE fix rejects empty `stop` answers and bounds unpublished reasoning before first useful output.
+All TRAE service tests passed; the new tests also passed three race-detector repetitions.
+The immutable candidate image was validated and promoted as a healthy primary/backup pair.
+The proxy now targets ports 17884 and 17885; previous instances remain retained.
+
+Post-promotion full-path acceptance completed one request plus batches of 8, 16, and 32:
+all 57 returned visible text, `[DONE]`, EOF, and server-side `success`.
+At concurrency 32, first-content p50 was 2717.85 ms, p95 8051.99 ms, and p99 8092.75 ms.
+At concurrency 16, p95 was 10476.61 ms; do not omit this slower stage from comparisons.
+The proxy's actual descriptor limit is 65536.
+No diagnostic key remains enabled.
+These finite short-request batches do not establish sustained throughput or long-output efficiency.
+Preserve pre-fix failed reports. Continue credential rotation, renewal, boot recovery,
+long-output testing, and sustained-load acceptance before marking the full goal complete.
+
 ## Final Synchronization Progress
 
 The source applications subsequently exited gracefully with code 0.
