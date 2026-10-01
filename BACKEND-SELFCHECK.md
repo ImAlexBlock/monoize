@@ -185,5 +185,18 @@ These checks do not establish browser behavior or production deployment.
 The local machine has no Bun executable; the existing build host supplied the test runtime.
 
 - [x] Add the user-management error contract, guard, and source-regression checks.
-- [ ] Verify the user-management guard with browser request-failure injection.
+- [x] Verify the user-management guard with browser request-failure injection.
 - [ ] Build and deploy this follow-up after the current stream drain completes.
+
+The local browser fixture now renders the real user-management page with synthetic data.
+It injects HTTP 500 separately into users, groups, and billing-plan GET requests.
+All three cases show an alert and hide the add-user control.
+With automatic error retries disabled, a manual Retry click restores the populated user list.
+Each retry revalidates all three dependencies. No write requests or page exceptions occurred.
+The fixture blocks requests outside its loopback origin and uses no production sessions.
+
+The browser test is `frontend/tests/users-load-errors.browser.ts`.
+Run it with Bun; set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` when using an existing Chromium installation.
+The local run used a temporary npm-cached Bun runtime and frozen-lockfile dependencies.
+Twenty-three related source and API tests passed across four test files.
+This evidence does not replace the pending production deployment and public-path checks.
