@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Save, Settings2 } from "lucide-react";
+import { Save, Settings2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Tabs } from "@/components/ui/tabs";
 import {
   useProviders,
@@ -35,14 +36,14 @@ import { ContentFirewallSection } from "@/components/settings/content-firewall-s
 
 export function SettingsPage() {
   const { t } = useTranslation();
-  const { data: settings, isLoading, mutate } = useSettings();
+  const { data: settings, isLoading, error: settingsError, mutate } = useSettings();
   const {
     data: providers,
     error: providersError,
     isLoading: providersLoading,
     mutate: mutateProviders,
   } = useProviders();
-  const { data: transformRegistry = [], isLoading: transformRegistryLoading } =
+  const { data: transformRegistry = [], isLoading: transformRegistryLoading, error: registryError, mutate: reloadRegistry } =
     useTransformRegistry();
   const [localSettings, setLocalSettings] = useState<SystemSettings | null>(null);
   const [saving, setSaving] = useState(false);
@@ -109,7 +110,20 @@ export function SettingsPage() {
 
   const hasChanges = localSettings !== null;
 
-  if (isLoading) {
+  if (settingsError || registryError) {
+    return (
+      <PageWrapper>
+        <PageHeader title={t("settings.title")} />
+        <EmptyState variant="inline" role="alert" title={t("settings.failedLoad")}
+          action={<Button variant="outline" onClick={() => {
+            void mutate();
+            void reloadRegistry();
+          }}><RefreshCw className="mr-2 h-4 w-4" />{t("common.retry")}</Button>} />
+      </PageWrapper>
+    );
+  }
+
+  if (isLoading || transformRegistryLoading) {
     return (
       <PageWrapper>
         <SettingsPageSkeleton />

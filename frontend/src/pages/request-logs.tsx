@@ -136,6 +136,7 @@ export function RequestLogsPage() {
 
 	const {
 		data: pageData,
+		error: logsError,
 		isLoading,
 		isValidating,
 		mutate
@@ -725,13 +726,21 @@ export function RequestLogsPage() {
 				</AnimatePresence>
 			</motion.div>
 
+			{logsError && (
+				<div role='alert' className='flex shrink-0 items-center justify-between gap-3 border border-destructive/40 p-3'>
+					<span>{t('common.error')}</span>
+					<Button variant='outline' disabled={isValidating} onClick={() => void mutate()}>
+						<RefreshCw className='mr-2 h-4 w-4' />{t('common.retry')}
+					</Button>
+				</div>
+			)}
 			<motion.div
 				initial={{ opacity: 0, y: 20 }}
 				animate={{ opacity: 1, y: 0 }}
 				transition={{ delay: 0.1, ...transitions.normal }}
 				className='rounded-lg border bg-card flex-1 min-h-0 overflow-auto'
 			>
-				<RequestLogsTable
+				{(!logsError || sortedLogs.length > 0) && <RequestLogsTable
 					affinityTargetNames={affinityTargetNames}
 					isAdmin={isAdmin}
 					isInitialLoading={isInitialLoading}
@@ -741,7 +750,7 @@ export function RequestLogsPage() {
 					onTooltipOpenChange={onTooltipOpenChange}
 					showIp={showIp}
 					t={t}
-				/>
+				/>}
 			</motion.div>
 
 			<CaptureViewerDialog

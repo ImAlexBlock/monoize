@@ -31,6 +31,10 @@ const cases = [
   { view: "groups", failed: "/groups", reads: ["/groups"], add: "groups.create", label: "Fixture Group" },
   ...providerDependencies.map((failed) => ({ view: "providers", failed, reads: providerDependencies, add: "providers.addProvider", label: "Fixture Provider" })),
   ...walletDependencies.map((failed) => ({ view: "wallet", failed, reads: walletDependencies, add: "", label: "Fixture Plan" })),
+  ...["/settings", "/transforms/registry"].map((failed) => ({
+    view: "settings", failed, reads: ["/settings", "/transforms/registry"], add: "common.saveChanges", label: "",
+  })),
+  { view: "logs", failed: "/request-logs", reads: ["/request-logs"], add: "", label: "Fixture Model" },
 ];
 const user = {
   id: "fixture-user", username: "Fixture User", role: "super_admin",
@@ -58,17 +62,25 @@ try {
       }
       const path = url.pathname.replace("/api/dashboard", "");
       requests.push(path);
+      if (path === "/request-logs/stream") return route.fulfill({ status: 200, contentType: "text/event-stream", body: ": fixture\n\n" });
       if (path === failed && failing) return route.fulfill({ status: 500, json: { error: "Fixture read failure" } });
       const responses: Record<string, unknown> = {
         "/auth/me": user, "/me": user, "/users": [user],
         "/groups": { groups: [{ id: "fixture-group", name: "Fixture Group", account_class: "standard", description: "", sort_order: 0, user_selectable: true }] },
-        "/billing-plans": [], "/settings": {}, "/transforms/registry": [], "/model-metadata": [],
+        "/billing-plans": [], "/settings": { site_name: "Fixture Site", site_description: "", api_base_url: "",
+          reasoning_suffix_map: {}, global_transforms: [] }, "/transforms/registry": [], "/model-metadata": [],
         "/billing-rates/profiles": [],
         "/providers": [{ id: "fixture-provider", name: "Fixture Provider", group_id: "fixture-group",
-          enabled: true, priority: 0, channel: { id: "fixture-channel", models: {}, provider_type: "openai" } }],
+          enabled: true, priority: 0, channel: { id: "fixture-channel", name: "Fixture Channel", models: {}, provider_type: "openai" } }],
         "/store/exchange-rate": { cny_per_usd: "7" },
         "/store/entitlement": { product_name: "Fixture Plan", ends_at: "2027-01-01T00:00:00Z" },
-        "/request-logs": { logs: [], total: 1, total_charge_nano_usd: "1000000000" },
+        "/request-logs": { data: view === "logs" ? [{
+          id: "fixture-log", created_at: "2026-01-01T00:00:00Z", status: "success",
+          is_stream: false, model: "Fixture Model", provider: {}, channel: {},
+          user: { id: "fixture-user", username: "Fixture User" }, api_key: {},
+          tokens: { input: 10, output: 20 }, timing: {}, billing: { charge_nano_usd: "1000000000" }, error: {},
+        }] : [], total: view === "logs" ? 1 : 0, total_charge_nano_usd: "1000000000" },
+        "/tokens": [],
         "/wallet/ledger": [],
       };
       if (!(path in responses)) {
@@ -85,14 +97,36 @@ try {
         await expect(page.getByRole("region", { name: "wallet.summaryLabel" })).toHaveCount(0);
         await expect(page.getByText("store.account.noPlan", { exact: true })).toHaveCount(0);
       }
+      if (view === "logs") await expect(page.getByText("requestLogs.noLogs", { exact: true })).toHaveCount(0);
       const before = reads.map((path) => requests.filter((r) => r === path).length);
       failing = false;
       await page.getByRole("button", { name: "common.retry", exact: true }).click();
       await expect(page.getByRole("alert")).toHaveCount(0);
       if (add) await expect(page.getByRole("button", { name: add, exact: true })).toBeVisible();
-      await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+      if (label) await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+      if (view === "settings") await expect(page.locator("#site_name")).toHaveValue("Fixture Site");
       if (view === "wallet") await expect(page.getByRole("region", { name: "wallet.summaryLabel" }).getByText("7.00", { exact: true })).toBeVisible();
       reads.forEach((path, index) => assert.ok(requests.filter((r) => r === path).length > before[index]));
+      if (view === "settings") {
+        await page.locator("#site_name").fill("Unsaved Fixture Draft");
+        failing = true;
+        await page.getByRole("button", { name: "Fixture revalidate settings", exact: true }).click();
+        await expect(page.getByRole("alert")).toBeVisible();
+        await expect(page.getByRole("button", { name: add, exact: true })).toHaveCount(0);
+        failing = false;
+        await page.getByRole("button", { name: "common.retry", exact: true }).click();
+        await expect(page.locator("#site_name")).toHaveValue("Unsaved Fixture Draft");
+      }
+      if (view === "logs") {
+        failing = true;
+        await page.getByRole("button", { name: "requestLogs.refresh", exact: true }).click();
+        await expect(page.getByRole("alert")).toBeVisible();
+        await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+        failing = false;
+        await page.getByRole("button", { name: "common.retry", exact: true }).click();
+        await expect(page.getByRole("alert")).toHaveCount(0);
+        await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+      }
       assert.deepEqual(mutations, []);
       assert.deepEqual(errors, []);
       assert.deepEqual(unexpected, []);

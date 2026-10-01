@@ -32,3 +32,8 @@ This assessment covers the successor to `20261001-dashboard-pg`.
     zero usage or no plan. Pending reads show a skeleton; failed reads show a
     retryable alert. Summary retry revalidates usage, entitlement, and exchange rate
     without submitting redemption or other financial mutations.
+13. Settings and transform-registry read failures must hide settings save controls
+    and expose a read-only retry. Recovery must preserve unsaved local settings.
+14. Request-log query errors must expose a retryable alert, not an empty-result table.
+    Previously loaded rows remain visible during query failure.
+    Retry revalidates the current query without changing its filters or pagination.

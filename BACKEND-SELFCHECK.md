@@ -273,3 +273,30 @@ The wallet change is not deployed and is not part of `20261002-dashboard-guards`
 That existing image contains only the previously built Users, Groups, and Providers guards.
 Additional source inspection identified unhandled read errors in settings and request logs.
 Those paths still require focused reproduction and repair before full acceptance.
+
+## Settings and Request-Log Error Guards
+
+Settings now shows a retryable alert on settings or transform-registry read failure.
+Save controls remain hidden until those dependencies recover.
+Retry preserves unsaved local settings and submits no mutation.
+The existing Provider model-selector error handling remains unchanged.
+
+Request logs now exposes query errors with a retry action.
+A failed initial read does not render the no-records table.
+Previously loaded rows remain visible if a subsequent refresh fails.
+Retry retains the current query, filters, and pagination.
+
+The real-component browser fixture passed fifteen dependency-failure cases.
+Settings cases also edit a local draft, inject a subsequent failure, and verify draft preservation after retry.
+The log case verifies nonempty rows remain visible during a subsequent refresh failure and recovery.
+All cases reject unexpected API paths and write requests.
+No production sessions or financial mutations are used by this fixture.
+
+Seventy-three related regression tests passed across five files.
+Both TypeScript configurations and the full frontend release build passed.
+The existing large-chunk and Browserslist-age warnings remain.
+
+Wallet, settings, and request-log changes still require a new release binary and image.
+They are not included in the already loaded `20261002-dashboard-guards` image.
+The previous organization swap still has one accepted old connection; its supervisor remains alive.
+Final deployment and public-path acceptance remain incomplete.
