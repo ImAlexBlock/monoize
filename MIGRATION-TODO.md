@@ -1,5 +1,33 @@
 # Server migration TODO
 
+## Latest Ingress Evidence (2026-10-01)
+
+The operator retained the CDN and changed the WWW HTTPS origin to the new host.
+Normal DNS requests through the CDN returned 200 for `/`, `/readyz`, and `/healthz`.
+Unauthenticated `/v1/models` returned 401.
+A real authenticated stream through `www.lynshen.org` returned content, `[DONE]`, and EOF.
+CDN headers reported `BYPASS`, and the target database recorded the same request ID:
+`86200bf0-a5bd-45df-957b-f7a4b38ea6bb`, status `success`.
+Client first-content latency was 4283.36 ms for this single request.
+This proves the CDN request reached the target, not merely a cached health page.
+It does not establish CDN latency percentiles or buffering behavior for long streams.
+
+The target-host DNS check resolves `api.lynshen.org` to the new host.
+After the operator's subsequent TRAE DNS update, an external source-host check
+resolved `trae.joinreso.com` to `40.160.141.21` without overrides.
+Its HTTPS homepage and `/health` returned 200 with certificate verification enabled;
+unauthenticated `/v1/models` returned 401.
+The earlier old-address/502 observation is superseded by this external check.
+WWW retains its CDN configuration. Old application writers remain stopped.
+
+ACME path audit used random nonexistent tokens and did not request certificates.
+WWW HTTP redirected to HTTPS, then returned the application's HTML with status 200.
+API HTTP returned 404; HTTPS returned application HTML.
+These probes do not prove challenge-token delivery.
+Automatic renewal remains off and certificates remain manually loaded.
+The earliest origin certificate expiry is 2026-11-23.
+No DNS, TLS configuration, or live Caddy reload was performed during this audit.
+
 Date: 2026-09-30 (Asia/Shanghai).
 Source: 64.90.22.212. Target: 40.160.141.21.
 Status: final databases restored; target applications running on loopback only.
