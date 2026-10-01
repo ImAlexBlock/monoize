@@ -223,3 +223,21 @@ These guards remain undeployed.
 The release binary embeds frontend resources, so deployment requires a new binary and image.
 At the latest production inspection, one old connection remained and the swap supervisor was alive.
 The previously transmitting connection had closed naturally; no connection was force-stopped.
+
+## Follow-Up Image Ready
+
+The isolated release build completed with exit code 0 after 13 minutes 10 seconds.
+An SSH observation timeout interrupted the outer packaging workflow, not the container compilation.
+The retained build container confirmed successful compilation before packaging resumed separately.
+Image `monoize:20261002-dashboard-guards` was built and loaded on the target host.
+Source, local-transfer, and target archives have the same SHA-256:
+`2cb5174cec4ba01b70d3543301b69dbb97d75321db29d87290f8677b1871884f`.
+
+The target image ID is
+`sha256:3a140e3d9004eb461dece0e624fc8921e62cd57ac990062f87b016ff81ff3497`.
+Loading an image does not deploy it or switch traffic.
+
+At 2026-10-02 01:47 UTC+8, the existing organization swap supervisor remained alive.
+Both overlapping instances were healthy, and one accepted old connection remained.
+No second swap was started. Final lease handover, normal old-instance exit,
+follow-up deployment, and post-deployment public-path acceptance remain pending.
