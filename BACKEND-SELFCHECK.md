@@ -1,6 +1,8 @@
 # Backend Self-Check
 
-Status: active. Do not infer page acceptance from health checks.
+Status: read-path repair accepted after final deployment on 2026-10-02.
+The final acceptance section supersedes historical pending-state notes below.
+Do not infer page acceptance from health checks.
 
 ## Initial Public GET Matrix
 
@@ -33,7 +35,7 @@ Repair requires a tested migration, a pre-change backup, and row-preservation ve
 - [x] Re-run fixed and parameterized interfaces with appropriate existing roles.
 - [x] Verify visible model selection and automatic error recovery in a browser.
 - [x] Check PG and SQLite regressions and role-protected 403 cases separately.
-- [ ] Deploy without aborting existing streams; verify live pages through the CDN.
+- [x] Deploy the unified recovery image without aborting existing streams; verify live pages through the CDN.
 
 Do not create orders, payments, withdrawals, refunds, or alter balances for diagnostics.
 An admin rejected by a super-admin or sales-agent endpoint is not automatically a defect.
@@ -186,7 +188,7 @@ The local machine has no Bun executable; the existing build host supplied the te
 
 - [x] Add the user-management error contract, guard, and source-regression checks.
 - [x] Verify the user-management guard with browser request-failure injection.
-- [ ] Build and deploy this follow-up after the current stream drain completes.
+- [x] Build and deploy this follow-up after the current stream drain completes.
 
 The local browser fixture now renders the real user-management page with synthetic data.
 It injects HTTP 500 separately into users, groups, and billing-plan GET requests.
@@ -340,3 +342,44 @@ Its temporary sessions were also removed.
 
 The image is ready but not deployed. The existing organization swap still has one old connection.
 Do not start an overlapping swap or claim final deployment acceptance.
+
+## Final Read-Path Acceptance
+
+The user explicitly authorized closing the one previously identified old connection.
+The cleanup checked its endpoint pair, owning process, and old image before closing only that socket.
+The organization deployment then completed Store lease handover at 2026-10-02 03:07:45 UTC+8.
+The original instance exited with code 0. A post-exit comparison matched all five organization member rows.
+This authorized connection closure must not be described as uninterrupted continuity for that earlier deployment.
+
+The subsequent unified deployment used image `monoize:20261002-dashboard-read-recovery`.
+Its database backup and fourteen candidate GET gates completed before the traffic switch.
+The organization-owner member-usage candidate check also passed.
+All old connections in this deployment drained naturally; no second socket closure or Caddy reload occurred.
+The deployment completed at 2026-10-02 03:13:20 UTC+8.
+The active `monoize` instance is healthy and reports local mode with `lease_owned=true`.
+The retained previous instance exited with code 0; its old listening port has no accepted connections.
+
+Public report `dashboard-selfcheck-35ab23f4.json` began after handover.
+It contains 46 HTTP 200 responses and four expected role-based HTTP 403 responses, with no HTTP 500.
+Sixteen parameterized reads passed after handover, including model/provider details, pricing profiles,
+historical revenue, log pagination, and organization detail, ledger, analytics, keys, limits, and usage.
+The final organization comparison matched calls, input/output/cache totals, and membership for all five member rows.
+Temporary matrix, detail, organization, and browser diagnostic sessions were removed.
+
+The CDN and active candidate return the same frontend module and SHA-256:
+`/assets/index-B7bIANM_.js`,
+`91dd7d6d27c9ccc99b9f9a03b22af39cbcbfcee1edec86e6a82d7d2fb438a445`.
+The browser read-through covered sixteen dashboard pages without alert elements.
+Additional model-page verification found the populated Profile state without alerts.
+The request-log page displayed twenty visible rows without alerts.
+The isolated browser was closed after these checks.
+
+Acceptance combines these public reads with the recorded PostgreSQL/SQLite regressions,
+the firewall row-preservation checks, 334 frontend tests, fifteen browser failure-recovery cases,
+and the successful release build. The browser failure cases use synthetic data, not production mutations.
+
+Limits remain explicit: no production payment, refund, withdrawal, balance, or permission mutation was submitted.
+The revenue XLSX check validates content type and ZIP signature, not workbook rendering.
+This acceptance covers the reported migrated-dashboard read failures, data-display accuracy, and error recovery.
+It is not a new high-concurrency benchmark or a certification of every financial write workflow.
+Repository privacy was rechecked before publishing this record; `monoizeovo` is private.
