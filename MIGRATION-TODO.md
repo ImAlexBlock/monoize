@@ -2,6 +2,23 @@
 
 ## Latest Ingress Evidence (2026-10-01)
 
+### Direct Certificate Renewal Accepted
+
+The API/TRAE production certificate is now deployed through a lineage-scoped hook.
+Its expiry is 2026-12-30. Both live TLS fingerprints match the validated certificate.
+The hook checks certificate lifetime, hostnames, key match, and system trust before deployment.
+It stages versioned certificate files, validates the candidate Caddy configuration,
+retains the previous configuration, and loads through the local administration API.
+No application or host restart was performed.
+
+`certbot renew --cert-name migration-direct-ingress --dry-run --run-deploy-hooks`
+passed, including the actual deploy hook and subsequent live fingerprint verification.
+The Certbot timer is enabled and the ingress remains active.
+Monoize readiness confirmed PostgreSQL reachable after the test.
+This accepts renewal for `api.lynshen.org` and `trae.joinreso.com` only.
+The WWW certificate remains manual and unchanged; its CDN challenge path is still pending.
+Earlier notes stating the direct-domain certificate was not deployed are historical.
+
 ### ACME Validation Update
 
 Certbot is installed on the target.
