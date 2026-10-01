@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
-import { ArrowDownLeft, ArrowUpRight, Infinity as InfinityIcon, WalletCards } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, Infinity as InfinityIcon, WalletCards, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import useSWR from "swr";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import { CoinAmount } from "@/components/coin-amount";
 import { PageWrapper } from "@/components/ui/motion";
 import { useAuth } from "@/hooks/use-auth";
@@ -20,7 +22,7 @@ const ENTITLEMENT_KEY = "/api/dashboard/store/entitlement";
 
 export function WalletPage() {
   const { t } = useTranslation();
-  const { user, refreshUser } = useAuth();
+  const { user, refreshUser, loading: userLoading } = useAuth();
   const [redeeming, setRedeeming] = useState(false);
   const [walletSection, setWalletSection] = useState<"ledger" | "orders">("ledger");
   const [ledgerLimit, setLedgerLimit] = useState(10);
@@ -33,8 +35,10 @@ export function WalletPage() {
   }, []);
   const monthlyUsage = useSWR(["wallet-monthly-usage", monthStart], () => api.listRequestLogs(1, 0, { time_from: monthStart }));
   const ledger = useSWR(["/api/dashboard/wallet/ledger", ledgerLimit], () => api.listWalletLedger(ledgerLimit));
+  const summaryError = monthlyUsage.error || entitlement.error || exchangeRate.error;
+  const summaryLoading = userLoading || monthlyUsage.isLoading || entitlement.isLoading || exchangeRate.isLoading;
   const rate = exchangeRate.data?.cny_per_usd;
-  const formatCoin = (value: string | null | undefined) => rate ? formatCoinFromNanoUsdForCurrency(value ?? "0", currency, rate) : "--";
+  const formatCoin = (value: string | null | undefined) => rate && value != null ? formatCoinFromNanoUsdForCurrency(value, currency, rate) : "--";
   const ledgerLabel = (entry: BillingLedgerEntry) => t(`wallet.ledger.kinds.${entry.kind}`, { defaultValue: entry.kind });
 
   const handleRedeem = async (code: string) => {
@@ -50,11 +54,24 @@ export function WalletPage() {
   return (
     <PageWrapper className="flex min-w-0 flex-col gap-6 pb-6">
       <PageHeader title={t("wallet.title")} description={t("wallet.description")} />
+      {summaryError ? (
+        <EmptyState variant="inline" role="alert" title={t("common.error")}
+          action={<Button variant="outline" onClick={() => {
+            void monthlyUsage.mutate();
+            void entitlement.mutate();
+            void exchangeRate.mutate();
+          }}><RefreshCw className="mr-2 h-4 w-4" />{t("common.retry")}</Button>} />
+      ) : summaryLoading ? (
+        <div className="grid gap-3 sm:grid-cols-3" aria-busy="true" aria-label={t("wallet.summaryLabel")}>
+          {[0, 1, 2].map((item) => <Skeleton key={item} className="h-24" />)}
+        </div>
+      ) : (
       <section className="grid gap-3 sm:grid-cols-3" aria-label={t("wallet.summaryLabel")}>
         <Card className="rounded-2xl"><CardContent className="p-5"><p className="text-sm text-muted-foreground">{t("wallet.balance")}</p><p className="mt-2 text-xl font-semibold">{user?.balance_unlimited ? <span className="flex items-center gap-2"><InfinityIcon className="size-5" />{t("store.ui.accountUnlimited")}</span> : <CoinAmount value={formatCoin(user?.balance_nano_usd)} iconClassName="size-5" />}</p></CardContent></Card>
         <Card className="rounded-2xl"><CardContent className="p-5"><p className="text-sm text-muted-foreground">{t("wallet.monthlyUsage")}</p><p className="mt-2 text-xl font-semibold"><CoinAmount value={formatCoin(monthlyUsage.data?.total_charge_nano_usd)} iconClassName="size-5" /></p></CardContent></Card>
         <Card className="rounded-2xl"><CardContent className="p-5"><p className="text-sm text-muted-foreground">{t("wallet.currentPlan")}</p><p className="mt-2 font-semibold">{entitlement.data?.product_name ?? t("store.account.noPlan")}</p>{entitlement.data && <p className="mt-1 text-xs text-muted-foreground">{t("store.ui.accountEnds", { date: new Date(entitlement.data.ends_at).toLocaleDateString() })}</p>}</CardContent></Card>
       </section>
+      )}
       <Card className="rounded-2xl"><CardContent className="p-5"><div className="mb-4 flex items-center gap-2"><WalletCards className="size-5 text-primary" /><h2 className="font-display text-base font-semibold">{t("wallet.redemptionTitle")}</h2></div><RedemptionPanel onRedeem={handleRedeem} redeeming={redeeming} /></CardContent></Card>
       <section aria-labelledby="wallet-records-title">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

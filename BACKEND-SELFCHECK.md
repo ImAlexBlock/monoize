@@ -254,3 +254,22 @@ Transport counters show approximately three hours without application-data trans
 This does not prove that the connection is safe to terminate.
 No request payloads were inspected, no connections were terminated, and no second swap began.
 The follow-up image remains loaded but undeployed.
+
+## Wallet Summary Error Guard
+
+Wallet summary code treated unavailable monthly usage as zero and unavailable entitlement as no plan.
+The new summary guard shows a skeleton while reads are pending and a retryable alert on failure.
+Retry revalidates usage, entitlement, and exchange rate without submitting redemption.
+The separate ledger and redemption behavior remain unchanged.
+An absent balance value now renders an unavailable marker instead of an invented zero.
+
+The browser fixture now covers twelve dependency-failure cases.
+All twelve passed, including wallet usage, entitlement, and exchange-rate failures.
+Each wallet case recovered its nonzero usage and plan after manual retry without write requests.
+Nineteen related money-format and error-state regression tests passed.
+Both frontend TypeScript configurations passed.
+
+The wallet change is not deployed and is not part of `20261002-dashboard-guards`.
+That existing image contains only the previously built Users, Groups, and Providers guards.
+Additional source inspection identified unhandled read errors in settings and request logs.
+Those paths still require focused reproduction and repair before full acceptance.

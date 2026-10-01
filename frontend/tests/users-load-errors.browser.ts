@@ -25,10 +25,12 @@ const browser = await chromium.launch({
 });
 const dependencies = ["/users", "/groups", "/billing-plans"];
 const providerDependencies = ["/providers", "/groups", "/settings", "/transforms/registry", "/model-metadata"];
+const walletDependencies = ["/request-logs", "/store/entitlement", "/store/exchange-rate"];
 const cases = [
   ...dependencies.map((failed) => ({ view: "users", failed, reads: dependencies, add: "users.addUser", label: "Fixture User" })),
   { view: "groups", failed: "/groups", reads: ["/groups"], add: "groups.create", label: "Fixture Group" },
   ...providerDependencies.map((failed) => ({ view: "providers", failed, reads: providerDependencies, add: "providers.addProvider", label: "Fixture Provider" })),
+  ...walletDependencies.map((failed) => ({ view: "wallet", failed, reads: walletDependencies, add: "", label: "Fixture Plan" })),
 ];
 const user = {
   id: "fixture-user", username: "Fixture User", role: "super_admin",
@@ -65,6 +67,9 @@ try {
         "/providers": [{ id: "fixture-provider", name: "Fixture Provider", group_id: "fixture-group",
           enabled: true, priority: 0, channel: { id: "fixture-channel", models: {}, provider_type: "openai" } }],
         "/store/exchange-rate": { cny_per_usd: "7" },
+        "/store/entitlement": { product_name: "Fixture Plan", ends_at: "2027-01-01T00:00:00Z" },
+        "/request-logs": { logs: [], total: 1, total_charge_nano_usd: "1000000000" },
+        "/wallet/ledger": [],
       };
       if (!(path in responses)) {
         unexpected.push(path);
@@ -75,13 +80,18 @@ try {
     try {
       await page.goto(`${server.url.href}?view=${view}`);
       await expect(page.getByRole("alert")).toBeVisible();
-      await expect(page.getByRole("button", { name: add, exact: true })).toHaveCount(0);
+      if (add) await expect(page.getByRole("button", { name: add, exact: true })).toHaveCount(0);
+      if (view === "wallet") {
+        await expect(page.getByRole("region", { name: "wallet.summaryLabel" })).toHaveCount(0);
+        await expect(page.getByText("store.account.noPlan", { exact: true })).toHaveCount(0);
+      }
       const before = reads.map((path) => requests.filter((r) => r === path).length);
       failing = false;
       await page.getByRole("button", { name: "common.retry", exact: true }).click();
       await expect(page.getByRole("alert")).toHaveCount(0);
-      await expect(page.getByRole("button", { name: add, exact: true })).toBeVisible();
+      if (add) await expect(page.getByRole("button", { name: add, exact: true })).toBeVisible();
       await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+      if (view === "wallet") await expect(page.getByRole("region", { name: "wallet.summaryLabel" }).getByText("7.00", { exact: true })).toBeVisible();
       reads.forEach((path, index) => assert.ok(requests.filter((r) => r === path).length > before[index]));
       assert.deepEqual(mutations, []);
       assert.deepEqual(errors, []);

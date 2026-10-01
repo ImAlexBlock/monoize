@@ -28,3 +28,7 @@ This assessment covers the successor to `20261001-dashboard-pg`.
     The Providers page must reject failed or pending Groups, settings, transform
     registry, and model-metadata dependencies before exposing editing controls.
     Both pages must provide read-only retry actions for their failed dependencies.
+12. Wallet summary reads must distinguish unavailable usage or entitlement from
+    zero usage or no plan. Pending reads show a skeleton; failed reads show a
+    retryable alert. Summary retry revalidates usage, entitlement, and exchange rate
+    without submitting redemption or other financial mutations.

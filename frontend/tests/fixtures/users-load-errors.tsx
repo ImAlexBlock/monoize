@@ -8,6 +8,7 @@ import { StoreCurrencyProvider } from "../../src/hooks/use-store-currency";
 import { UsersPage } from "../../src/pages/users";
 import { GroupsPage } from "../../src/pages/groups";
 import { ProvidersPage } from "../../src/pages/providers";
+import { WalletPage } from "../../src/pages/wallet";
 
 const i18n = createInstance();
 await i18n.init({ lng: "en", resources: { en: { translation: { common: { retry: "common.retry" } } } } });
@@ -19,7 +20,7 @@ createRoot(document.getElementById("root")!).render(
       <MemoryRouter>
         <StoreCurrencyProvider>
           <AuthProvider>
-            {view === "groups" ? <GroupsPage /> : view === "providers" ? <ProvidersPage /> : <UsersPage />}
+            {view === "groups" ? <GroupsPage /> : view === "providers" ? <ProvidersPage /> : view === "wallet" ? <WalletPage /> : <UsersPage />}
           </AuthProvider>
         </StoreCurrencyProvider>
       </MemoryRouter>
