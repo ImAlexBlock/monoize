@@ -63,3 +63,48 @@ profile-switch acceptance is not yet claimed.
 The old instance still had one accepted connection at the last deployment check.
 The supervised swap retains both healthy instances and waits without force-stopping streams.
 Parameterized routes, fuller browser navigation, and error/retry interaction remain to be checked.
+
+## Extended Read Acceptance
+
+Sixteen parameterized GET checks passed through the CDN, including profile filtering,
+model/provider details, historical revenue, Excel export, log pagination, and organization
+detail, ledger, analytics, keys, limits, and member usage.
+The export returned the spreadsheet content type and a ZIP signature; workbook contents
+were not independently rendered during this check.
+All temporary interface diagnostic sessions were deleted.
+
+Browser checks confirmed keyboard Profile selection changes the model and price list.
+Blocking only the profile-summary request in the isolated browser produced an error
+heading and Retry button, not a no-models state.
+Removing the interception restored the data automatically before a manual retry click.
+Manual retry completion is therefore not independently established.
+Firewall default seven-day filtering was empty; selecting all time displayed twenty
+rows on the visible page without alerts. No event content was exported.
+
+## Additional Data-Accuracy Risk
+
+The organization member-usage implementation silently converts PostgreSQL token
+aggregate decode errors to zero and an integer member-flag decode error to false.
+HTTP 200 on a live dataset with no matching recent rows does not disprove this defect.
+A scoped fix and SQLite/PostgreSQL tests with nonzero large token values are in progress.
+The PostgreSQL fixture also checks active versus removed membership.
+These changes are not deployed or accepted until the running test job passes.
+
+## Follow-Up Verification
+
+The previous blue-green swap completed normal drain and Store lease handover.
+The original instance exited with code 0 and remains retained; no stream was force-stopped.
+Role-specific checks after deployment passed for existing super-admin, sales-agent,
+and regular-user accounts. A regular user still receives 403 for admin revenue.
+All temporary diagnostic sessions were removed.
+
+A browser read-through visited sixteen dashboard pages and recorded their headings,
+alert elements, and displayed row counts without submitting mutations or exporting content.
+The model, Store, revenue, users, groups, provider, wallet, orders, settings, announcement,
+sales, organization-management, usage, and firewall surfaces rendered their expected headings.
+This is read-path evidence, not acceptance of untested financial write operations.
+
+The initial organization unit-test build and the subsequent smaller integration build
+were killed by the build container's 6 GiB memory limit, confirmed in kernel OOM logs.
+Neither result is a test pass. An isolated, single-job 10 GiB retry is running.
+Production memory limits were not changed. The organization display fix is not yet deployed.
