@@ -629,7 +629,7 @@ impl StoreBillingStore {
             .query_one(self.db.stmt(
                 &format!(
                     "SELECT id, adapter_kind, name, icon_kind, icon_value,
-                            sort_order, enabled, revision, created_at, updated_at
+                            sort_order, enabled, CAST(revision AS BIGINT) AS revision, created_at, updated_at
                      FROM store_payment_channels WHERE id = $1{suffix}"
                 ),
                 vec![id.into()],
@@ -740,7 +740,7 @@ impl StoreBillingStore {
             .read()
             .query_all(self.db.stmt(
                 "SELECT id, adapter_kind, name, icon_kind, icon_value,
-                        sort_order, enabled, revision, created_at, updated_at
+                        sort_order, enabled, CAST(revision AS BIGINT) AS revision, created_at, updated_at
                  FROM store_payment_channels WHERE enabled = 1
                  ORDER BY sort_order ASC, created_at ASC, id ASC",
                 vec![],
@@ -808,7 +808,7 @@ impl StoreBillingStore {
             .read()
             .query_all(self.db.stmt(
                 "SELECT id, adapter_kind, name, icon_kind, icon_value,
-                        sort_order, enabled, revision, created_at, updated_at
+                        sort_order, enabled, CAST(revision AS BIGINT) AS revision, created_at, updated_at
                  FROM store_payment_channels
                  ORDER BY sort_order ASC, created_at ASC, id ASC",
                 vec![],

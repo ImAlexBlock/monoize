@@ -1,5 +1,36 @@
 # Server migration TODO
 
+## Dashboard Regression Correction (2026-10-01)
+
+The previous full-site completion claim was premature: Store and revenue pages
+were not covered by the inference and readiness acceptance checks.
+The operator reported two failing dashboard pages, reproduced as HTTP 500:
+Store catalog and current-day revenue.
+
+The stored token columns were BIGINT. PostgreSQL SUM(BIGINT) returned NUMERIC,
+which the revenue reader tried to decode as i64.
+Store payment-channel revision was INTEGER while the reader expected i64.
+Fixes explicitly project the query results as BIGINT, including historical
+revenue call counts. No production table or business record was rewritten.
+
+The unmodified code failed a fresh PostgreSQL regression on INT4 channel revision.
+The fixed code passed the PostgreSQL regression, five revenue tests, and thirteen
+Store tests. The PG fixture covers large token counts, NULL tokens, empty days,
+channel decoding, and persisted revenue readback.
+Four deployment-adapter tests and the isolated-network routing test also passed.
+
+Candidate image `monoize:20261001-dashboard-pg` passed eight authenticated GET
+checks against the real database before routing new Caddy connections to port 8081.
+Public CDN checks subsequently returned 200 for catalog, exchange rate, entitlement,
+orders, revenue daily, exclusions, and Store primary status.
+Temporary diagnostic sessions were removed.
+
+At the last check, the old instance retained three accepted connections.
+The supervised deployment is waiting without a force-stop deadline.
+Both instances are healthy; old Store-primary ownership remains until the
+forwarding pause, empty-connection recheck, and lease handover complete.
+Do not run another swap or stop the old instance while this drain is pending.
+
 ## Current Authoritative State (2026-10-01)
 
 The target is serving migrated traffic through the CDN and direct TRAE DNS.

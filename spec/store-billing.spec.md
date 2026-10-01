@@ -193,6 +193,11 @@ SB-C-16. Effective Channel availability MUST require stored enablement, current 
 
 SB-C-17. The user catalog MUST return only effectively available Channels. It MUST return public name, icon, adapter kind, supported currencies, amount limits, and checkout action kinds.
 
+SB-C-17A. Channel reads MUST project `revision` as a signed 64-bit integer.
+Existing PostgreSQL INTEGER revision columns MUST remain readable without data rewrites.
+Catalog and admin channel-list reads MUST use the same compatible projection.
+An unavailable Channel MUST be omitted without turning a populated catalog into HTTP 500.
+
 SB-C-18. A Channel icon MUST be built-in, HTTPS URL, or validated same-origin upload. An uploaded icon MUST pass the byte-signature and SVG restrictions in the prior Store icon contract.
 
 SB-C-19. Every enabled Channel MUST record measured callback retry and query availability windows. Both MUST exceed the selected Store RTO by at least 15 minutes.

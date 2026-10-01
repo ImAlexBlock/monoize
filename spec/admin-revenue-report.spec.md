@@ -140,6 +140,13 @@ MUST NOT return before recomputation finishes.
 AR-14. Amounts MUST be aggregated as exact integers (i128) and serialized as
 canonical decimal strings. The endpoint MUST NOT use binary floating point.
 
+AR-14a. Token aggregate projections MUST decode as signed 64-bit integers on
+SQLite and PostgreSQL. PostgreSQL SUM over BIGINT MUST be explicitly cast to
+BIGINT before decoding. A sum outside that range MUST fail rather than wrap
+or silently replace the aggregate with zero. NULL token inputs count as zero.
+Persisted call-count projections MUST also return BIGINT when historical columns
+use PostgreSQL INTEGER, without changing the stored data or monetary arithmetic.
+
 ## 7. Excel export
 
 AR-15. `GET /api/dashboard/admin/revenue/daily/export?from=&to=` MUST return

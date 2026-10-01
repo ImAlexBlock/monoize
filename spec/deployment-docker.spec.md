@@ -2,6 +2,16 @@
 
 ## 0. Scope
 
+For the migrated PostgreSQL target, `scripts/blue-green-pg-swap.py` supplies the
+project-owned `/opt/monoize/blue-green-swap.sh` implementation.
+It uses the running container's image, environment, data mount, and host-network
+settings, not the archived SQLite deployment paths.
+It creates a PostgreSQL custom-format backup before candidate startup.
+Candidate dashboard GET checks MUST pass before the UID/SYN-only route switch.
+The same BG9-BG12 forwarding, drain, lease-handover, and no-force-stop rules apply.
+Existing BG14-BG16 routing helpers remain responsible for connection preservation
+and reboot routing. The live Caddy configuration MUST remain unchanged.
+
 This specification defines `/opt/monoize/blue-green-swap.sh <rev>` on the
 production host. The repository sources are `scripts/blue-green-*.sh`,
 `scripts/blue-green-probe.py`, and `scripts/monoize-routing.service`.

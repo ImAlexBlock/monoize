@@ -181,8 +181,8 @@ pub async fn aggregate_revenue_day(
          u.username AS username, \
          {charge_group_select}, \
          COUNT(*) AS calls, \
-         COALESCE(SUM(COALESCE(rl.input_tokens, 0)), 0) AS input_tokens, \
-         COALESCE(SUM(COALESCE(rl.output_tokens, 0)), 0) AS output_tokens \
+         CAST(COALESCE(SUM(COALESCE(rl.input_tokens, 0)), 0) AS BIGINT) AS input_tokens, \
+         CAST(COALESCE(SUM(COALESCE(rl.output_tokens, 0)), 0) AS BIGINT) AS output_tokens \
          FROM request_logs rl \
          LEFT JOIN users u ON u.id = rl.user_id \
          WHERE {predicate}{exclusion} \
@@ -577,7 +577,7 @@ pub async fn list_persisted_revenue_days(
     let summaries = db
         .read()
         .query_all(db.stmt(
-            "SELECT day, total_charge_nano_usd, total_calls, total_input_tokens, total_output_tokens \
+            "SELECT day, total_charge_nano_usd, CAST(total_calls AS BIGINT) AS total_calls, total_input_tokens, total_output_tokens \
              FROM admin_revenue_daily_summaries WHERE day >= $1 AND day <= $2 ORDER BY day DESC",
             vec![from.into(), to.into()],
         ))
@@ -586,7 +586,7 @@ pub async fn list_persisted_revenue_days(
     let model_rows = db
         .read()
         .query_all(db.stmt(
-            "SELECT day, model, charge_nano_usd, calls, input_tokens, output_tokens \
+            "SELECT day, model, charge_nano_usd, CAST(calls AS BIGINT) AS calls, input_tokens, output_tokens \
              FROM admin_revenue_daily_model_rows WHERE day >= $1 AND day <= $2",
             vec![from.into(), to.into()],
         ))
@@ -595,7 +595,7 @@ pub async fn list_persisted_revenue_days(
     let user_rows = db
         .read()
         .query_all(db.stmt(
-            "SELECT day, user_id, username, charge_nano_usd, calls, input_tokens, output_tokens \
+            "SELECT day, user_id, username, charge_nano_usd, CAST(calls AS BIGINT) AS calls, input_tokens, output_tokens \
              FROM admin_revenue_daily_user_rows WHERE day >= $1 AND day <= $2",
             vec![from.into(), to.into()],
         ))
@@ -604,7 +604,7 @@ pub async fn list_persisted_revenue_days(
     let user_model_rows = db
         .read()
         .query_all(db.stmt(
-            "SELECT day, user_id, model, charge_nano_usd, calls, input_tokens, output_tokens \
+            "SELECT day, user_id, model, charge_nano_usd, CAST(calls AS BIGINT) AS calls, input_tokens, output_tokens \
              FROM admin_revenue_daily_user_model_rows WHERE day >= $1 AND day <= $2",
             vec![from.into(), to.into()],
         ))
