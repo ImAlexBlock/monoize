@@ -318,3 +318,25 @@ Use `scripts/inspect-dashboard-read-recovery-build.sh` to inspect this existing 
 
 The new image is not yet accepted, transferred, or deployed.
 The older loaded dashboard-guards image remains incomplete for the full repaired frontend.
+
+## Unified Image Transfer Verified
+
+The unified build exited with code 0 and no OOM flag.
+Packaging completed and the target loaded `monoize:20261002-dashboard-read-recovery`.
+Source, local, and target archives share SHA-256
+`da627a82c6a0fc33848ba45e33534c2e07f81f5743c7073a8ef36cd26f80f615`.
+The target checked this digest before loading.
+The archive configuration digest matches the target image ID:
+`sha256:71023c43bc3a808ca9d43ee97cb11112fd3701f14f8e4b5e6933709181d7d6d9`.
+The source build reports manifest-list digest
+`sha256:06f9f2a17987ba320bc97721bf63730b2330074419d45f04fe5b66db3bedab30`.
+Do not confuse the manifest-list digest with the image configuration digest.
+
+Repeated role-specific public checks returned twelve HTTP 200 responses and one expected HTTP 403.
+The denied request was a regular user's admin-revenue read.
+All three roles were tested; all temporary sessions were removed.
+The organization comparison again matched all five member rows and nonzero usage totals.
+Its temporary sessions were also removed.
+
+The image is ready but not deployed. The existing organization swap still has one old connection.
+Do not start an overlapping swap or claim final deployment acceptance.
