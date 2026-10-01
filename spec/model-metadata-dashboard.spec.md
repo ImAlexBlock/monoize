@@ -462,3 +462,10 @@ This is already the existing behavior (the `else` branch charges `completion_tok
 ## 9. Migration
 
 MIG1. On startup, existing records with `model_id` containing `/` (e.g. `openai/gpt-4o`) MUST be migrated to bare name via NID1 normalization. When duplicates arise after stripping, keep the most recently updated record.
+
+## PostgreSQL Read and Failure Contract
+
+Profile summary flags MUST have a consistent signed integer SQL projection.
+The workbench MUST display a retryable error when metadata, profiles, or selected
+profile rates fail to load. It MUST NOT display the no-models state for a failed
+request. Retry MUST only refetch data; it MUST NOT synchronize or mutate pricing.

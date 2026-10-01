@@ -102,6 +102,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260922_000123_drop_studio_workflow::Migration),
             Box::new(m20260922_000124_org_member_alias::Migration),
             Box::new(m20260924_000125_request_log_upstream_response_model::Migration),
+            Box::new(m20261001_000126_firewall_timestamp_bigint::Migration),
         ]
     }
 }
@@ -333,6 +334,7 @@ mod m20260922_000122_studio_bridge_ops;
 mod m20260922_000123_drop_studio_workflow;
 mod m20260922_000124_org_member_alias;
 mod m20260924_000125_request_log_upstream_response_model;
+mod m20261001_000126_firewall_timestamp_bigint;
 
 #[cfg(test)]
 mod tests {

@@ -127,3 +127,9 @@ title, type badge, pinned marker, enabled state, publication time, actions
 (required), content (required, multiline), type select, pinned switch, enabled
 switch. Delete MUST use a confirmation dialog. All mutations MUST update the
 list optimistically and revalidate after the mutation settles.
+
+## PostgreSQL Read Contract
+
+The per-user read-state projection MUST return integer 0 or 1 on both supported
+database backends. PostgreSQL BOOL values MUST NOT be decoded as Rust i32.
+Read and unread filtering and counts MUST remain unchanged.

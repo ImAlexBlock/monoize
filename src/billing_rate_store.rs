@@ -217,7 +217,7 @@ impl BillingRateStore {
                 "SELECT pricing_profile,
                         COUNT(*) AS rate_count,
                         COUNT(DISTINCT model_pattern) AS model_count,
-                        MAX(CASE WHEN source = 'models_dev' THEN 1 ELSE 0 END) AS has_models_dev
+                        CAST(MAX(CASE WHEN source = 'models_dev' THEN 1 ELSE 0 END) AS BIGINT) AS has_models_dev
                  FROM billing_rate_records
                  GROUP BY pricing_profile
                  ORDER BY pricing_profile ASC",

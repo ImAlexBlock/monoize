@@ -243,7 +243,7 @@ function applyVariantToForm(form: EditFormData, variant: ProviderVariant): EditF
 
 export function ModelMetadataPage() {
   const { t } = useTranslation();
-  const { data: records = [], isLoading } = useModelMetadata();
+  const { data: records = [], isLoading, error: metadataError, mutate: retryMetadata } = useModelMetadata();
   const [search, setSearch] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -608,6 +608,8 @@ export function ModelMetadataPage() {
       <ModelWorkbench
         metadata={records}
         metadataLoading={isLoading}
+        metadataError={metadataError}
+        onRetryMetadata={() => { void retryMetadata(); }}
         onEditMetadata={openEdit}
         onCreateMetadata={openCreate}
         onDeleteMetadata={handleDelete}

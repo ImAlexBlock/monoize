@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   CloudDownload,
+  AlertTriangle,
   Database,
   ListFilter,
   Pencil,
@@ -68,12 +69,16 @@ import { summarizeModelPrices } from "./price-utils";
 export function ModelWorkbench({
   metadata,
   metadataLoading,
+  metadataError,
+  onRetryMetadata,
   onEditMetadata,
   onCreateMetadata,
   onDeleteMetadata,
 }: {
   metadata: ModelMetadataRecord[];
   metadataLoading: boolean;
+  metadataError?: unknown;
+  onRetryMetadata: () => void;
   onCreateMetadata: () => void;
   onEditMetadata: (record: ModelMetadataRecord) => void;
   onDeleteMetadata: (modelId: string) => void;
@@ -82,6 +87,7 @@ export function ModelWorkbench({
   const {
     data: profiles = [],
     isLoading: profilesLoading,
+    error: profilesError,
     mutate: revalidateProfiles,
   } = useBillingRateProfiles();
   const {
@@ -113,8 +119,10 @@ export function ModelWorkbench({
   const {
     data: rates = [],
     isLoading: ratesLoading,
+    error: ratesError,
     mutate: revalidateRates,
   } = useBillingRatesForProfile(selectedProfile || null);
+  const loadError = metadataError || profilesError || ratesError;
 
   const ratesByModel = useMemo(() => {
     const grouped = new Map<string, BillingRateRecord[]>();
@@ -274,7 +282,24 @@ export function ModelWorkbench({
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(360px,2fr)_minmax(0,3fr)]">
         {/* Master list */}
         <div className="min-w-0 lg:col-span-2">
-          {profilesLoading || (metadataLoading && metadata.length === 0) ? (
+          {loadError ? (
+            <EmptyState
+              role="alert"
+              icon={<AlertTriangle className="h-8 w-8 text-destructive" />}
+              title={t("common.error")}
+              description={loadError instanceof Error ? loadError.message : t("common.error")}
+              action={
+                <Button variant="outline" onClick={() => {
+                  onRetryMetadata();
+                  void revalidateProfiles();
+                  void revalidateRates();
+                }}>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  {t("common.retry")}
+                </Button>
+              }
+            />
+          ) : profilesLoading || ratesLoading || (metadataLoading && metadata.length === 0) ? (
             <div className="space-y-2 rounded-xl border bg-card p-4">
               {Array.from({ length: 8 }).map((_, index) => (
                 <Skeleton key={index} className="h-10 w-full" />

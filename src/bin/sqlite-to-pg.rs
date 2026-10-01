@@ -27,6 +27,26 @@ use std::time::Instant;
 
 const WATERMARK_TABLE: &str = "_monoize_migration_watermarks";
 
+fn checked_integer(raw: Option<i64>, pg_type: &str, index: usize) -> Result<SeaValue, String> {
+    Ok(match pg_type {
+        "smallint" => SeaValue::SmallInt(raw.map(i16::try_from).transpose()
+            .map_err(|_| format!("cell {index}: integer exceeds PostgreSQL SMALLINT range"))?),
+        "integer" => SeaValue::Int(raw.map(i32::try_from).transpose()
+            .map_err(|_| format!("cell {index}: integer exceeds PostgreSQL INTEGER range"))?),
+        "bigint" => SeaValue::BigInt(raw),
+        _ => return Err(format!("cell {index}: unsupported integer target")),
+    })
+}
+
+fn checked_real_integer(value: f64, index: usize) -> Result<i64, String> {
+    if !value.is_finite() || value.fract() != 0.0
+        || value < i64::MIN as f64 || value >= -(i64::MIN as f64)
+    {
+        return Err(format!("cell {index}: REAL cannot be represented exactly as BIGINT"));
+    }
+    Ok(value as i64)
+}
+
 struct Args {
     sqlite: String,
     postgres: String,
@@ -224,9 +244,11 @@ fn convert_cell(
                 let raw = row
                     .try_get_by::<Option<f64>, _>(index)
                     .map_err(|e| format!("cell {index}: {e}"))?;
-                return Ok(SeaValue::BigInt(
-                    raw.map(|value| value as i64).map(|v| v),
-                ));
+                return checked_integer(
+                    raw.map(|value| checked_real_integer(value, index)).transpose()?,
+                    pg_type,
+                    index,
+                );
             }
             let raw = if integer_like {
                 row.try_get_by::<Option<i64>, _>(index)
@@ -240,11 +262,7 @@ fn convert_cell(
                     })
                     .transpose()?
             };
-            Ok(match pg_type {
-                "smallint" => SeaValue::SmallInt(raw.map(|v| v as i16)),
-                "integer" => SeaValue::Int(raw.map(|v| v as i32)),
-                _ => SeaValue::BigInt(raw),
-            })
+            checked_integer(raw, pg_type, index)
         }
         "double precision" | "real" => {
             let raw = if real_like {
@@ -280,6 +298,29 @@ fn convert_cell(
                 .map_err(|e| format!("cell {index}: {e}"))?;
             Ok(SeaValue::String(raw.map(Box::new)))
         }
+    }
+}
+
+#[cfg(test)]
+mod checked_integer_tests {
+    use super::*;
+
+    #[test]
+    fn narrowing_refuses_wrapped_milliseconds() {
+        assert!(checked_integer(Some(1_789_315_644_687), "integer", 0).is_err());
+        assert!(checked_integer(Some(i64::from(i16::MAX) + 1), "smallint", 0).is_err());
+        assert!(matches!(checked_integer(Some(42), "integer", 0).unwrap(), SeaValue::Int(Some(42))));
+        assert!(matches!(checked_integer(None, "smallint", 0).unwrap(), SeaValue::SmallInt(None)));
+        assert!(checked_integer(Some(i64::MAX), "bigint", 0).is_ok());
+    }
+
+    #[test]
+    fn real_integer_conversion_rejects_fraction_and_overflow() {
+        for value in [f64::NAN, f64::INFINITY, 1.5, -(i64::MIN as f64)] {
+            assert!(checked_real_integer(value, 0).is_err());
+        }
+        assert_eq!(checked_real_integer(42.0, 0).unwrap(), 42);
+        assert_eq!(checked_real_integer(i64::MIN as f64, 0).unwrap(), i64::MIN);
     }
 }
 

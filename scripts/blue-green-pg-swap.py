@@ -131,7 +131,10 @@ def main():
         paths = ["/api/dashboard/store/catalog", "/api/dashboard/store/exchange-rate",
                  "/api/dashboard/store/entitlement", "/api/dashboard/store/orders",
                  "/api/dashboard/store/admin/products", "/api/dashboard/store/admin/payment-channels",
-                 "/api/dashboard/admin/revenue/daily", "/api/dashboard/admin/revenue/exclusions"]
+                 "/api/dashboard/admin/revenue/daily", "/api/dashboard/admin/revenue/exclusions",
+                 "/api/dashboard/model-metadata", "/api/dashboard/billing-rates",
+                 "/api/dashboard/billing-rates/profiles", "/api/dashboard/firewall/stats",
+                 "/api/dashboard/firewall/events", "/api/dashboard/announcements"]
         try:
             for path in paths:
                 code, body = get(path, credential=raw_token)

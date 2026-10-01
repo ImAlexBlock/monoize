@@ -147,7 +147,7 @@ impl UserStore {
         let rows = self.db.read()
             .query_all(self.db.stmt(
                 "SELECT a.id, a.title, a.content, a.type, a.pinned, a.enabled, a.created_at, a.created_by, \
-                 (r.announcement_id IS NOT NULL) AS is_read \
+                 CASE WHEN r.announcement_id IS NOT NULL THEN 1 ELSE 0 END AS is_read \
                  FROM announcements a \
                  LEFT JOIN announcement_reads r ON r.announcement_id = a.id AND r.user_id = $2 \
                  WHERE a.enabled = 1 \

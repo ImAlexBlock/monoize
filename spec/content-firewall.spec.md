@@ -99,6 +99,12 @@ field names outside the CF-7..CF-12 strings are not scanned.
 
 ## 3. Enforcement
 
+CF-PG-1. PostgreSQL MUST store `created_at_unix_ms` as BIGINT.
+When upgrading the historical INTEGER schema, recover milliseconds from the
+RFC3339 `created_at` using floor(epoch * 1000) in the same transaction as widening.
+Malformed timestamps MUST abort the transaction. Preserve event IDs and payloads.
+The repair MUST NOT narrow this column during rollback.
+
 CF-14. The firewall check runs in every handler of CF-7..CF-12 after tenant
 authentication succeeds, after model redirects and the model allowlist check,
 and before any of: attempt building, the balance/quota gate, request-log
