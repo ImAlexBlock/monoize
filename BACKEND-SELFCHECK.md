@@ -200,3 +200,26 @@ Run it with Bun; set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` when using an existin
 The local run used a temporary npm-cached Bun runtime and frozen-lockfile dependencies.
 Twenty-three related source and API tests passed across four test files.
 This evidence does not replace the pending production deployment and public-path checks.
+
+## Groups and Providers Error Guards
+
+Source inspection found that Groups ignored its read error.
+Providers handled its primary request error but ignored dependency errors.
+A failed Groups request therefore filtered valid Providers into an empty list.
+Failed settings, transform registry, and metadata requests also left editing controls available.
+
+Groups now shows an alert and read-only retry when its query fails.
+Providers now guards all five page dependencies before exposing editing controls.
+Both pages keep their existing data and mutation contracts.
+
+The browser fixture now covers nine failure cases across Users, Groups, and Providers.
+Every case restores a populated list after a manual retry.
+All nine cases passed without write requests, unexpected API paths, or page exceptions.
+The related 23 source/API tests and both TypeScript checks passed again.
+The frontend release build passed; Vite reported a large main chunk warning.
+No dependency or lockfile changes were required.
+
+These guards remain undeployed.
+The release binary embeds frontend resources, so deployment requires a new binary and image.
+At the latest production inspection, one old connection remained and the swap supervisor was alive.
+The previously transmitting connection had closed naturally; no connection was force-stopped.

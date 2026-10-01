@@ -24,3 +24,7 @@ This assessment covers the successor to `20261001-dashboard-pg`.
     billing plans fail to load. This error takes precedence over empty results.
     Hide editing controls until these dependencies have loaded without errors.
     Retry must revalidate these three reads and must not submit a mutation.
+11. The Groups page must distinguish a failed Groups read from an empty list.
+    The Providers page must reject failed or pending Groups, settings, transform
+    registry, and model-metadata dependencies before exposing editing controls.
+    Both pages must provide read-only retry actions for their failed dependencies.

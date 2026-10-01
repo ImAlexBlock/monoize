@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowDown, ArrowUp, Boxes, GripVertical, Pencil, Plus, Trash2, UserRoundPlus, UserX } from "lucide-react";
+import { ArrowDown, ArrowUp, Boxes, GripVertical, Pencil, Plus, Trash2, UserRoundPlus, UserX, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -95,7 +95,7 @@ const ACCOUNT_CLASSES = ["standard", "enterprise", "private", "agent"] as const;
 
 export function GroupsPage() {
   const { t } = useTranslation();
-  const { data, isLoading } = useDashboardGroups();
+  const { data, isLoading, error, mutate: reloadGroups } = useDashboardGroups();
   const groups = useMemo(() => data ?? [], [data]);
   const [accountClass, setAccountClass] = useState<AccountClass>("standard");
   const visibleGroups = useMemo(
@@ -293,6 +293,22 @@ export function GroupsPage() {
     next.splice(to, 0, group);
     await applyReorder(next);
   };
+
+  if (error) {
+    return (
+      <PageWrapper className="space-y-6">
+        <PageHeader title={t("groups.title")} />
+        <EmptyState variant="inline" role="alert" title={t("common.error")}
+          action={<Button variant="outline" onClick={() => void reloadGroups()}>
+            <RefreshCw className="mr-2 h-4 w-4" />{t("common.retry")}
+          </Button>} />
+      </PageWrapper>
+    );
+  }
+
+  if (isLoading) {
+    return <PageWrapper className="space-y-6"><TablePageSkeleton /></PageWrapper>;
+  }
 
   const renderForm = (onSubmit: () => void) => (
     <>

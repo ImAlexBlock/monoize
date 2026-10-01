@@ -40,17 +40,18 @@ export function ProvidersPage() {
 	const { t } = useTranslation()
 	const { data: providersData, error: providersError, isLoading, mutate: reloadProviders } = useProviders()
 	const providers = useMemo(() => providersData ?? [], [providersData])
-	const { data: groups = [] } = useDashboardGroups()
+	const { data: groups = [], error: groupsError, isLoading: groupsLoading, mutate: reloadGroups } = useDashboardGroups()
 	const [accountClass, setAccountClass] = useState<AccountClass>("standard")
 	const groupById = useMemo(() => new Map(groups.map(group => [group.id, group])), [groups])
 	const visibleProviders = useMemo(
 		() => providers.filter(provider => groupById.get(provider.group_id)?.account_class === accountClass),
 		[accountClass, groupById, providers]
 	)
-	const { data: settings } = useSettings()
-	const { data: transformRegistry = [], isLoading: transformRegistryLoading } =
+	const { data: settings, error: settingsError, isLoading: settingsLoading, mutate: reloadSettings } = useSettings()
+	const { data: transformRegistry = [], isLoading: transformRegistryLoading, error: transformsError, mutate: reloadTransforms } =
 		useTransformRegistry()
-	const { data: modelMetadata = [] } = useModelMetadata()
+	const { data: modelMetadata = [], error: metadataError, isLoading: metadataLoading, mutate: reloadMetadata } = useModelMetadata()
+	const loadError = providersError || groupsError || settingsError || transformsError || metadataError
 	const reasoningSuffixMap =
 		settings?.reasoning_suffix_map ?? DEFAULT_REASONING_SUFFIX_MAP
 	const [createOpen, setCreateOpen] = useState(false)
@@ -142,7 +143,7 @@ export function ProvidersPage() {
 		}
 	}
 
-	if (isLoading) {
+	if (!loadError && (isLoading || groupsLoading || settingsLoading || transformRegistryLoading || metadataLoading)) {
 		return (
 			<PageWrapper className='space-y-6'>
 				<CardsPageSkeleton />
@@ -150,8 +151,8 @@ export function ProvidersPage() {
 		)
 	}
 
-	if (providersError) {
-		const message = providersError instanceof Error ? providersError.message : t('common.error')
+	if (loadError) {
+		const message = loadError instanceof Error ? loadError.message : t('common.error')
 		return (
 			<PageWrapper className='space-y-6'>
 				<motion.div
@@ -163,10 +164,17 @@ export function ProvidersPage() {
 				</motion.div>
 				<EmptyState
 					variant='card'
+					role='alert'
 					icon={<AlertTriangle className='h-12 w-12 text-destructive' />}
 					title={t('providers.loadFailed', { defaultValue: 'Failed to load providers' })}
 					description={<span className='font-mono text-xs break-all'>{message}</span>}
-					action={<Button variant='outline' onClick={() => void reloadProviders()}>{t('common.retry', { defaultValue: 'Retry' })}</Button>}
+					action={<Button variant='outline' onClick={() => {
+						void reloadProviders()
+						void reloadGroups()
+						void reloadSettings()
+						void reloadTransforms()
+						void reloadMetadata()
+					}}>{t('common.retry', { defaultValue: 'Retry' })}</Button>}
 				/>
 			</PageWrapper>
 		)

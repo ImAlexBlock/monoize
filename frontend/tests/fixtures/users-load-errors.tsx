@@ -6,16 +6,21 @@ import { SWRConfig } from "swr";
 import { AuthProvider } from "../../src/hooks/use-auth";
 import { StoreCurrencyProvider } from "../../src/hooks/use-store-currency";
 import { UsersPage } from "../../src/pages/users";
+import { GroupsPage } from "../../src/pages/groups";
+import { ProvidersPage } from "../../src/pages/providers";
 
 const i18n = createInstance();
-await i18n.init({ lng: "en", resources: {} });
+await i18n.init({ lng: "en", resources: { en: { translation: { common: { retry: "common.retry" } } } } });
+const view = new URLSearchParams(location.search).get("view");
 
 createRoot(document.getElementById("root")!).render(
   <I18nextProvider i18n={i18n}>
     <SWRConfig value={{ shouldRetryOnError: false, revalidateOnFocus: false, revalidateOnReconnect: false }}>
       <MemoryRouter>
         <StoreCurrencyProvider>
-          <AuthProvider><UsersPage /></AuthProvider>
+          <AuthProvider>
+            {view === "groups" ? <GroupsPage /> : view === "providers" ? <ProvidersPage /> : <UsersPage />}
+          </AuthProvider>
         </StoreCurrencyProvider>
       </MemoryRouter>
     </SWRConfig>
