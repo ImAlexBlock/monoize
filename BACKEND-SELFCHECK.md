@@ -241,3 +241,16 @@ At 2026-10-02 01:47 UTC+8, the existing organization swap supervisor remained al
 Both overlapping instances were healthy, and one accepted old connection remained.
 No second swap was started. Final lease handover, normal old-instance exit,
 follow-up deployment, and post-deployment public-path acceptance remain pending.
+
+## Public Reads During Drain
+
+Report `dashboard-selfcheck-6a14d7f9.json` began at 2026-10-02 01:53:49 UTC+8.
+All 50 public GET checks completed: 46 HTTP 200 and four expected HTTP 403 responses.
+The diagnostic session cleanup marker is present.
+Both overlapping instances remain healthy and the swap supervisor is still running.
+
+Socket ownership identifies the remaining accepted old connection as Caddy-to-Monoize.
+Transport counters show approximately three hours without application-data transfer.
+This does not prove that the connection is safe to terminate.
+No request payloads were inspected, no connections were terminated, and no second swap began.
+The follow-up image remains loaded but undeployed.
