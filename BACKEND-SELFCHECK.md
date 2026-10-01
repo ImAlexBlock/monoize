@@ -300,3 +300,21 @@ Wallet, settings, and request-log changes still require a new release binary and
 They are not included in the already loaded `20261002-dashboard-guards` image.
 The previous organization swap still has one accepted old connection; its supervisor remains alive.
 Final deployment and public-path acceptance remain incomplete.
+
+## Unified Recovery Build
+
+The complete frontend test directory passed: 334 tests across 34 files, with zero failures.
+This is separate from the fifteen browser failure-injection scenarios.
+
+The unified source archive comes from committed revision `b48f428`.
+It includes the Users, Groups, Providers, Wallet, Settings, and Request Logs guards.
+Untracked screenshots and installed local dependencies are excluded from the Git archive.
+
+The detached build targets image `monoize:20261002-dashboard-read-recovery`.
+The first process inspection confirmed live `cargo` and `rustc` processes in the bounded build container.
+The OOM flag was false. The image-packaging completion marker was absent.
+A running container's exit-code field is not evidence of successful completion.
+Use `scripts/inspect-dashboard-read-recovery-build.sh` to inspect this existing build before any restart.
+
+The new image is not yet accepted, transferred, or deployed.
+The older loaded dashboard-guards image remains incomplete for the full repaired frontend.
