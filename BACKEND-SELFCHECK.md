@@ -168,3 +168,22 @@ Remaining gates:
 Browser evidence covers read paths and automatic request-error recovery.
 Manual retry completion after recovery and financial write operations remain untested.
 Do not interpret successful read checks as acceptance of these untested operations.
+
+## User-Management Error Guard
+
+Source inspection found another false-empty path in user management.
+The page ignored errors from users, groups, and billing-plan queries.
+It substituted empty arrays and kept editing controls available.
+
+The new guard shows a retryable alert before loading, empty results, or editing controls.
+Retry revalidates the three read queries without submitting mutations.
+The page waits for all three dependencies before it exposes editing controls.
+
+Four source-regression checks passed across the user and model error-state tests.
+Both frontend TypeScript configurations passed in the isolated build container.
+These checks do not establish browser behavior or production deployment.
+The local machine has no Bun executable; the existing build host supplied the test runtime.
+
+- [x] Add the user-management error contract, guard, and source-regression checks.
+- [ ] Verify the user-management guard with browser request-failure injection.
+- [ ] Build and deploy this follow-up after the current stream drain completes.

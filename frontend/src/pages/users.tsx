@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { Plus, Trash2, Pencil, Search, Shield, ShieldCheck, User as UserIcon, Mail, PlusCircle, ScrollText } from "lucide-react";
+import { Plus, Trash2, Pencil, Search, Shield, ShieldCheck, User as UserIcon, Mail, PlusCircle, ScrollText, RefreshCw } from "lucide-react";
 import { GroupsBadge } from "@/components/GroupsBadge";
 import { GroupSingleSelect } from "@/components/groups/GroupPicker";
 import { Button } from "@/components/ui/button";
@@ -160,10 +160,11 @@ export function UsersPage() {
   const { currency } = useStoreCurrency();
   const { data: exchangeRate } = useStoreExchangeRate();
   const { user: currentUser } = useAuth();
-  const { data: users = [], isLoading } = useUsers();
+  const { data: users = [], isLoading, error: usersError, mutate: reloadUsers } = useUsers();
   const [scope, setScope] = useState<UserScope>("standard");
-  const { data: groups = [], isLoading: groupsLoading } = useDashboardGroups();
-  const { data: billingPlans = [] } = useBillingPlans();
+  const { data: groups = [], isLoading: groupsLoading, error: groupsError, mutate: reloadGroups } = useDashboardGroups();
+  const { data: billingPlans = [], isLoading: plansLoading, error: plansError, mutate: reloadPlans } = useBillingPlans();
+  const loadError = usersError || groupsError || plansError;
   const defaultGroupId = useMemo(
     () => groups.find((group) => group.is_default)?.id ?? "",
     [groups]
@@ -440,7 +441,30 @@ export function UsersPage() {
     return canEdit(user);
   };
 
-  if (isLoading) {
+  if (loadError) {
+    return (
+      <PageWrapper className="space-y-6">
+        <PageHeader title={t("users.title")} description={t("users.description")} />
+        <EmptyState
+          variant="inline"
+          role="alert"
+          title={t("common.error")}
+          action={
+            <Button variant="outline" onClick={() => {
+              void reloadUsers();
+              void reloadGroups();
+              void reloadPlans();
+            }}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              {t("common.retry")}
+            </Button>
+          }
+        />
+      </PageWrapper>
+    );
+  }
+
+  if (isLoading || groupsLoading || plansLoading) {
     return (
       <PageWrapper className="space-y-6">
         <TablePageSkeleton />

@@ -20,3 +20,7 @@ This assessment covers the successor to `20261001-dashboard-pg`.
    widened schema; historical migration records may be newer than the old binary.
 9. The public-interface matrix must report permissions separately from failures.
    Errors must not be rendered as successful empty results in the model workbench.
+10. The user-management page must show a retryable error when users, groups, or
+    billing plans fail to load. This error takes precedence over empty results.
+    Hide editing controls until these dependencies have loaded without errors.
+    Retry must revalidate these three reads and must not submit a mutation.
