@@ -2,6 +2,25 @@
 
 ## Latest Ingress Evidence (2026-10-01)
 
+### ACME Validation Update
+
+Certbot is installed on the target.
+A separate nginx HTTP configuration serves only the three named service hosts.
+The challenge directory is `/var/lib/migration-acme/.well-known/acme-challenge`.
+Existing HTTPS Caddy and application processes were not reloaded for this change.
+External normal-DNS requests to API and TRAE returned the exact random challenge content.
+Certbot's staging dry run for `api.lynshen.org` and `trae.joinreso.com` succeeded.
+No production certificate was requested, replaced, or deployed.
+The installed Certbot timer alone does not prove renewal of the manually loaded certificates.
+Production enrollment and a tested certificate deployment mechanism remain pending.
+
+The same external WWW challenge request redirected to HTTPS and did not match the token.
+Proposed CDN exception: route only `/.well-known/acme-challenge/*` to target HTTP port 80,
+preserve `Host: www.lynshen.org`, and bypass caching and authentication for this exact path.
+All other WWW requests must retain the existing HTTPS origin.
+The operator must configure this exception or approve an alternative HTTPS challenge route.
+Recheck exact random-token delivery before ACME staging or production enrollment for WWW.
+
 The operator retained the CDN and changed the WWW HTTPS origin to the new host.
 Normal DNS requests through the CDN returned 200 for `/`, `/readyz`, and `/healthz`.
 Unauthenticated `/v1/models` returned 401.
