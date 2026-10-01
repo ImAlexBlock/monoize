@@ -1,5 +1,20 @@
 # Server migration TODO
 
+## Current Authoritative State (2026-10-01)
+
+The target is serving migrated traffic through the CDN and direct TRAE DNS.
+`www.lynshen.org` uses the CDN with origin `40.160.141.21`.
+`api.lynshen.org` and `trae.joinreso.com` resolve to the target.
+API, TRAE, and WWW certificates are enrolled in Certbot and have deploy hooks.
+The active target containers are healthy.
+The source application writers remain stopped.
+The source host remains available for retained services and recovery evidence.
+The operator must manage DNS and CDN changes; this agent does not revert them.
+
+The historical notes below preserve the migration trail.
+Where they say DNS, public ingress, or certificate work is pending,
+use this section as the current state and retain the historical qualification.
+
 ## Latest Ingress Evidence (2026-10-01)
 
 ### Direct Certificate Renewal Accepted
@@ -16,8 +31,11 @@ passed, including the actual deploy hook and subsequent live fingerprint verific
 The Certbot timer is enabled and the ingress remains active.
 Monoize readiness confirmed PostgreSQL reachable after the test.
 This accepts renewal for `api.lynshen.org` and `trae.joinreso.com` only.
-The WWW certificate remains manual and unchanged; its CDN challenge path is still pending.
-Earlier notes stating the direct-domain certificate was not deployed are historical.
+`www.lynshen.org` is now also enrolled as `migration-www-ingress`.
+Its production certificate expires 2026-12-30.
+Its certificate deployment hook passed live fingerprint verification.
+The Certbot renewal dry-run with the deploy hook passed.
+Earlier notes stating the WWW certificate was manual or pending are historical.
 
 ### ACME Validation Update
 
@@ -26,17 +44,13 @@ A separate nginx HTTP configuration serves only the three named service hosts.
 The challenge directory is `/var/lib/migration-acme/.well-known/acme-challenge`.
 Existing HTTPS Caddy and application processes were not reloaded for this change.
 External normal-DNS requests to API and TRAE returned the exact random challenge content.
-Certbot's staging dry run for `api.lynshen.org` and `trae.joinreso.com` succeeded.
-No production certificate was requested, replaced, or deployed.
-The installed Certbot timer alone does not prove renewal of the manually loaded certificates.
-Production enrollment and a tested certificate deployment mechanism remain pending.
+Certbot's staging and production enrollment for API, TRAE, and WWW succeeded.
+The installed Certbot timer is enabled.
+The deploy hook validates each allowed lineage and loads it through Caddy's admin API.
 
-The same external WWW challenge request redirected to HTTPS and did not match the token.
-Proposed CDN exception: route only `/.well-known/acme-challenge/*` to target HTTP port 80,
-preserve `Host: www.lynshen.org`, and bypass caching and authentication for this exact path.
-All other WWW requests must retain the existing HTTPS origin.
-The operator must configure this exception or approve an alternative HTTPS challenge route.
-Recheck exact random-token delivery before ACME staging or production enrollment for WWW.
+The same external WWW challenge request initially failed before the Caddy challenge route was added.
+After the route was added, the exact random token passed through the CDN and matched.
+The CDN continues to serve normal WWW requests from the configured HTTPS origin.
 
 The operator retained the CDN and changed the WWW HTTPS origin to the new host.
 Normal DNS requests through the CDN returned 200 for `/`, `/readyz`, and `/healthz`.
@@ -56,18 +70,16 @@ unauthenticated `/v1/models` returned 401.
 The earlier old-address/502 observation is superseded by this external check.
 WWW retains its CDN configuration. Old application writers remain stopped.
 
-ACME path audit used random nonexistent tokens and did not request certificates.
-WWW HTTP redirected to HTTPS, then returned the application's HTML with status 200.
-API HTTP returned 404; HTTPS returned application HTML.
-These probes do not prove challenge-token delivery.
-Automatic renewal remains off and certificates remain manually loaded.
-The earliest origin certificate expiry is 2026-11-23.
-No DNS, TLS configuration, or live Caddy reload was performed during this audit.
+ACME path audit used random tokens before enrollment.
+The final WWW challenge path returned the exact token through the CDN.
+API and TRAE staging dry-runs passed.
+WWW production enrollment and deploy-hook dry-run passed.
+The earliest current certificate expiry is 2026-12-30.
 
 Date: 2026-09-30 (Asia/Shanghai).
 Source: 64.90.22.212. Target: 40.160.141.21.
-Status: final databases restored; target applications running on loopback only.
-Source applications are stopped. Public ingress and end-to-end acceptance remain pending.
+Status: target applications running; public ingress and direct-domain renewal validated.
+Source applications are stopped. DNS/frontend ownership remains operator-managed.
 
 ## Verified
 
