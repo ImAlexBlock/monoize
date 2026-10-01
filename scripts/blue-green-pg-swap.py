@@ -142,6 +142,26 @@ def main():
                 log("Candidate GET passed: " + path)
         finally:
             sql(f"DELETE FROM sessions WHERE id='{session_id}';")
+        orgs = json.loads(sql(
+            "SELECT coalesce(json_agg(t),'[]') FROM "
+            "(SELECT id,owner_user_id FROM orgs ORDER BY id LIMIT 20) t;"
+        ))
+        for org in orgs:
+            org_id, owner_id = org["id"], org["owner_user_id"]
+            assert str(uuid.UUID(org_id)) == org_id and str(uuid.UUID(owner_id)) == owner_id
+            org_session, org_token = str(uuid.uuid4()), "urp_session_" + secrets.token_hex(32)
+            org_hash = hashlib.sha256(org_token.encode()).hexdigest()
+            now = datetime.datetime.now(datetime.timezone.utc)
+            expiry = now + datetime.timedelta(minutes=5)
+            sql(f"INSERT INTO sessions(id,user_id,token,created_at,expires_at) VALUES('{org_session}','{owner_id}','{org_hash}','{now.isoformat()}','{expiry.isoformat()}');")
+            try:
+                code, body = get(f"/api/dashboard/orgs/{org_id}/member-usage?range_hours=720&buckets=24",
+                                 credential=org_token)
+                assert code == 200 and isinstance(body.get("members"), list)
+                assert isinstance(body.get("removed_members"), list)
+                log("Candidate organization member-usage GET passed")
+            finally:
+                sql(f"DELETE FROM sessions WHERE id='{org_session}';")
         run(["docker", "rename", "monoize", "monoize-prev"])
         temp = ROOT / "blue-green-route.state.next"
         temp.write_text(f"{stable} {candidate} {uid}\n")

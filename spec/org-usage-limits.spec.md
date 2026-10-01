@@ -213,3 +213,8 @@ ORGL-19. A personal-key breach aborts with HTTP `402 api_key_spend_limit_reached
 and a message naming the window (`total` | `hourly` | `daily`), at the same two
 enforcement points and with the same fail-open settlement semantics as ORGL-5 and
 ORGL-7. The key list/detail responses expose the three fields.
+
+ORGL-20. Member usage must preserve nonzero token aggregates on PostgreSQL.
+Member flags and token sums must project to the integer width used by their decoder.
+Decode failures must return an error, not report zero tokens or classify an active
+member as removed. Successful requests contribute tokens; failed requests do not.

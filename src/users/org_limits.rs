@@ -433,12 +433,12 @@ pub async fn member_usage(
         "SELECT COALESCE(k.created_by, o.owner_user_id) AS member_id,
                 u.username AS member_username,
                 MAX(om.alias) AS member_alias,
-                CASE WHEN COUNT(om.user_id) > 0 THEN 1 ELSE 0 END AS is_member,
+                CAST(CASE WHEN COUNT(om.user_id) > 0 THEN 1 ELSE 0 END AS BIGINT) AS is_member,
                 {sum} AS total_charge,
                 COUNT(*) AS calls,
-                COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.input_tokens ELSE 0 END), 0) AS input_tokens,
-                COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.output_tokens ELSE 0 END), 0) AS output_tokens,
-                COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.cache_read_tokens ELSE 0 END), 0) AS cache_read_tokens,
+                CAST(COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.input_tokens ELSE 0 END), 0) AS BIGINT) AS input_tokens,
+                CAST(COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.output_tokens ELSE 0 END), 0) AS BIGINT) AS output_tokens,
+                CAST(COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.cache_read_tokens ELSE 0 END), 0) AS BIGINT) AS cache_read_tokens,
                 (rl.created_at_unix_ms - $2) / $3 AS bucket_index
          FROM request_logs rl
          JOIN api_keys k ON k.id = rl.api_key_id
@@ -476,7 +476,7 @@ pub async fn member_usage(
         std::collections::BTreeMap::new();
     for row in &rows {
         let member_id: String = row.try_get("", "member_id").map_err(|e| e.to_string())?;
-        let bucket_index: i64 = row.try_get::<i64>("", "bucket_index").unwrap_or_default();
+        let bucket_index: i64 = row.try_get("", "bucket_index").map_err(|e| e.to_string())?;
         let charge = limb_sum_to_i128(
             &row.try_get::<String>("", "total_charge")
                 .map_err(|e| e.to_string())?,
@@ -500,25 +500,18 @@ pub async fn member_usage(
         }
         entry.is_member = row
             .try_get::<i64>("", "is_member")
-            .map(|v| v == 1)
-            .unwrap_or(false);
+            .map_err(|e| e.to_string())? == 1;
         entry.charge = entry.charge.saturating_add(charge);
         entry.calls += calls;
         entry.input_tokens += row
-            .try_get::<Option<i64>>("", "input_tokens")
-            .ok()
-            .flatten()
-            .unwrap_or(0);
+            .try_get::<i64>("", "input_tokens")
+            .map_err(|e| e.to_string())?;
         entry.output_tokens += row
-            .try_get::<Option<i64>>("", "output_tokens")
-            .ok()
-            .flatten()
-            .unwrap_or(0);
+            .try_get::<i64>("", "output_tokens")
+            .map_err(|e| e.to_string())?;
         entry.cache_read_tokens += row
-            .try_get::<Option<i64>>("", "cache_read_tokens")
-            .ok()
-            .flatten()
-            .unwrap_or(0);
+            .try_get::<i64>("", "cache_read_tokens")
+            .map_err(|e| e.to_string())?;
         let series = entry.series.entry(bucket_index).or_default();
         series.0 = series.0.saturating_add(charge);
         series.1 += calls;
@@ -528,8 +521,8 @@ pub async fn member_usage(
     let model_sql = format!(
         "SELECT COALESCE(k.created_by, o.owner_user_id) AS member_id, rl.model AS model,
                 {sum} AS total_charge, COUNT(*) AS calls,
-                COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.input_tokens ELSE 0 END), 0) AS input_tokens,
-                COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.output_tokens ELSE 0 END), 0) AS output_tokens
+                CAST(COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.input_tokens ELSE 0 END), 0) AS BIGINT) AS input_tokens,
+                CAST(COALESCE(SUM(CASE WHEN rl.status = 'success' THEN rl.output_tokens ELSE 0 END), 0) AS BIGINT) AS output_tokens
          FROM request_logs rl
          JOIN api_keys k ON k.id = rl.api_key_id
          JOIN orgs o ON o.id = $1
@@ -1035,6 +1028,26 @@ mod tests {
     #[tokio::test]
     async fn member_usage_groups_by_creator_and_flags_removed() {
         let store = test_store().await;
+        assert_member_usage(store).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly disposable PostgreSQL database"]
+    async fn postgres_member_usage_preserves_tokens_and_membership() {
+        let dsn = std::env::var("MONOIZE_TEST_POSTGRES_DSN").expect("disposable PG DSN");
+        let db = DbPool::connect(&dsn).await.expect("connect");
+        let row = db.read().query_one(db.stmt(
+            "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='public'",
+            vec![],
+        )).await.unwrap().unwrap();
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 0, "refuse populated database");
+        Migrator::up(&*db.write().await, None).await.expect("migrate");
+        let (sender, _) = tokio::sync::broadcast::channel(4);
+        let store = UserStore::new(db, sender).await.expect("store");
+        assert_member_usage(store).await;
+    }
+
+    async fn assert_member_usage(store: UserStore) {
         let owner = store
             .create_user("mu-owner", "pw", UserRole::User, None)
             .await
@@ -1078,8 +1091,8 @@ mod tests {
             let tx = store.db.begin_write().await.expect("tx");
             tx.execute(store.db.stmt(
                 "INSERT INTO request_logs (id, request_id, user_id, api_key_id, model, is_stream, status, charge_nano_usd, created_at, created_at_unix_ms, input_tokens, output_tokens)
-                 VALUES ('log-mu1', 'mu-r1', 'mu-org', 'mu-key', 'model-a', 0, 'success', '700', $2, $3, 30, 7)",
-                vec!["mu-org".into(), chrono::Utc::now().to_rfc3339().into(), now_ms.into()],
+                 VALUES ('log-mu1', 'mu-r1', 'mu-org', 'mu-key', 'model-a', 0, 'success', '700', $1, $2, 3000000030, 7)",
+                vec![chrono::Utc::now().to_rfc3339().into(), now_ms.into()],
             ))
             .await
             .expect("log");
@@ -1096,7 +1109,17 @@ mod tests {
         assert_eq!(m["user_id"].as_str().expect("id"), member.id);
         assert_eq!(m["total_charge_nano_usd"].as_str().expect("charge"), "700");
         assert_eq!(m["calls"].as_i64().expect("calls"), 1);
+        assert_eq!(m["input_tokens"].as_i64(), Some(3_000_000_030));
+        assert_eq!(m["output_tokens"].as_i64(), Some(7));
+        assert_eq!(m["cache_read_tokens"].as_i64(), Some(0));
+        assert!(value["removed_members"].as_array().unwrap().is_empty());
         let by_model = m["by_model"].as_array().expect("by_model");
         assert_eq!(by_model[0]["model"].as_str().expect("model"), "model-a");
+        store.db.write().await.execute(store.db.stmt(
+            "DELETE FROM org_members WHERE org_id='mu-org'", vec![],
+        )).await.unwrap();
+        let removed = member_usage(&store, "mu-org", 24, 4).await.expect("removed usage");
+        assert!(removed["members"].as_array().unwrap().is_empty());
+        assert_eq!(removed["removed_members"][0]["input_tokens"].as_i64(), Some(3_000_000_030));
     }
 }

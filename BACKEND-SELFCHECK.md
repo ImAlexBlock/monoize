@@ -108,3 +108,34 @@ The initial organization unit-test build and the subsequent smaller integration 
 were killed by the build container's 6 GiB memory limit, confirmed in kernel OOM logs.
 Neither result is a test pass. An isolated, single-job 10 GiB retry is running.
 Production memory limits were not changed. The organization display fix is not yet deployed.
+
+## Organization Regression Result
+
+The 10 GiB isolated retry completed with exit code 0 and no OOM flag.
+Both `sqlite_member_usage_endpoint_preserves_totals` and
+`postgres_member_usage_endpoint_preserves_totals` passed.
+The integration fixture exercises the authenticated owner endpoint, input tokens
+above i32 range, NULL usage, excluded failed-request tokens, and removed-member history.
+No production organization data was written by these tests.
+The candidate image build is separate; test success alone does not establish deployment.
+
+The retry button was also clicked while only profile GET requests were blocked in
+the isolated browser. No dashboard POST was observed. Removing the interception
+restored the model list automatically; manual post-recovery click remains unconfirmed.
+The isolated browser was closed and its diagnostic session removed.
+
+## Organization Candidate Acceptance
+
+Image `monoize:20261001-org-usage` was built after both database integration tests passed.
+The candidate passed the fourteen existing dashboard GET gates and an authenticated
+organization-owner member-usage check before switching new upstream connections.
+There is no schema or production-data mutation in this organization display fix.
+
+An initial public comparison disagreed on active/removed classification while old
+connections were draining. Do not discard that observation.
+A subsequent independent public comparison matched all five existing organization
+member rows, including nonzero input/output/cache totals and membership classification.
+Old connection reuse is a possible explanation for the earlier mismatch, not a proven cause.
+Repeat the comparison after the old instance exits before final acceptance.
+The latest deployment check still showed three accepted old connections.
+Both instances remained healthy; no forced stop or Caddy reload occurred.
