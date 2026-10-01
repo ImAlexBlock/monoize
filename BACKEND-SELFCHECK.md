@@ -30,9 +30,9 @@ Repair requires a tested migration, a pre-change backup, and row-preservation ve
 - [x] Reject overflowing integer imports instead of wrapping.
 - [x] Show retryable workbench request errors instead of a false empty state.
 - [x] Verify candidate interfaces on current data before admitting traffic.
-- [ ] Re-run fixed and parameterized interfaces with appropriate existing roles.
-- [ ] Verify visible model selection and error recovery in a browser.
-- [ ] Check PG and SQLite regressions and role-protected 403 cases separately.
+- [x] Re-run fixed and parameterized interfaces with appropriate existing roles.
+- [x] Verify visible model selection and automatic error recovery in a browser.
+- [x] Check PG and SQLite regressions and role-protected 403 cases separately.
 - [ ] Deploy without aborting existing streams; verify live pages through the CDN.
 
 Do not create orders, payments, withdrawals, refunds, or alter balances for diagnostics.
@@ -139,3 +139,32 @@ Old connection reuse is a possible explanation for the earlier mismatch, not a p
 Repeat the comparison after the old instance exits before final acceptance.
 The latest deployment check still showed three accepted old connections.
 Both instances remained healthy; no forced stop or Caddy reload occurred.
+
+## Current Acceptance Status
+
+This section supersedes the historical build and deployment progress above.
+The audit remains active.
+
+At 2026-10-02 00:40 UTC+8, the organization swap supervisor remained running.
+New upstream connections route to the healthy organization-fix candidate.
+Two accepted connections remained on the previous instance.
+One connection continued sending data; do not terminate either connection for acceptance.
+The final Store lease handover and old-instance exit are not yet verified.
+
+The latest fixed-route report, `dashboard-selfcheck-76bdea42.json`, contains
+46 HTTP 200 responses and four expected role-based HTTP 403 responses.
+Its diagnostic session cleanup marker is present.
+A further public organization comparison matched all five member records.
+Calls, input/output/cache tokens, and active/removed classification matched database queries.
+All five records contained nonzero input tokens.
+The temporary organization diagnostic session was deleted.
+
+Remaining gates:
+- Wait for existing connections to drain without interruption.
+- Confirm Store lease ownership and the previous instance's normal exit.
+- Repeat public organization comparisons after the previous instance exits.
+- Recheck public dashboard reads after the completed handover.
+
+Browser evidence covers read paths and automatic request-error recovery.
+Manual retry completion after recovery and financial write operations remain untested.
+Do not interpret successful read checks as acceptance of these untested operations.
