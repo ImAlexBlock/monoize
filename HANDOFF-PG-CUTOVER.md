@@ -23,7 +23,7 @@ migrations and runtime has a Postgres branch (verified by inspection; grep list 
 ## 2. Production state RIGHT NOW (64.90.22.212)
 
 - **Serving**: old container `monoize` (image `monoize:72d970c9`) on SQLite, port 8081 (Caddy active). PigCode key `70132be1` still flooding (~90% of traffic); `sqlx` slow-acquire warnings ongoing until cutover.
-- **PG ready**: container `monoize-postgres` (postgres:18-alpine, `--network host`, listening `127.0.0.1:5433`, user `postgres`, password `MonoPGx7K2vQ9wE4t`, database `monoize`, data at `/opt/monoize/pgdata`). Clean init done; database is EMPTY (schema applied by cutover script step 2).
+- **PG ready**: container `monoize-postgres` (postgres:18-alpine, `--network host`, listening `127.0.0.1:5433`, user `postgres`, password `[removed; read the configured deployment secret]`, database `monoize`, data at `/opt/monoize/pgdata`). Clean init done; database is EMPTY (schema applied by cutover script step 2).
 - **Build tree**: `/opt/monoize/build-93576b7e` contains rev `9efeaee7` sources (db/mod.rs patch applied). An incremental build was dispatched (`nohup ... > build2.log`, builder container `monoize-build-9efeaee7`) — **completion NOT confirmed; check `tail build2.log` for `INSIDE-BUILD-OK`**.
 - **One-shot cutover script**: `/opt/monoize/monoize-pg-cutover.sh` (in repo copy at `HANDOFF` time also in git as `/tmp` copy; re-upload from this repo if missing). NOT yet executed.
 - Disposable leftovers to delete when done: container `monoize-pg-migtest` (127.0.0.1:15432), `/tmp/monoize-snapshot.db`.

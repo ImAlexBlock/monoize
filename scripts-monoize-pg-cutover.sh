@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REV=9efeaee7
-PGDSN="postgres://postgres:MonoPGx7K2vQ9wE4t@127.0.0.1:5433/monoize"
+PGDSN="${MONOIZE_CUTOVER_POSTGRES_DSN:?set MONOIZE_CUTOVER_POSTGRES_DSN from the deployment secret store}"
 LOG=/opt/monoize/cutover-$REV.log
 BUILD=/opt/monoize/build-93576b7e
 MIGRATIONS_EXPECTED=95

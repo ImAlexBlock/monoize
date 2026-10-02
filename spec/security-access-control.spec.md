@@ -21,6 +21,10 @@ server MUST NOT fall back to an internal name.
 This spec defines authentication for topology-bearing HTTP surfaces, API-key
 expiry update validation, and authorization for administrator account updates.
 
+## Deployment credentials
+
+SAC-D1. Tracked deployment scripts and handoff records MUST NOT contain live database passwords. The historical PostgreSQL cutover script MUST require `MONOIZE_CUTOVER_POSTGRES_DSN` from the operator environment before it performs any action. Removing a password from the working tree does not remove it from Git history or rotate it.
+
 ## Topology-bearing HTTP surfaces
 
 SAC-1. `GET /metrics`, `GET /presets/providers`, `GET /presets/apikeys`, and

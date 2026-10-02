@@ -12,6 +12,51 @@ The same BG9-BG12 forwarding, drain, lease-handover, and no-force-stop rules app
 Existing BG14-BG16 routing helpers remain responsible for connection preservation
 and reboot routing. The live Caddy configuration MUST remain unchanged.
 
+PG1. The PostgreSQL adapter MUST derive the database connection from the serving
+container's `MONOIZE_DATABASE_DSN`. It MUST run backup, lease queries, and diagnostic
+session queries against that exact connection. Select a locally available client
+image with `MONOIZE_SWAP_PG_CLIENT_IMAGE`, or obtain its immutable image ID from
+the container named by `MONOIZE_SWAP_PG_CONTAINER`. Neither selects a database.
+Pass the DSN through a mode-0600 environment file, never a command argument or log.
+Decode the DSN into libpq host, port, user, password, and database variables.
+Accept `sslmode`/`ssl-mode`, `application_name`/`application-name`, and `options`
+query parameters. Reject unknown or duplicate parameters before starting a client.
+Require a nonempty custom-format dump, successful `pg_restore --list`, and SHA-256
+recording before candidate startup.
+Directory validation is not a full restore test and MUST NOT be reported as one.
+
+PG2. Before candidate startup, require the serving binary's BG11 handover marker,
+UID/GID 1000, matching persisted/live Caddy routing, and identical migration trees.
+Use `/opt/monoize/build-<image-tag>/src/migration` for both image tags when present.
+If either source tree is unavailable, require `/opt/monoize/migration-manifest.json`.
+This operator-verified file MUST be owned by root and MUST NOT be group- or
+world-writable. Its `images` object maps each immutable Docker image ID to an object
+with `migration_tree_sha256`, a lowercase 64-character SHA-256 value. Both image IDs
+MUST be present and their digests MUST match. An available source tree MUST match
+its manifest digest. A tree digest hashes sorted relative POSIX file paths, each
+followed by NUL, its raw SHA-256 digest, and NUL. Reject empty or symlinked trees.
+Different digests require a separate compatibility assessment; this adapter MUST
+refuse the deployment rather than accept a bypass flag.
+
+PG3. The PostgreSQL adapter MUST require explicit `MONOIZE_SWAP_PUBLIC_URL`,
+`MONOIZE_SWAP_READY_URL`, and `MONOIZE_SWAP_PUBLIC_IP`. URLs MUST use HTTPS without
+userinfo or fragments. The IP MUST be a literal address. Probe with normal TLS
+verification and curl `--resolve`, without a proxy. Disable implicit curl configuration
+with `--disable` as curl's first argument. Preserve timestamped status and exit-code
+evidence. Require the first public probe before switching, readiness
+after switching, zero failures through two seconds after readiness, and public
+readiness after finalization. Stop recurring probes before the drain.
+The standalone probe retains its existing LynShen defaults for the SQLite script.
+
+PG4. Apply valid `KEY=VALUE` lines from `env-extra.txt` to the candidate only.
+Reject duplicate keys, multiline values, and overrides of the database DSN or
+the five deployment-controlled variables in BG5. Preserve the serving restart
+policy, including its on-failure retry count. Retain both instances after any
+attempted route switch. On SIGINT or SIGTERM after pause was attempted but before
+SIGHUP was attempted, attempt authenticated resume before exiting nonzero.
+Cancellation after a SIGHUP attempt MUST NOT resume forwarding to the old primary.
+The BG12 threshold logs an alert and never terminates connections.
+
 This specification defines `/opt/monoize/blue-green-swap.sh <rev>` on the
 production host. The repository sources are `scripts/blue-green-*.sh`,
 `scripts/blue-green-probe.py`, and `scripts/monoize-routing.service`.
