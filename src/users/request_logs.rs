@@ -1373,7 +1373,7 @@ mod tests {
         let db = DbPool::connect(&dsn).await.unwrap();
         let txn = db.read().begin().await.unwrap();
         txn.execute_unprepared(
-            "CREATE TEMP TABLE request_logs (model TEXT, upstream_model TEXT, request_id TEXT, request_ip TEXT, status TEXT, api_key_id TEXT, request_kind TEXT, user_id TEXT, created_at_unix_ms BIGINT, created_at TEXT, charge_nano_usd TEXT)",
+            "CREATE TEMP TABLE request_logs (model TEXT, upstream_model TEXT, request_id TEXT, request_ip TEXT, status TEXT, api_key_id TEXT, request_kind TEXT, user_id TEXT, created_at_unix_ms BIGINT, created_at TEXT, charge_nano_usd TEXT, provider_id TEXT, input_tokens BIGINT, cache_read_tokens BIGINT, output_tokens BIGINT)",
         )
         .await
         .unwrap();
@@ -1554,6 +1554,10 @@ mod tests {
         let mut analytics_groups = std::collections::BTreeMap::new();
         for row in analytics_rows {
             let model: String = row.try_get("", "model").unwrap();
+            assert_eq!(row.try_get::<String>("", "group_name").unwrap(), "unknown");
+            for column in ["input_tokens", "cache_read_tokens", "output_tokens"] {
+                assert_eq!(decode_token_aggregate(&row, column).unwrap(), 0);
+            }
             analytics_groups.insert(model, decode_charge_aggregate(&row, true));
         }
         assert_eq!(

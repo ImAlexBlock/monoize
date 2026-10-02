@@ -10,6 +10,8 @@ PSC3a. A second library test run MUST include `postgres_` SQL-construction tests
 
 PSC4. The backend job MUST create six separate disposable PostgreSQL databases named for migration, dashboard, organization endpoint, request logs, organization aggregates, and Replica ingest. It MUST apply the complete embedded migration chain to every database before running the dashboard, organization endpoint, request-log, organization aggregate, and Replica regressions. It MUST run the migration regression against the migration database. Production credentials MUST NOT be supplied to this job.
 
+PSC4a. The PostgreSQL request-log semantics test MUST supply every column used by the analytics query in its temporary `request_logs` table, including nullable `provider_id`, `input_tokens`, `cache_read_tokens`, and `output_tokens`. Provider and Group joins MUST use the migrated registry tables. The test MUST verify that rows with null token counts aggregate to zero and rows without a Provider use the `unknown` Group fallback.
+
 PSC5. PostgreSQL regressions MUST run after the ordinary Rust tests. A failed test MUST fail the job. Ignored capacity and image benchmarks are outside the default self-check.
 
 PSC6. The frontend job MUST install locked dependencies, run frontend lint and unit tests, run browser fixtures with synthetic loopback data, run type checks through the production build, and run npm launcher tests. Its Node process MUST use a 4096 MiB maximum old-space heap because the default runner heap is insufficient for the current icon imports.
