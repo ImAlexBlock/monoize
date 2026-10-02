@@ -157,8 +157,8 @@ async fn custom_tool_adapter_round_trip_nonstream_preserves_native_function() {
     assert_output(&body["output"]);
 }
 
-async fn verify_stream(buffered: bool) {
-    let (ctx, captured) = custom_adapter_context(buffered, false).await;
+async fn verify_stream() {
+    let (ctx, captured) = custom_adapter_context(false, false).await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/responses")
@@ -189,17 +189,15 @@ async fn verify_stream(buffered: bool) {
         .expect(&text);
     assert_output(&done.1["response"]["output"]);
     assert_upstream(&captured.lock().unwrap()[0].1);
-    if !buffered {
-        let ordinary = frames
-            .iter()
-            .position(|(event, _)| event == "response.output_text.delta")
-            .unwrap();
-        let custom = frames
-            .iter()
-            .position(|(event, _)| event == "response.custom_tool_call_input.delta")
-            .unwrap();
-        assert!(ordinary < custom, "{text}");
-    }
+    let ordinary = frames
+        .iter()
+        .position(|(event, _)| event == "response.output_text.delta")
+        .unwrap();
+    let custom = frames
+        .iter()
+        .position(|(event, _)| event == "response.custom_tool_call_input.delta")
+        .unwrap();
+    assert!(ordinary < custom, "{text}");
 }
 
 async fn verify_buffered_chat_stream() {
@@ -223,7 +221,87 @@ async fn verify_buffered_chat_stream() {
     });
     let (status, response) = json_post(&ctx, "/v1/chat/completions", body).await;
     assert_eq!(status, StatusCode::OK, "{response}");
-    assert!(response.contains("data: [DONE]"), "{response}");
+    let frames = parse_sse_frames(&response);
+    assert_eq!(
+        frames.iter().filter(|(_, data)| data == "[DONE]").count(),
+        1,
+        "{response}"
+    );
+    let chunks = frames
+        .into_iter()
+        .filter(|(_, data)| data != "[DONE]")
+        .map(|(event, data)| {
+            assert!(event.is_none(), "{response}");
+            serde_json::from_str::<Value>(&data).expect("Chat SSE chunk is JSON")
+        })
+        .collect::<Vec<_>>();
+    let text = chunks
+        .iter()
+        .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str())
+        .collect::<String>();
+    assert_eq!(text, "text remains live", "{response}");
+    let finish_reasons = chunks
+        .iter()
+        .filter_map(|chunk| chunk["choices"][0]["finish_reason"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(finish_reasons, vec!["tool_calls"], "{response}");
+    let calls = chunks
+        .iter()
+        .flat_map(|chunk| {
+            chunk["choices"][0]["delta"]["tool_calls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let mut indices = std::collections::HashSet::new();
+    for (id, kind, name, argument_key, expected) in [
+        (
+            "custom-call",
+            "custom",
+            "grammar_tool",
+            "input",
+            CUSTOM_INPUT,
+        ),
+        (
+            "native-call",
+            "function",
+            "native_tool",
+            "arguments",
+            NATIVE_ARGUMENTS,
+        ),
+    ] {
+        let header = calls
+            .iter()
+            .find(|call| call["id"] == id)
+            .expect("expected tool call header");
+        assert_eq!(header["type"], kind, "{response}");
+        assert_eq!(header[kind]["name"], name, "{response}");
+        let index = header["index"].as_u64().expect("tool call index");
+        assert!(
+            indices.insert(index),
+            "tool call indices differ: {response}"
+        );
+        let mut arguments = String::new();
+        for call in calls.iter().filter(|call| call["index"] == index) {
+            let other_kind = if kind == "custom" {
+                "function"
+            } else {
+                "custom"
+            };
+            assert!(call.get(other_kind).is_none(), "{response}");
+            if let Some(fragment) = call[kind][argument_key].as_str() {
+                arguments.push_str(fragment);
+            }
+        }
+        assert_eq!(arguments, expected, "{response}");
+    }
+    assert!(
+        calls
+            .iter()
+            .all(|call| indices.contains(&call["index"].as_u64().expect("tool call index"))),
+        "unexpected tool call: {response}"
+    );
     let upstream = captured.lock().unwrap();
     assert_eq!(upstream.len(), 1, "{upstream:?}");
     assert_eq!(
@@ -235,7 +313,7 @@ async fn verify_buffered_chat_stream() {
 
 #[tokio::test]
 async fn custom_tool_adapter_fragmented_stream_preserves_native_function() {
-    verify_stream(false).await;
+    verify_stream().await;
 }
 
 #[tokio::test]

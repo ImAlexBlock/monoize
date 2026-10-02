@@ -121,6 +121,24 @@ fn response_only_and_other_requests_do_not_claim_function_calls() {
 }
 
 #[test]
+fn owned_custom_arguments_decode_json_strings_without_reparsing_the_inner_value() {
+    let cfg = cfg(&["*"]);
+    let mut req = request(json!([custom("raw")]), json!([]), Value::Null);
+    let mut conversions = CustomToolConversions::default();
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    for raw in ["多行\ninput", r#"{"input":"literal JSON"}"#] {
+        let mut node = call("raw", "a", &json!(raw).to_string(), None);
+        assert!(convert_node_response(
+            &mut node,
+            &cfg,
+            &conversions,
+            &mut HashMap::new()
+        ));
+        assert_eq!(value(&node)["arguments"], raw);
+    }
+}
+
+#[test]
 fn namespaces_recurse_and_flat_wire_names_restore_only_unambiguous_identity() {
     let cfg = cfg(&["*"]);
     let mut req = request(
@@ -466,5 +484,225 @@ fn patch_normalization_matches_delta_node_done_and_response_done() {
     assert_eq!(
         value(&final_output[0])["output"][0]["arguments"],
         normalized
+    );
+}
+
+#[test]
+fn unnamed_headers_pass_through_without_conversions_matching_the_response_rule() {
+    let mut conversions = CustomToolConversions::default();
+    let mut req = request(json!([custom("raw")]), json!([]), Value::Null);
+    apply_request(&mut req, &cfg(&["*"]), &mut conversions).unwrap();
+    for (response_cfg, ownership) in [
+        (cfg(&["*"]), CustomToolConversions::default()),
+        (cfg(&["apply_patch"]), conversions),
+    ] {
+        let mut state = StreamState::default();
+        let events = vec![
+            start(7, &call("", "a", "", None)),
+            delta(7, r#"{"input":"native JSON"}"#),
+            done(7, call("raw", "a", r#"{"input":"native JSON"}"#, None)),
+        ];
+        for event in events {
+            let expected = value(&event);
+            let emitted = stream(event, &response_cfg, &ownership, &mut state);
+            assert_eq!(value(&emitted), json!([expected]));
+            assert!(state.pending.is_empty());
+        }
+    }
+}
+
+fn pending_metadata_events(index: u32, call_id: &str, arguments: &str) -> Vec<UrpStreamEvent> {
+    let mut start_event = start(index, &call("", call_id, "", None));
+    if let UrpStreamEvent::NodeStart {
+        header, extra_body, ..
+    } = &mut start_event
+    {
+        extra_body.insert("start_metadata".to_string(), json!({"trace": 8}));
+        if let NodeHeader::ToolCall { signature, id, .. } = header {
+            *signature = Some(json!("signature-from-start"));
+            *id = Some("item-from-start".to_string());
+        }
+    }
+    let mut fragment = delta(index, arguments);
+    if let UrpStreamEvent::NodeDelta {
+        usage, extra_body, ..
+    } = &mut fragment
+    {
+        *usage = Some(
+            serde_json::from_value(json!({
+                "input_tokens": 12, "output_tokens": 3, "provider_usage": "preserved",
+            }))
+            .unwrap(),
+        );
+        extra_body.insert("delta_metadata".to_string(), json!(["trace", 9]));
+    }
+    vec![start_event, fragment]
+}
+
+#[test]
+fn owned_pending_completion_preserves_start_and_delta_metadata_for_both_terminal_paths() {
+    let cfg = cfg(&["*"]);
+    let mut req = request(json!([custom("raw")]), json!([]), Value::Null);
+    let mut conversions = CustomToolConversions::default();
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    for response_terminal in [false, true] {
+        let mut state = StreamState::default();
+        let pending = pending_metadata_events(19, "a", &wrap_input("完整 🦀"));
+        let original_start = value(&pending[0]);
+        let original_delta = value(&pending[1]);
+        for event in pending {
+            assert!(stream(event, &cfg, &conversions, &mut state).is_empty());
+        }
+        let completed = call("raw", "a", "", None);
+        let terminal = if response_terminal {
+            response_done(vec![completed])
+        } else {
+            done(19, completed)
+        };
+        let emitted = stream(terminal, &cfg, &conversions, &mut state);
+        assert_eq!(emitted.len(), if response_terminal { 5 } else { 4 });
+        let output = value(&emitted);
+        assert_eq!(output[0]["node_index"], 19);
+        assert_eq!(output[0]["header"]["tool_type"], "custom");
+        assert_eq!(output[0]["header"]["name"], "raw");
+        assert_eq!(
+            output[0]["header"]["signature"],
+            original_start["header"]["signature"]
+        );
+        assert_eq!(output[0]["header"]["id"], original_start["header"]["id"]);
+        assert_eq!(
+            output[0]["start_metadata"],
+            original_start["start_metadata"]
+        );
+        assert_eq!(output[1]["node_index"], 19);
+        assert_eq!(output[1]["delta"]["arguments"], "");
+        assert_eq!(output[1]["usage"], original_delta["usage"]);
+        assert_eq!(
+            output[1]["delta_metadata"],
+            original_delta["delta_metadata"]
+        );
+        assert_eq!(output[2]["node_index"], 19);
+        assert_eq!(output[2]["delta"]["arguments"], "完整 🦀");
+        assert_eq!(output[3]["node_index"], 19);
+        assert_eq!(output[3]["node"]["arguments"], "完整 🦀");
+        assert_eq!(output[3]["node"]["tool_type"], "custom");
+        if response_terminal {
+            assert_eq!(output[4]["output"][0]["arguments"], "完整 🦀");
+        }
+        assert!(state.pending.is_empty());
+        assert!(state.calls.is_empty());
+    }
+}
+
+#[test]
+fn response_done_replays_pending_native_events_at_the_original_node_index() {
+    let cfg = cfg(&["*"]);
+    let mut req = request(
+        json!([custom("raw"), function("read")]),
+        json!([]),
+        Value::Null,
+    );
+    let mut conversions = CustomToolConversions::default();
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    let native_arguments = r#"{"input":"native JSON must remain wrapped"}"#;
+    let pending = pending_metadata_events(23, "native", native_arguments);
+    let expected = value(&pending);
+    let mut state = StreamState::default();
+    for event in pending {
+        assert!(stream(event, &cfg, &conversions, &mut state).is_empty());
+    }
+    let native = call("read", "native", native_arguments, None);
+    let emitted = stream(
+        response_done(vec![native.clone()]),
+        &cfg,
+        &conversions,
+        &mut state,
+    );
+    assert_eq!(emitted.len(), 4);
+    assert_eq!(value(&emitted[0]), expected[0]);
+    assert_eq!(value(&emitted[1]), expected[1]);
+    assert_eq!(value(&emitted[2])["node_index"], 23);
+    assert_eq!(value(&emitted[2])["node"], value(&native));
+    assert_eq!(value(&emitted[3])["output"][0], value(&native));
+    assert!(state.pending.is_empty());
+}
+
+#[test]
+fn response_done_correlates_multiple_pending_calls_by_call_id() {
+    let cfg = cfg(&["*"]);
+    let mut req = request(
+        json!([custom("raw"), function("read")]),
+        json!([]),
+        Value::Null,
+    );
+    let mut conversions = CustomToolConversions::default();
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    let mut state = StreamState::default();
+    for event in [
+        start(8, &call("", "converted", "", None)),
+        start(2, &call("", "native", "", None)),
+        delta(8, &wrap_input("custom data")),
+        delta(2, "{\"native\":true}"),
+    ] {
+        assert!(stream(event, &cfg, &conversions, &mut state).is_empty());
+    }
+    let output = stream(
+        response_done(vec![
+            call("read", "native", "{\"native\":true}", None),
+            call("raw", "converted", &wrap_input("custom data"), None),
+        ]),
+        &cfg,
+        &conversions,
+        &mut state,
+    );
+    let output = value(&output);
+    assert_eq!(output[0]["node_index"], 2);
+    assert_eq!(output[1]["node_index"], 2);
+    assert_eq!(output[2]["node_index"], 2);
+    assert_eq!(output[3]["node_index"], 8);
+    assert_eq!(output[4]["node_index"], 8);
+    assert_eq!(output[4]["delta"]["arguments"], "custom data");
+    assert_eq!(output[5]["node_index"], 8);
+    assert!(state.pending.is_empty());
+}
+
+#[test]
+fn stream_error_discards_pending_headers_deltas_usage_and_extensions() {
+    let cfg = cfg(&["*"]);
+    let mut req = request(json!([custom("raw")]), json!([]), Value::Null);
+    let mut conversions = CustomToolConversions::default();
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    let mut state = StreamState::default();
+    for event in pending_metadata_events(4, "a", "{\"input\":\"unfinished") {
+        assert!(stream(event, &cfg, &conversions, &mut state).is_empty());
+    }
+    stream(
+        start(5, &call("raw", "b", "", None)),
+        &cfg,
+        &conversions,
+        &mut state,
+    );
+    assert!(!state.pending.is_empty());
+    assert!(!state.calls.is_empty());
+    let error = UrpStreamEvent::Error {
+        code: Some("upstream_failed".to_string()),
+        message: "failed".to_string(),
+        extra_body: HashMap::from([("error_metadata".to_string(), json!(7))]),
+    };
+    let expected = value(&error);
+    assert_eq!(
+        value(&stream(error, &cfg, &conversions, &mut state)),
+        json!([expected])
+    );
+    assert!(state.pending.is_empty());
+    assert!(state.calls.is_empty());
+    assert!(
+        stream(
+            response_done(vec![call("raw", "a", &wrap_input("later"), None)]),
+            &cfg,
+            &conversions,
+            &mut state
+        )
+        .is_empty()
     );
 }

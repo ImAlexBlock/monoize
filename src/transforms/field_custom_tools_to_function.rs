@@ -366,6 +366,31 @@ fn collect_identities(
     }
 }
 
+fn collect_selected_custom_keys(
+    tools: &[ToolDefinition],
+    inherited_namespace: Option<&str>,
+    cfg: &Config,
+    keys: &mut HashSet<ToolKey>,
+) {
+    for tool in tools {
+        let namespace = tool.namespace.as_deref().or(inherited_namespace);
+        if tool.tool_type == "namespace" {
+            if let Some(children) = &tool.tools {
+                collect_selected_custom_keys(
+                    children,
+                    tool.name.as_deref().or(namespace),
+                    cfg,
+                    keys,
+                );
+            }
+        } else if let Some(name) = custom_name(tool)
+            && should_convert(cfg, name)
+        {
+            keys.insert(ToolKey::new(namespace, name));
+        }
+    }
+}
+
 fn convert_tool_to_function(
     tool: &mut ToolDefinition,
     inherited_namespace: Option<&str>,
@@ -566,12 +591,9 @@ fn apply_request(
             }
         }
     }
-    let mut candidates = CustomToolConversions::default();
+    let mut candidates = HashSet::new();
     if let Some(tools) = &req.tools {
-        let mut tools = tools.clone();
-        for tool in &mut tools {
-            convert_tool_to_function(tool, None, cfg, &mut candidates);
-        }
+        collect_selected_custom_keys(tools, None, cfg, &mut candidates);
     }
     for node in &req.input {
         if let Node::ToolCall {
@@ -582,16 +604,10 @@ fn apply_request(
         } = node
             && should_convert(cfg, name)
         {
-            candidates
-                .converted
-                .insert(ToolKey::new(namespace.as_deref(), name));
+            candidates.insert(ToolKey::new(namespace.as_deref(), name));
         }
     }
-    if let Some(key) = candidates
-        .converted
-        .intersection(&conversions.native)
-        .next()
-    {
+    if let Some(key) = candidates.intersection(&conversions.native).next() {
         return Err(TransformError::Apply(format!(
             "custom tool conversion conflicts with native function identity: {:?}/{}",
             key.namespace, key.name,
@@ -812,6 +828,88 @@ fn supply_buffered_arguments(node: &mut Node, buffered: &BufferedCall) {
     }
 }
 
+fn pending_call_id(events: &[UrpStreamEvent]) -> Option<&str> {
+    events.iter().find_map(|event| match event {
+        UrpStreamEvent::NodeStart {
+            header: NodeHeader::ToolCall { call_id, .. },
+            ..
+        } => Some(call_id.as_str()),
+        _ => None,
+    })
+}
+
+fn supply_pending_arguments(node: &mut Node, events: &[UrpStreamEvent]) {
+    if let Node::ToolCall { arguments, .. } = node
+        && arguments.is_empty()
+    {
+        for event in events {
+            if let UrpStreamEvent::NodeDelta {
+                delta:
+                    NodeDelta::ToolCallArguments {
+                        arguments: fragment,
+                    },
+                ..
+            } = event
+            {
+                arguments.push_str(fragment);
+            }
+        }
+    }
+}
+
+fn restored_completion_events(
+    node_index: u32,
+    node: &Node,
+    pending: Option<Vec<UrpStreamEvent>>,
+    include_start: bool,
+) -> Vec<UrpStreamEvent> {
+    let Some(pending) = pending else {
+        return completion_events(node_index, node, include_start);
+    };
+    let mut events = Vec::new();
+    for mut event in pending {
+        match &mut event {
+            UrpStreamEvent::NodeStart {
+                header:
+                    NodeHeader::ToolCall {
+                        namespace,
+                        tool_type,
+                        name,
+                        ..
+                    },
+                ..
+            } => {
+                if let Node::ToolCall {
+                    namespace: restored_namespace,
+                    tool_type: restored_type,
+                    name: restored_name,
+                    ..
+                } = node
+                {
+                    *namespace = restored_namespace.clone();
+                    *tool_type = *restored_type;
+                    *name = restored_name.clone();
+                }
+                events.push(event);
+            }
+            UrpStreamEvent::NodeDelta {
+                delta: NodeDelta::ToolCallArguments { arguments },
+                usage,
+                extra_body,
+                ..
+            } => {
+                arguments.clear();
+                if usage.is_some() || !extra_body.is_empty() {
+                    events.push(event);
+                }
+            }
+            _ => events.push(event),
+        }
+    }
+    events.extend(completion_events(node_index, node, false));
+    events
+}
+
 fn apply_stream(
     event: &mut UrpStreamEvent,
     cfg: &Config,
@@ -839,7 +937,12 @@ fn apply_stream(
                 name,
                 ..
             } if name.is_empty());
-            if unnamed_function && (!conversions.converted.is_empty() || cfg.convert_all) {
+            if unnamed_function
+                && conversions
+                    .converted
+                    .iter()
+                    .any(|key| should_convert(cfg, &key.name))
+            {
                 state.pending.insert(*node_index, vec![event.clone()]);
                 state.replacement = Some(Vec::new());
                 return;
@@ -877,23 +980,22 @@ fn apply_stream(
         UrpStreamEvent::NodeDone {
             node_index, node, ..
         } => {
+            if !matches!(node, Node::ToolCall { .. }) {
+                convert_result_response(node, cfg, conversions, &state.restored_calls);
+                return;
+            }
             let pending = state.pending.remove(node_index);
             let buffered = state.calls.remove(node_index);
+            let mut candidate = node.clone();
             if let Some(buffered) = &buffered {
-                supply_buffered_arguments(node, buffered);
+                supply_buffered_arguments(&mut candidate, buffered);
             }
-            if convert_node_response(node, cfg, conversions, &mut state.restored_calls) {
-                before =
-                    completion_events(*node_index, node, pending.is_some() || buffered.is_none());
-                if let (Some(pending), Some(UrpStreamEvent::NodeStart { extra_body, .. })) =
-                    (pending.as_ref(), before.first_mut())
-                    && let Some(UrpStreamEvent::NodeStart {
-                        extra_body: original_extra,
-                        ..
-                    }) = pending.first()
-                {
-                    *extra_body = original_extra.clone();
-                }
+            if let Some(pending) = &pending {
+                supply_pending_arguments(&mut candidate, pending);
+            }
+            if convert_node_response(&mut candidate, cfg, conversions, &mut state.restored_calls) {
+                *node = candidate;
+                before = restored_completion_events(*node_index, node, pending, buffered.is_none());
                 if let Node::ToolCall { call_id, .. } = node {
                     state.completed.insert(call_id.clone(), node.clone());
                 }
@@ -905,6 +1007,9 @@ fn apply_stream(
         }
         UrpStreamEvent::ResponseDone { output, .. } => {
             for node in output.iter_mut() {
+                if !matches!(node, Node::ToolCall { .. }) {
+                    continue;
+                }
                 if reuse_completed_arguments(node, &state.completed) {
                     continue;
                 }
@@ -918,23 +1023,54 @@ fn apply_stream(
                             } if candidate == call_id => Some(*index),
                             _ => None,
                         })
+                        .or_else(|| {
+                            state.pending.iter().find_map(|(index, events)| {
+                                (pending_call_id(events) == Some(call_id.as_str()))
+                                    .then_some(*index)
+                            })
+                        })
                 } else {
                     None
                 };
-                if let Some(buffered) = node_index.and_then(|index| state.calls.get(&index)) {
-                    supply_buffered_arguments(node, buffered);
+                let pending = node_index.and_then(|index| state.pending.remove(&index));
+                let buffered = node_index.and_then(|index| state.calls.remove(&index));
+                let mut candidate = node.clone();
+                if let Some(buffered) = &buffered {
+                    supply_buffered_arguments(&mut candidate, buffered);
                 }
-                if !convert_node_response(node, cfg, conversions, &mut state.restored_calls) {
+                if let Some(pending) = &pending {
+                    supply_pending_arguments(&mut candidate, pending);
+                }
+                if !convert_node_response(
+                    &mut candidate,
+                    cfg,
+                    conversions,
+                    &mut state.restored_calls,
+                ) {
+                    if let (Some(index), Some(pending)) = (node_index, pending) {
+                        before.extend(pending);
+                        before.push(UrpStreamEvent::NodeDone {
+                            node_index: index,
+                            node: node.clone(),
+                            usage: None,
+                            extra_body: HashMap::new(),
+                        });
+                    }
                     continue;
                 }
+                *node = candidate;
                 let index = node_index.unwrap_or_else(|| {
                     (0..=u32::MAX)
                         .find(|index| !state.used_indices.contains(index))
                         .expect("stream node index available")
                 });
                 state.used_indices.insert(index);
-                state.calls.remove(&index);
-                before.extend(completion_events(index, node, node_index.is_none()));
+                before.extend(restored_completion_events(
+                    index,
+                    node,
+                    pending,
+                    node_index.is_none(),
+                ));
                 before.push(UrpStreamEvent::NodeDone {
                     node_index: index,
                     node: node.clone(),
@@ -949,9 +1085,11 @@ fn apply_stream(
                 convert_result_response(node, cfg, conversions, &state.restored_calls);
             }
             state.calls.clear();
+            state.pending.clear();
         }
         UrpStreamEvent::Error { .. } => {
             state.calls.clear();
+            state.pending.clear();
             state.restored_calls.clear();
             state.failed = true;
         }
