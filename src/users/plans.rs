@@ -1364,10 +1364,10 @@ mod tests {
 
         // Empty key groups inherit the plan ceiling; selecting team-a explicitly also passes.
         let effective = resolve_effective_groups(&api_key.group_ids, plan_groups.as_deref());
-        assert_eq!(effective, vec![team_a.id.clone()]);
+        assert_eq!(effective, Some(vec![team_a.id.clone()]));
         let explicit =
             resolve_effective_groups(std::slice::from_ref(&team_a.id), plan_groups.as_deref());
-        assert_eq!(explicit, vec![team_a.id.clone()]);
+        assert_eq!(explicit, Some(vec![team_a.id.clone()]));
     }
 
     #[tokio::test]

@@ -96,7 +96,8 @@ AKG5. Authentication MUST resolve `effective_groups` as follows:
 2. If `plan_group_ids` is present and non-empty and `base` is empty, then
    `resolved = plan_group_ids`.
 3. If `plan_group_ids` is present and non-empty and `base` is non-empty, then
-   `resolved` is the intersection in `base` order.
+   `resolved` is the intersection in `base` order. An empty intersection MUST reject
+   authentication under AKG5c before applying step 5.
 4. Otherwise `resolved = base`.
 5. If `resolved` is empty, then `effective_groups = accessible_groups`. Otherwise
    `effective_groups` is `resolved` with every id absent from `accessible_groups` removed,
@@ -110,8 +111,10 @@ Group the owner cannot access.
 AKG5b. An empty `resolved` and an empty restriction result are distinct states and MUST NOT
 produce the same `effective_groups`.
 
-- `resolved` empty means the key selects every Group. Step 5 replaces it with
-  `accessible_groups`.
+- `resolved` empty means the key selects every Group only when `base` is empty and
+  no non-empty plan restriction applies. Step 5 replaces it with `accessible_groups`.
+- An empty intersection of non-empty key and plan selections means no Group is
+  authorized. It MUST NOT be expanded to `accessible_groups`.
 - `resolved` non-empty whose restriction against `accessible_groups` removes every id means
   the key selects only Groups the owner cannot access. This is an empty authorization, not
   an absent restriction.

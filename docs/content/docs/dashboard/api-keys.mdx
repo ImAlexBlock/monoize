@@ -32,7 +32,7 @@ Requests without a valid key receive HTTP `401`.
 | Enabled | A disabled key fails authentication at once. | Enabled |
 | Model limits | When on, the key can call only the listed model patterns. | Off |
 | IP whitelist | When set, requests must come from a listed IPv4/IPv6 address or CIDR range. | Empty |
-| Groups | The key routes only to Providers whose groups intersect the key's groups. | Inherit the user's group |
+| Groups | The key routes only to Providers in the allowed Groups. | All Groups accessible to the owner |
 | Max multiplier | The key skips Provider-model mappings whose effective multiplier exceeds this value. | No cap |
 | Spend limits | Total, hourly, and daily spend windows in USD. Empty means unlimited. The daily badge shows `spent/limit`. | Unlimited |
 | Request capture | `off`, `capture-all`, or `capture-only-abnormal`. See [Request Logs](/en/docs/request-logs). | `off` |
@@ -66,8 +66,12 @@ The first matching rule rewrites the model before routing, billing, and model-li
 
 ## Groups
 
-- **Inherit user group** (default): the key follows the owning user's group.
-- **Explicit groups**: select one or more groups. Order matters; Monoize prefers Providers from earlier groups. See [Routing and Reliability](/en/docs/routing).
+- Leave the selection empty to use all Groups accessible to the owner.
+- Select one or more Groups to restrict the key. Monoize prefers Providers from earlier Groups. See [Routing and Reliability](/en/docs/routing).
+
+An enabled billing plan with a non-empty Group list restricts both selections to its Groups.
+If the key and plan have no Group in common, requests receive HTTP `401`.
+The owner's single Group does not determine this selection.
 
 ## Per-key transforms
 

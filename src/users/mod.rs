@@ -541,20 +541,27 @@ pub fn canonicalize_model_bindings(
 /// AKG5/AKG6 effective-group resolution for API-key authentication.
 ///
 /// An empty key list permits every Group. A non-empty plan list is a ceiling.
+/// `None` denies authentication because the key and plan have no Group in common.
+/// `Some([])` means neither layer restricts Group access.
 pub fn resolve_effective_groups(
     key_group_ids: &[String],
     plan_group_ids: Option<&[String]>,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     let base = canonicalize_group_ids(key_group_ids);
-    let filtered = match plan_group_ids {
-        Some(plan) if !plan.is_empty() && base.is_empty() => canonicalize_group_ids(plan),
-        Some(plan) if !plan.is_empty() => base
-            .into_iter()
-            .filter(|id| plan.iter().any(|allowed| allowed == id))
-            .collect(),
-        _ => base,
-    };
-    canonicalize_group_ids(&filtered)
+    let plan = plan_group_ids
+        .map(canonicalize_group_ids)
+        .unwrap_or_default();
+    if plan.is_empty() {
+        return Some(base);
+    }
+    if base.is_empty() {
+        return Some(plan);
+    }
+    let filtered: Vec<String> = base
+        .into_iter()
+        .filter(|id| plan.iter().any(|allowed| allowed == id))
+        .collect();
+    (!filtered.is_empty()).then_some(filtered)
 }
 
 /// AKG5b: restricting a key/plan result to the Groups visible to the owner can
@@ -1097,26 +1104,30 @@ mod tests {
     #[test]
     fn resolve_effective_groups_follows_akg5() {
         // Empty key groups mean every Group.
-        assert_eq!(resolve_effective_groups(&[], None), Vec::<String>::new());
+        assert_eq!(resolve_effective_groups(&[], None), Some(Vec::new()));
         // Explicit ordered selection preserves order.
         assert_eq!(
             resolve_effective_groups(&ids(&["g-2", "g-1"]), None),
-            ids(&["g-2", "g-1"])
+            Some(ids(&["g-2", "g-1"]))
         );
         // Non-empty plan layer filters by membership in base order.
         assert_eq!(
             resolve_effective_groups(&ids(&["g-2", "g-1", "g-3"]), Some(&ids(&["g-3", "g-2"]))),
-            ids(&["g-2", "g-3"])
+            Some(ids(&["g-2", "g-3"]))
         );
         // Empty plan layer is unrestricted.
         assert_eq!(
             resolve_effective_groups(&[], Some(&[])),
-            Vec::<String>::new()
+            Some(Vec::new())
         );
         // A non-empty plan is the ceiling when the key selects every Group.
         assert_eq!(
             resolve_effective_groups(&[], Some(&ids(&["g-other"]))),
-            ids(&["g-other"])
+            Some(ids(&["g-other"]))
+        );
+        assert_eq!(
+            resolve_effective_groups(&ids(&["g-1"]), Some(&ids(&["g-2"]))),
+            None
         );
     }
 

@@ -200,10 +200,12 @@ applied the first grant at assignment time.
 ## 5. Group composition
 
 BP-R1. When a user references an enabled plan P with non-empty `P.group_ids`, request
-authorization filters the base group list (the API key's ordered group ids, or the user's
-single group; `api-key-authentication.spec.md` AKG5) to the members of `P.group_ids`,
-preserving base order. An empty `P.group_ids` contributes no restriction. The filtered
-result MAY be `[]`, in which case zero providers are group-eligible.
+authorization filters the API key's non-empty ordered group list to the members of
+`P.group_ids`, preserving key order. An empty API-key list selects the plan's ordered
+group list. An empty `P.group_ids` contributes no restriction. An empty intersection
+of non-empty key and plan lists MUST fail authentication under
+`api-key-authentication.spec.md` AKG5c. It MUST NOT authorize every accessible Group.
+The user's single group MUST NOT participate in this computation.
 
 BP-R2. A disabled plan, or a missing plan row, contributes NO restriction (treated exactly as
 "no plan") for group computation. Per BP-G6 it also receives no grants.

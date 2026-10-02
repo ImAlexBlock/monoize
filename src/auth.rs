@@ -73,8 +73,10 @@ impl AuthState {
                     Ok(Some((api_key, user, plan_group_ids, accessible_groups))) => {
                         // GR-I4: API-key auth always yields a concrete ordered list;
                         // `None` is reserved for internal system traffic.
-                        let resolved_groups =
-                            resolve_effective_groups(&api_key.group_ids, plan_group_ids.as_deref());
+                        let resolved_groups = resolve_effective_groups(
+                            &api_key.group_ids,
+                            plan_group_ids.as_deref(),
+                        )?;
                         // AKC1: `accessible_groups` arrives from the key cache; group
                         // mutations invalidate it via the cache generation bump.
                         // AKG5b: an empty restriction result means the key selects
@@ -288,6 +290,21 @@ mod tests {
             Some(vec![team_b.id.clone(), team_a.id.clone()])
         );
 
+        let (_, disjoint_token) = store
+            .create_api_key_extended(
+                &user.id,
+                key_input("disjoint key", vec![team_b.id.clone()]),
+                false,
+            )
+            .await
+            .expect("disjoint key created");
+        assert!(
+            AuthState::new()
+                .authenticate_token(&disjoint_token, Some(&store))
+                .await
+                .is_some()
+        );
+
         // A plan ceiling filters the key's ordered list by membership.
         let plan = store
             .create_billing_plan(crate::users::BillingPlanInput {
@@ -318,5 +335,14 @@ mod tests {
             .await
             .expect("auth succeeds");
         assert_eq!(filtered_auth.effective_groups, Some(vec![team_a.id]));
+        for _ in 0..2 {
+            assert!(
+                AuthState::new()
+                    .authenticate_token(&disjoint_token, Some(&store))
+                    .await
+                    .is_none(),
+                "disjoint key and plan selections must deny both fresh and cached authentication"
+            );
+        }
     }
 }
