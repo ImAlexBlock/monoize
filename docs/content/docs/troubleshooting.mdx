@@ -69,6 +69,14 @@ Add the `stream_force` transform to force `stream: true` toward the upstream. Mo
 
 ## Protocol conversion questions
 
+### `400 empty_input_after_conversion`
+
+Send a non-empty message or the complete conversation history. This error means no messages remain for the available Chat Completions or Responses Channel after conversion.
+
+Include the matching tool call when you send a tool result through Chat Completions. Use `previous_response_id` or `conversation` only with a Responses upstream that supports that state. Monoize preserves these references and saved `prompt` objects for a Responses upstream.
+
+Monoize skips an empty Channel payload and checks the remaining Channels. If all payloads are empty, it returns this error without calling an upstream or selecting another model. Streaming requests receive an error event. This check cannot recover missing history. Enable request capture before reproducing the failure to locate any content loss.
+
 ### `400 invalid_request` with `does not support thinking.type=adaptive`
 
 The full message is `Messages model <name> does not support thinking.type=adaptive`. Monoize validates every encoded Messages request before dispatch. It returns this error and calls no upstream.

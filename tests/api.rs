@@ -15,6 +15,9 @@ mod codex_dual_mode;
 #[path = "api/custom_tool_adapter.rs"]
 mod custom_tool_adapter;
 
+#[path = "api/empty_input.rs"]
+mod empty_input;
+
 #[path = "api/routing_models.rs"]
 mod routing_models;
 

@@ -69,6 +69,14 @@ description: 認証・ルーティング・課金・ストリーミングの一�
 
 ## プロトコル変換に関する質問
 
+### `400 empty_input_after_conversion`
+
+空でないメッセージ、または会話履歴全体を送信してください。このエラーは、変換後に利用可能な Chat Completions または Responses Channel へ送信するメッセージが残っていないことを示します。
+
+Chat Completions でツールの結果を送信する場合は、対応するツール呼び出しも含めてください。`previous_response_id` と `conversation` は、サーバー側の状態をサポートする Responses 上流で使用してください。Monoize は Responses 上流にこれらの参照と保存済みの `prompt` オブジェクトを転送します。
+
+Monoize はメッセージが空の Channel をスキップし、残りの Channel を確認します。すべてが空の場合、上流を呼び出さず、モデルも変更せずにこのエラーを返します。ストリーミングリクエストにはエラーイベントを返します。この確認では欠落した履歴を復元できません。内容の欠落箇所を調べるには、再現前にリクエストキャプチャを有効にしてください。
+
 ### `400 invalid_request` が `does not support thinking.type=adaptive` を返す
 
 完全なメッセージは `Messages model <名称> does not support thinking.type=adaptive` です。Monoize は送信前にエンコード済みの Messages リクエストを検証します。このエラーを返し、上流を呼び出しません。

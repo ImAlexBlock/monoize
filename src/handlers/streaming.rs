@@ -420,6 +420,7 @@ async fn forward_stream_typed_once(
 > {
     let started_at = std::time::Instant::now();
     let mut last_failed_attempt: Option<MonoizeAttempt> = None;
+    let mut last_empty_input_error = None;
     let mut tried_providers: Vec<TriedProvider> = Vec::new();
     let transform_match_model = resolve_model_suffix(&state, &mut req, auth.account_class).await?;
     // Preserve the suffix-normalized request so each per-attempt iteration can
@@ -605,6 +606,10 @@ async fn forward_stream_typed_once(
                 let upstream_body =
                     match encode_request_for_provider(&mut nonstream_req, &attempt, downstream) {
                         Ok(body) => body,
+                        Err(err) if err.code == "empty_input_after_conversion" => {
+                            last_empty_input_error = Some(err);
+                            break 'channel_attempts;
+                        }
                         Err(err) => {
                             spawn_stream_attempt_error(
                                 &state,
@@ -1055,6 +1060,10 @@ async fn forward_stream_typed_once(
             let upstream_body =
                 match encode_request_for_provider(&mut req_attempt, &attempt, downstream) {
                     Ok(body) => body,
+                    Err(err) if err.code == "empty_input_after_conversion" => {
+                        last_empty_input_error = Some(err);
+                        break 'channel_attempts;
+                    }
                     Err(err) => {
                         spawn_stream_attempt_error(
                             &state,
@@ -1698,7 +1707,10 @@ async fn forward_stream_typed_once(
         }
     }
         let final_err = if tried_providers.is_empty() {
-            no_attempt_error(&state, &logical_model, &auth).await
+            match last_empty_input_error {
+                Some(error) => error,
+                None => no_attempt_error(&state, &logical_model, &auth).await,
+            }
         } else {
             build_exhausted_upstream_error(&logical_model, &tried_providers)
         };

@@ -69,6 +69,14 @@ description: 解決認證、路由、計費和串流傳輸的常見錯誤。
 
 ## 協議轉換問題
 
+### `400 empty_input_after_conversion`
+
+傳送非空訊息或完整對話歷史。此錯誤表示轉換後，可用的 Chat Completions 或 Responses Channel 沒有可傳送的訊息。
+
+透過 Chat Completions 傳送工具結果時，同時包含對應的工具呼叫。僅在支援伺服器端狀態的 Responses 上游使用 `previous_response_id` 或 `conversation`。Monoize 為 Responses 上游保留這些參照和已儲存的 `prompt` 物件。
+
+Monoize 跳過訊息為空的 Channel，並檢查其餘 Channel。若全部為空，它回傳此錯誤，不呼叫上游，也不切換模型。串流請求收到錯誤事件。此檢查無法恢復缺失的歷史。重現前啟用請求擷取，以定位內容遺失的位置。
+
 ### `400 invalid_request` 提示 `does not support thinking.type=adaptive`
 
 完整訊息是 `Messages model <名稱> does not support thinking.type=adaptive`。Monoize 在發出請求前校驗每個已編碼的 Messages 請求。它返回該錯誤，並且不呼叫任何上游。

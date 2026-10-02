@@ -69,6 +69,14 @@ description: 解决认证、路由、计费和流式传输的常见错误。
 
 ## 协议转换问题
 
+### `400 empty_input_after_conversion`
+
+发送非空消息或完整会话历史。该错误表示转换后，可用的 Chat Completions 或 Responses Channel 没有可发送的消息。
+
+通过 Chat Completions 发送工具结果时，同时包含对应的工具调用。仅在支持服务端状态的 Responses 上游使用 `previous_response_id` 或 `conversation`。Monoize 为 Responses 上游保留这些引用和已保存的 `prompt` 对象。
+
+Monoize 跳过消息为空的 Channel，并检查其余 Channel。若全部为空，它返回此错误，不调用上游，也不切换模型。流式请求收到错误事件。此检查无法恢复缺失的历史。复现前启用请求捕获，以定位内容丢失的位置。
+
 ### `400 invalid_request` 提示 `does not support thinking.type=adaptive`
 
 完整消息是 `Messages model <名称> does not support thinking.type=adaptive`。Monoize 在发出请求前校验每个已编码的 Messages 请求。它返回该错误，并且不调用任何上游。

@@ -257,6 +257,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
             pending_request_log_guard
         };
         let mut last_failed_attempt: Option<MonoizeAttempt> = None;
+        let mut last_empty_input_error = None;
         let mut tried_providers: Vec<TriedProvider> = Vec::new();
         let mut execution_state = AttemptExecutionState::default();
         for mut attempt in attempts {
@@ -408,6 +409,10 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                 let upstream_body =
                     match encode_request_for_provider(&mut req_attempt, &attempt, downstream) {
                         Ok(body) => body,
+                        Err(err) if err.code == "empty_input_after_conversion" => {
+                            last_empty_input_error = Some(err);
+                            break 'channel_attempts;
+                        }
                         Err(err) => {
                             return Err(finish_nonstream_error(
                                 state,
@@ -1009,7 +1014,10 @@ pub(super) async fn execute_nonstream_typed_with_validator(
             }
         }
         let final_err = if tried_providers.is_empty() {
-            no_attempt_error(state, &logical_model, auth).await
+            match last_empty_input_error {
+                Some(error) => error,
+                None => no_attempt_error(state, &logical_model, auth).await,
+            }
         } else {
             build_exhausted_upstream_error(&logical_model, &tried_providers)
         };
@@ -1331,6 +1339,29 @@ pub(super) fn encode_request_for_provider(
             ));
         }
     };
+    let empty_input = match attempt.provider_type {
+        ProviderType::ChatCompletion => value
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        ProviderType::Responses => {
+            value
+                .get("input")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+                && !["previous_response_id", "conversation", "prompt"]
+                    .into_iter()
+                    .any(|key| value.get(key).is_some_and(|value| !value.is_null()))
+        }
+        _ => false,
+    };
+    if empty_input {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "empty_input_after_conversion",
+            "No messages remain after request conversion. Provide non-empty input or full conversation history. Responses state references require a compatible Responses upstream.",
+        ));
+    }
     Ok(value)
 }
 
