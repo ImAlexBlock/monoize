@@ -8,7 +8,7 @@ PSC3. The backend job MUST run locked Rust tests for all targets. The initial ru
 
 PSC3a. A second library test run MUST include `postgres_` SQL-construction tests without a test DSN. It MUST omit the request-log test that requires that DSN. The ignored organization database test runs separately under PSC4.
 
-PSC4. The backend job MUST run the PostgreSQL migration, dashboard, organization endpoint, request-log, organization aggregate, and Replica ingest regressions against six separate disposable databases. Production credentials MUST NOT be supplied to this job.
+PSC4. The backend job MUST create six separate disposable PostgreSQL databases named for migration, dashboard, organization endpoint, request logs, organization aggregates, and Replica ingest. It MUST apply the complete embedded migration chain to every database before running the dashboard, organization endpoint, request-log, organization aggregate, and Replica regressions. It MUST run the migration regression against the migration database. Production credentials MUST NOT be supplied to this job.
 
 PSC5. PostgreSQL regressions MUST run after the ordinary Rust tests. A failed test MUST fail the job. Ignored capacity and image benchmarks are outside the default self-check.
 

@@ -107,6 +107,9 @@ Its library run passed 1128 tests, failed one, ignored one, and filtered 16 Post
 The remaining failure exposed a missing cache invalidation after Provider reorder.
 The final fix invalidates after commit and checks a second routing store's independent snapshot.
 The corruption fixture also invalidates explicitly and verifies failed-rebuild recovery.
+The following run then exposed a workflow fixture defect: the request-log database had
+no schema before a query that joins Provider tables. The workflow now applies the full
+migration chain to each of the five non-migration regression databases before testing them.
 Run the full workflow on these final changes before accepting the release.
 
 | Check | Known result | Limit |
