@@ -22,6 +22,7 @@ It preserves that entire string, even when the string contains JSON.
 It also updates matching tool history, correlated results, and `tool_choice`, including selections inside `allowed_tools`.
 
 The response rule restores the converted calls and unwraps their `input` strings.
+If the complete arguments are a JSON string, it decodes that string.
 It tracks the namespace and name for each conversion.
 Ordinary function tools remain function tools, including when `names` contains `"*"`.
 Declaring a function and a selected custom tool with the same namespace and name rejects the request before forwarding.
@@ -35,7 +36,11 @@ Use this transform only when a string argument is acceptable for the selected to
 Arguments for converted calls are buffered until each call completes.
 Monoize then emits the complete custom input string.
 Split JSON escapes and wrapper fragments do not appear as custom input fragments.
-Ordinary function arguments, text, and reasoning continue to stream normally.
+Text and reasoning continue to stream normally.
+Ordinary function arguments also stream normally when the upstream identifies the tool in its start event.
+If a tool starts without a name and the request has matching conversions, Monoize delays its events until tool or response completion.
+It then restores converted calls or replays the original events for ordinary functions.
+This processing preserves usage and metadata.
 A stream error discards incomplete buffered arguments.
 
 ### apply_patch formatting
