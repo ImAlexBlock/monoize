@@ -621,6 +621,16 @@ fn apply_request(
             conversions.request_calls.insert(call_id.clone(), key);
         }
     }
+    if let Some(key) = conversions
+        .converted
+        .intersection(&conversions.native)
+        .next()
+    {
+        return Err(TransformError::Apply(format!(
+            "custom tool conversion conflicts with native function identity: {:?}/{}",
+            key.namespace, key.name,
+        )));
+    }
     for node in &mut req.input {
         convert_node_request(node, cfg, conversions);
     }
