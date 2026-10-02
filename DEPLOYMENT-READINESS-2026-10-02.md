@@ -3,6 +3,12 @@
 Use this checklist after the final revision passes the Project self-check workflow.
 Do not infer deployment completion from a successful build.
 
+The deployment recorded in `PROJECT-SELFCHECK-2026-10-02.md` passed final acceptance
+at `2026-10-02T11:26:19Z`. The deployed source revision is
+`09c47423502ff64bae50a0d02ae5781e0aeddcd6`.
+The active port is now `8081`; the stable ingress port remains `8080`.
+Recheck the serving state before reusing this procedure.
+
 ## Release artifact
 
 1. Select the successful workflow run for the exact deployment commit.
@@ -22,7 +28,7 @@ It does not establish PostgreSQL production compatibility or production readines
 ## Migration evidence
 
 No migration source changed between baseline `db37dbc18aa7c07205448494696395369a8a15e0`
-and reviewed revision `b9c50e08f611c0e2d38a9c51f2d58d1239fda609`.
+and final deployment revision `09c47423502ff64bae50a0d02ae5781e0aeddcd6`.
 The committed tree contains 97 files. Its raw Git blob digest (the Linux CI
 artifact form) is:
 
@@ -38,7 +44,7 @@ produces the equivalent tree digest:
 0d581e605b0e72f2c8ac5ed43a75147626a5e263470104b2bb58fb7e5c627181
 ```
 
-Both revisions `b48f4289` and `2c2236b0` produce `0d581e...` from the same CRLF
+The reviewed source revisions `b48f4289`, `2c2236b0`, and `09c47423` produce `0d581e...` from the same CRLF
 archive and `ad6b14...` from a raw LF archive. Compare the digest of the files
 actually staged under `/opt/monoize/build-<rev>/src/migration`; the manifest MUST
 record that exact byte-level value.

@@ -79,27 +79,40 @@ The documentation dependency audit decreased from 34 entries to zero.
 The SDK helper audit decreased from one entry to zero. Apeiron web also reported zero.
 Use compatible dependency versions; retain the verified ESLint rule version and SWC binding override.
 Update the documentation `llms.txt` handler for the patched Fumadocs asynchronous API.
-Rebuild and retest the frontend and documentation after these lockfile changes.
+The candidate CI rebuilt and retested the frontend and documentation with these lockfiles.
 
 Removing the database password from current files does not remove it from Git history.
-This self-check has not rewritten Git history or rotated the database password.
-Treat those tasks as separate, unfinished credential-recovery work.
+This self-check has not rewritten Git history or performed another database-password rotation.
+The host contains credential-rotation evidence from earlier work.
+This report does not claim that the historical password remains valid or that credentials were never rotated.
+Confirm that earlier evidence covers the exposed credential before closing credential recovery.
+Historical Git copies still contain the removed value.
 
 ## Validation known
 
 Record each result against the source and dependencies that the check actually used.
-The following table is a progress snapshot, not final release acceptance.
+The following table records revision-specific validation and its limits.
 
-The previous candidate is `a65171bbd9746c521bfbe9b435103698d9d13b1d` on `Monoize-Claude`.
-GitHub Actions run `36983925322` verifies this candidate.
-Its frontend, docs, deployment, and Apeiron jobs passed.
+The final candidate is `09c47423502ff64bae50a0d02ae5781e0aeddcd6` on `Monoize-Claude`.
+GitHub Actions run `36994966932` verifies this candidate.
+All seven jobs passed, including the release job.
 The frontend CI confirms 342 unit tests, 28 browser cases, nine npm launcher tests,
 ESLint, TypeScript, and the production build. The docs CI exported 706 pages.
-The deployment CI confirms 41 Python operational tests, four release-package tests,
+The deployment CI confirms 47 Python operational tests, four release-package tests,
 Bash drain tests, and connection-preserving routing tests in an isolated network namespace.
-Apeiron's frontend build and Go worker tests passed. Its Rust server compiled, but defines zero tests.
+The rehearsal CI passed 148 tests, including disposable PostgreSQL checks.
+Apeiron's frontend build and two Go worker tests passed. Its Rust server compiled, but defines zero tests.
+The backend job compiled every test target and passed the complete ordinary suite, all six PostgreSQL regressions, and 14 SQL-construction tests.
+The ordinary suite passed 1983 tests. The six PostgreSQL suites passed one test each.
+Together with 14 SQL-construction tests, these account for 2003 distinct passing tests.
+The request-log schema preparation repeats the migration test and does not add coverage.
+The two unexecuted tests are `benchmark_image_formats` and `gateway_benchmark_ramp`.
+The organization aggregate test is ignored in the broad run but passed in its dedicated PostgreSQL step.
+The release artifact passed isolated Docker readiness, embedded-resource, and graceful-exit checks.
+The downloaded archive checksum matches the successful upload step.
 
-The baseline Rust suite exposed a capacity-eviction deadlock and two stale registry fixtures.
+The baseline Rust suite exposed a capacity-eviction deadlock, a Provider reorder cache-invalidation defect,
+and a direct-SQL corruption fixture that omitted cache invalidation.
 An iterator retained its DashMap shard read lock while removal requested that shard's write lock.
 Source review found four instances of this pattern. Each fix has a bounded capacity regression test.
 Run `36985587061` at `b9c50e08` passed all four capacity tests without hanging.
@@ -111,68 +124,90 @@ The following run then exposed a workflow fixture defect: the request-log databa
 no schema before a query that joins Provider tables. The workflow now applies the full
 migration chain before the request-log query and supplies its four missing temporary columns.
 The organization aggregate regression retains its empty-database guard and applies migrations itself.
-Run the full workflow on these final changes before accepting the release.
+Run `36994966932` includes these final changes. All six verification jobs and its release job passed.
 
 | Check | Known result | Limit |
 | --- | --- | --- |
-| Python deployment and operational tests | 41 passed. | This result covers executable local tests, including mocked deployment failure paths. It does not prove a production swap. |
+| Python deployment and operational tests | 47 passed locally and in candidate CI. | Includes Caddy configuration validation and mocked deployment failure paths. It does not prove a production swap. |
 | Release-package tests | 4 passed. | Packaging tests do not establish that the new release binary has been built. |
-| Deployment CI at `a65171bb` | Python 41, package 4, Bash drain checks, and isolated Linux network-routing tests passed. | Verify deployment commands separately on the target server. The routing test preserves existing connections through forward and reverse swaps. |
-| Rehearsal CI at `a65171bb` | 148 tests passed across 30 test-result groups; zero failed or ignored. | Includes a disposable PostgreSQL database. Short benchmark profiles do not establish production capacity. |
-| Apeiron CI at `a65171bb` | Frontend build, Rust server compilation, and both Go worker tests passed. | The Rust server currently contains zero tests. No live video or payment provider was invoked. |
-| npm launcher tests | 9 passed. | Re-run if the launcher or its dependencies change. |
-| Frontend unit tests | 342 passed after adding two rollback tests and applying dependency patches. | Re-run if further code or dependency changes affect this result. |
-| Frontend browser fixtures | 28 tests passed with the patched dependencies. | These fixtures use synthetic loopback data. They do not establish acceptance of a deployed revision. |
-| Frontend build and lint | Production build, both TypeScript configurations, and ESLint passed with the patched dependencies. | Bundle size remains approximately 4 MB before compression. |
-| Documentation build | 706 pages exported with the patched dependencies. | Four locales and the generated `llms.txt` were checked. The existing metadataBase warning remains. |
+| Deployment CI at `09c47423` | Python 47, package 4, Bash drain checks, and isolated Linux network-routing tests passed. | Verify deployment commands separately on the target server. The routing test preserves existing connections through forward and reverse swaps. |
+| Rehearsal CI at `09c47423` | 148 tests passed across 30 test-result groups; zero failed or ignored. | Includes a disposable PostgreSQL database. Short benchmark profiles do not establish production capacity. |
+| Apeiron CI at `09c47423` | Frontend build, Rust server compilation, and both Go worker tests passed. | The Rust server currently contains zero tests. No live video or payment provider was invoked. |
+| npm launcher tests at `09c47423` | 9 passed. | Re-run if the launcher or its dependencies change. |
+| Frontend unit tests at `09c47423` | 342 passed after adding two rollback tests and applying dependency patches. | Re-run if further code or dependency changes affect this result. |
+| Frontend browser fixtures at `09c47423` | 28 tests passed with the patched dependencies. | These fixtures use synthetic loopback data. They do not establish acceptance of a deployed revision. |
+| Frontend build and lint at `09c47423` | Production build, both TypeScript configurations, and ESLint passed with the patched dependencies. | Bundle size remains approximately 4 MB before compression. |
+| Documentation build at `09c47423` | 706 pages exported with the patched dependencies. | Four locales and the generated `llms.txt` were checked. The existing metadataBase warning remains. |
 | SDK and mock helpers | Frozen SDK installation, TypeScript checks, and SDK help invocation passed. Mock TypeScript checks passed. | No live paid inference requests were made. |
 | Independent HTTPS probe test | A local self-signed certificate was rejected with and without an `insecure` curl configuration after the fix. | This verifies certificate checking and curl configuration isolation. It does not exercise production routing. |
 | Upstream adaptation whitespace check | `git diff --check` passed for the changed protocol, transform, specification, and documentation files. | This is not a Rust compilation result. |
-| Baseline CI | Commit `6e50eeda` compiled all backend targets. Its test run exposed a cache deadlock and two stale registry fixtures. | These failures triggered the additional fixes above. The baseline cannot validate the final candidate. |
-| Final Rust and PostgreSQL verification | Pending. | Compile and test the final source revision before release. Include the new strict-default and cache-ownership regressions. |
+| Baseline CI | Commit `6e50eeda` compiled all backend targets. Its test run exposed a cache deadlock, a Provider reorder invalidation defect, and a corruption fixture missing invalidation. | These failures triggered the additional fixes above. The baseline cannot validate the final candidate. |
+| Final Rust and PostgreSQL verification at `09c47423` | 2003 distinct tests passed: 1983 ordinary, 14 SQL-construction, and six PostgreSQL tests. | Two performance benchmarks remain unexecuted. The repeated migration preparation is excluded from this count. |
+| Release artifact and container smoke checks at `09c47423` | Artifact `11222972234` passed checksum, isolated Docker startup, readiness, embedded-resource, and graceful-exit checks. | The smoke check uses temporary SQLite storage. Verify the deployed PostgreSQL instance separately. |
+| Production deployment to `40.160.141.21` | Blue-green swap and final acceptance passed at `2026-10-02T11:26:19Z`. | Six cutover availability probes passed. This is sampled availability evidence, not a record of every user response. |
 | JavaScript dependency audits | Frontend, docs, SDK, and Apeiron web each reported zero known advisories. | This result reflects the registry advisory data available during this check. |
-| Rust dependency audits | Patched available vulnerabilities and removed the unused PDF parser dependency. The RSA advisory has no patched release. | Record enabled feature paths and unresolved advisories in `DEPENDENCY-REVIEW-2026-10-02.md`. Final locked Rust verification remains required. |
+| Rust dependency audits | Patched available vulnerabilities and removed the unused PDF parser dependency. The RSA advisory has no patched release. | Record enabled feature paths and unresolved advisories in `DEPENDENCY-REVIEW-2026-10-02.md`. Final locked Rust verification passed in run `36994966932`. |
 
-The deployment, rehearsal, and Apeiron CI results belong to [workflow run 36983925322](https://github.com/Libra1337/monoizeovo/actions/runs/36983925322).
-Their completed job logs were retained under `local-test/audit/ci-a65171bb-*.log`.
+The candidate CI results belong to [workflow run 36994966932](https://github.com/Libra1337/monoizeovo/actions/runs/36994966932).
+The job snapshot is retained in `local-test/audit/jobs-09c47423.json`.
+Earlier logs under `local-test/audit/ci-a65171bb-*.log` describe the earlier candidate only.
 
 Keep the Linux socket-routing test inside an isolated network namespace.
 Keep PostgreSQL regressions on disposable databases with test credentials.
 Do not report production capacity, paid inference, payment processing, or long-stream acceptance from these local checks.
 
-## Deployment pending
+## Deployment acceptance
 
-The requested deployment target is `40.160.141.21`.
-The initial SSH attempt as `root` was rejected.
-The supplied `debian` access and sudo escalation succeeded during this check.
-Read-only inspection confirmed the running PostgreSQL application and host routing.
-Deployment remains pending final test and release gates.
+Deploy revision `09c47423502ff64bae50a0d02ae5781e0aeddcd6` to `40.160.141.21`.
+The project entrypoint `/opt/monoize/blue-green-swap.sh 09c47423` completed successfully at `2026-10-02T11:25:10Z`.
+Final application acceptance passed at `2026-10-02T11:26:19Z` (19:26 UTC+8).
+The subsequent runtime check confirmed one healthy serving container named `monoize`.
 
-The target uses `migration-ingress.service`, `/opt/migration-ingress/Caddyfile`,
-and the loopback admin origin `http://127.0.0.1:2020`.
-The standard `caddy.service` is not the serving ingress.
-The serving image is `monoize:20261002-dashboard-read-recovery` with image ID
-`sha256:71023c43bc3a808ca9d43ee97cb11112fd3701f14f8e4b5e6933709181d7d6d9`.
-Its PostgreSQL connection is configured, and its application UID/GID is `1000:1000`.
-The active and stable ports are `8080`; the ingress UID is `999`.
-Use the target-specific settings in `DEPLOYMENT-READINESS-2026-10-02.md`.
+| Release evidence | Value |
+| --- | --- |
+| Source | `09c47423502ff64bae50a0d02ae5781e0aeddcd6` on `Monoize-Claude` |
+| Workflow | [36994966932](https://github.com/Libra1337/monoizeovo/actions/runs/36994966932), all seven jobs passed |
+| Artifact | `11222972234`, 19,952,578 bytes |
+| Artifact ZIP SHA-256 | `d5696c2735c863e2ed6f47e6f55f703d482c136f8fd80e722c1ae39d68cb33c4` |
+| Running executable SHA-256 | `356995ff48913004c29f86f8ee884cc618f41b42d3893ed210b10aca9fbdd26b` |
+| Target image | `monoize:09c47423` |
+| Target image ID | `sha256:5cc8b731122cfc666783c417c308289fd673c78de99891dd7f44621e81947128` |
+| Migration tree SHA-256 | `ad6b14f1805fb53501543608547b1577c85378d5032932668d97f7c1dbccd97b` |
 
-The current public homepage returned HTTP 200.
-Direct TLS probes used curl `--resolve` to target the requested server through two configured public domain names.
-Both readiness responses reported PostgreSQL, the Primary role, and a ready state.
-Unauthenticated public reads returned 200 for `/healthz` and `/readyz`.
-They returned 401 for `/v1/models`, `/metrics`, `/presets/providers`, `/presets/apikeys`,
-`/api/dashboard/transforms/registry`, and `/api/dashboard/users`.
-These observations describe the currently deployed service only.
-They do not establish that the new source, dependencies, or deployment scripts are installed.
+Use the target-specific ingress settings recorded in `DEPLOYMENT-READINESS-2026-10-02.md`.
+The serving ingress remains `migration-ingress.service`; its PID remains `76263`.
+Its configuration checksum is unchanged. No Caddy reload occurred.
+Persisted and live routing both select stable port `8080`, active port `8081`, and ingress UID `999`.
+The candidate uses an independent persistent request-log spool and application UID/GID `1000:1000`.
 
-Finish the final source checks and preserve their revision-specific results.
-Build the release artifact and record its checksum and migration-source digest.
-After server access succeeds, inspect the serving container, database connection, route state, and active streams.
-Deploy through the project-owned `/opt/monoize/blue-green-swap.sh <rev>` entrypoint.
-Preserve existing mappings and use a separate persistent request-log spool for the candidate.
-Do not reload Caddy during the swap.
-Treat the drain duration as an alert threshold, not a stop deadline.
-Confirm public readiness, lease ownership, route consistency, and natural completion of old connections before final acceptance.
+The route changed at `11:12:48Z`. Twelve accepted old connections then drained naturally.
+The final connection continued sending data until it ended; no deadline terminated it.
+The swap completed 12 minutes and 22 seconds after the route change.
+Store forwarding paused only after the old connections reached zero.
+The lease owner changed, and the new instance reports `mode = local` and `lease_owned = true`.
+The old instance exited with code `0` and remains as `monoize-before-09c47423-1790940310731728907`.
+Its spool remains available. No `monoize-next` or `monoize-prev` remains.
 
-No production deployment or final post-deployment acceptance is claimed in this report.
+The cutover probe recorded six samples and zero failures.
+Direct TLS checks targeted `40.160.141.21` through `www.lynshen.org` and `api.lynshen.org`.
+Both public `/readyz` responses reported PostgreSQL, reachable database, Primary role, and ready status.
+The embedded frontend module hash matched the release artifact locally and through both public domains.
+The running executable checksum matched the release executable.
+
+After lease handover, the new Primary passed 14 authenticated dashboard GET checks.
+The current organization's member-usage GET also returned `200` with the expected arrays.
+The checks covered Store catalog, entitlement, orders, administration, revenue, billing, metadata, firewall, and announcements.
+Temporary diagnostic sessions were deleted in `finally` blocks, and follow-up queries confirmed their removal.
+No paid inference, payment, refund, or withdrawal was invoked.
+
+The pre-swap PostgreSQL backup is:
+`/opt/monoize/backups/pg-09c47423-1790939538048152693/database.dump`.
+Its SHA-256 is `d29e4538e2a18a89856fd0c3926e054167d5bc31ded50be825dcfc2901b27615`.
+The swap verified the custom-format archive with `pg_restore --list`; acceptance rechecked its checksum.
+This procedure did not perform a full database restore.
+Previous deployment scripts remain under `/opt/monoize/backups/scripts-09c47423-1790939523573313249`.
+
+Retain local evidence in `local-test/audit/acceptance-09c47423.json`, `final-runtime-09c47423.json`,
+`deployment-log-09c47423.txt`, `release-09c.log`, and `jobs-09c47423.json`.
+Retain server evidence in `/opt/monoize/build-09c47423/swap.log` and the stated backup directory.
+The source revision above identifies the deployed binary. Later report-only commits do not change that binary.

@@ -5,6 +5,12 @@ Audit with cargo-audit 0.22.2 and RustSec database revision
 Use Cargo 1.99.0 for dependency resolution. Store the portable toolchain and caches
 under `local-test/`. Do not infer runtime compatibility from dependency resolution.
 
+The final candidate is `09c47423502ff64bae50a0d02ae5781e0aeddcd6` on `Monoize-Claude`.
+Track revision-specific validation in [workflow run 36994966932](https://github.com/Libra1337/monoizeovo/actions/runs/36994966932).
+All six verification jobs and the release job passed.
+The Linux release passed isolated Docker readiness, embedded-resource, and graceful-exit checks.
+Production acceptance is recorded separately in the project self-check report.
+
 ## Applied changes
 
 | Package | Previous version | Current version or disposition | Evidence |
@@ -72,11 +78,41 @@ The AVIF encoder dependency comes from image's default features.
 Do not claim the dependency is absent from the build or that an unmaintained package is certified safe.
 Review image feature reduction or its encoder dependency upgrades separately.
 
+## JavaScript dependencies
+
+Use Bun 1.4.2 to resolve and install the frontend, docs, SDK, and Apeiron web lockfiles.
+The final audits report zero known advisories in each workspace.
+The frontend decreased from 112 advisory entries to zero; docs decreased from 34 to zero.
+The SDK helper decreased from one advisory entry to zero.
+These counts describe registry findings during this audit, not a guarantee against undisclosed defects.
+
+| Workspace or package | Applied change | Compatibility evidence |
+| --- | --- | --- |
+| Frontend | Update compatible locked dependencies, including Vite 7.3.6 and esbuild 0.28.2. | Candidate CI passed 342 unit tests, 28 browser cases, nine npm launcher tests, ESLint, TypeScript, and the production build. |
+| ESLint React Hooks | Retain 7.0.1. | Version 7.1.1 introduced additional rule failures. No advisory requires that update. |
+| SWC | Override `@swc/core` to 1.15.18. | Retain the Windows native payload that builds within project-owned paths. Version 1.16.13's loader failed the local cache-permission check. No advisory requires it. |
+| Docs | Update Next.js to 16.3.6 and Fumadocs core/UI to 16.15.18. Await the asynchronous `llms(source).index()` result. | Candidate CI passed TypeScript and exported 706 pages. All four documentation locales remain present. |
+| SDK helper | Add `@ai-sdk/open-responses` 1.0.48 and apply compatible updates. | Frozen installation, TypeScript checks, and the live-suite help command passed. No paid inference request was made. |
+| Apeiron web | Audit the existing lockfile. | Zero known advisories. Candidate CI passed the frontend build. |
+
+Retain audit JSON under `local-test/audit/`: `frontend-advisories-final.json`,
+`docs-advisories-final.json`, `sdk-advisories-after.json`, and `apeiron-advisories.json`.
+
 ## Verification limits
 
 The updated lockfiles resolve successfully and were rescanned against the stated RustSec revision.
 The portable rustfmt parses the changed authentication, transform, and context files.
-Format the three new Rust files; preserve unrelated historical formatting differences.
-No local MSVC compiler is installed, so this environment does not establish a Rust build or test pass.
-Require the final locked Linux Rust and disposable PostgreSQL verification jobs before deployment.
-No live payment, inference, refund, withdrawal, or credential mutation was used for this review.
+No local MSVC compiler is installed. Use the candidate Linux CI for Rust runtime evidence.
+The candidate backend job compiled every test target and passed the full ordinary suite, SQL-construction checks, and six PostgreSQL regressions.
+The candidate rehearsal job passed 148 tests, including disposable PostgreSQL checks.
+Apeiron compiled its Rust server with zero tests and passed both Go worker tests.
+Deployment checks passed 47 Python operational tests, four package tests, Bash drain checks, and isolated network-routing tests.
+The release job built artifact `11222972234` for the final candidate and passed isolated runtime checks.
+The executable SHA-256 is `356995ff48913004c29f86f8ee884cc618f41b42d3893ed210b10aca9fbdd26b`.
+Record production acceptance separately; the isolated SQLite smoke check does not establish PostgreSQL deployment success.
+The final locked backend and disposable PostgreSQL jobs passed before release.
+
+Current tracked files no longer contain the historical database password. Git history still contains it.
+The host retains credential-rotation evidence from earlier work; this review performed no additional rotation or history rewrite.
+Confirm the earlier rotation's scope before closing credential recovery. Do not infer that the historical credential remains active.
+No live payment, inference, refund, withdrawal, or credential mutation was used for this dependency review.
