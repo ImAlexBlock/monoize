@@ -1,6 +1,7 @@
 # Upstream Protocol Synchronization Specification
 
 UPS-1. The protocol synchronization source is Ikaleio/monoize revision `136c8023b6622bcffd941423b39ab2e6a78fc247`.
+UPS-1a. Selective synchronization additionally includes revision `4d4a38d986c6953ffa6d9c758fa92eee53086d9f` for cross-protocol function-tool strict defaults and revision `477cbc52e10f5b79f31e300f2b4ce76618b2b34d` for Anthropic cache TTL and scope precedence. The Anthropic default output limit remains `64000` under ENC9a.
 UPS-2. The canonical protocol types and adapters MUST satisfy `urp-v2-flat-structure.spec.md`, `urp-v2-rust-core-mapping.spec.md`, `gemini-codec.spec.md`, `media-transport.spec.md`, and `protocol-conformance.spec.md`.
 UPS-3. Existing downstream routes, including Codex Responses aliases and legacy Completions, MUST retain their documented authentication and routing behavior.
 UPS-4. Protocol synchronization MUST NOT change wallet denomination, Store settlement, organizations, channel selection, or deployment behavior.

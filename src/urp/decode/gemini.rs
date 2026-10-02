@@ -611,7 +611,7 @@ fn decode_tools(tools: &[Value]) -> Vec<crate::urp::ToolDefinition> {
                 out.push(crate::urp::ToolDefinition {
                     namespace: None,
                     tools: None,
-                    origin_protocol: None,
+                    origin_protocol: Some(ProviderProtocol::Gemini),
                     config: None,
                     tool_type: "function".into(),
                     name: None,

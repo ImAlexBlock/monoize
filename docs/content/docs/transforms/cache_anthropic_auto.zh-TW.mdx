@@ -7,7 +7,7 @@ description: 為 Anthropic Messages 請求啟用頂層自動快取。
 
 ## 行為
 
-此變換會在請求 JSON 頂層加入 `cache_control`。上游會在對話增長時，將快取斷點移到最後一個可快取內容區塊。既有的 `cache_control` 值保持不變。
+此變換會在請求 JSON 頂層加入 `cache_control`。上游會在對話增長時，將快取斷點移到最後一個可快取內容區塊。用戶端提供的 `cache_control` 值保持不變。
 
 ## 參考資訊
 
@@ -23,7 +23,15 @@ description: 為 Anthropic Messages 請求啟用頂層自動快取。
 
 ## 配置
 
-此變換沒有設定項。`config` 使用空物件。
+| 選項 | 類型 | 必填 | 預設值 | 說明 |
+| --- | --- | --- | --- | --- |
+| `ttl` | string | 否 | `"5m"` | `5m` 或 `1h`。插入的快取斷點的有效期。`5m` 發送 `{"type": "ephemeral"}`，`1h` 額外加入 `"ttl": "1h"`。 |
+
+啟用 `1h` 前，請檢查所選 Provider 的定價。快取寫入費用使用已設定的計費 Profile。
+
+`1h` 斷點位於 `5m` 斷點之後時，Anthropic 會拒絕請求。所有 Anthropic `cache_*` 規則應使用相同的 `ttl`，或只在靠前的斷點上使用 `1h`。最後一個區塊已有 TTL 不同的顯式 `cache_control` 時，Anthropic 也會拒絕請求。
+
+Provider 規則先於 API 金鑰規則執行。後執行的規則會改寫 Monoize 已插入斷點的 TTL，因此 API 金鑰規則覆蓋 Provider 規則。用戶端自帶的 `cache_control` 始終保持不變。請在快取規則之前執行修改或重排節點的變換。目標變更後，後續規則不再覆蓋原有標記。內容完全相同的節點也不保留標記歸屬，以免誤改用戶端標記。
 
 ```json
 {
@@ -31,6 +39,6 @@ description: 為 Anthropic Messages 請求啟用頂層自動快取。
   "enabled": true,
   "phase": "request",
   "models": ["claude-*"],
-  "config": {}
+  "config": { "ttl": "1h" }
 }
 ```

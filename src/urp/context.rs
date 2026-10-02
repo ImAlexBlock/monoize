@@ -9,6 +9,22 @@ pub struct RequestContext {
     pub api_key_id: Option<String>,
     pub response_history: Option<ResponseHistoryContext>,
     pub tool_transports: HashMap<String, ToolTransport>,
+    /// Snapshots prevent a removed or reordered node from transferring ownership to a client marker.
+    pub anthropic_cache_markers: HashMap<AnthropicCacheTarget, AnthropicCacheMarker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnthropicCacheMarker {
+    pub node_index: Option<usize>,
+    pub node_count: usize,
+    pub fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnthropicCacheTarget {
+    System,
+    LastToolResult,
+    Request,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

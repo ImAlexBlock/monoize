@@ -20,7 +20,10 @@ pub mod decode;
 pub mod encode;
 pub mod greedy;
 pub(crate) mod internal_legacy_bridge;
-pub use context::{RequestContext, ResponseHistoryContext, ToolIdentity, ToolTransport};
+pub use context::{
+    AnthropicCacheMarker, AnthropicCacheTarget, RequestContext, ResponseHistoryContext, ToolIdentity,
+    ToolTransport,
+};
 pub mod media;
 #[cfg(test)]
 mod media_transport_tests;
@@ -1097,6 +1100,17 @@ pub struct ToolDefinition {
     pub extra_body: HashMap<String, Value>,
 }
 
+impl ToolDefinition {
+    pub(crate) fn set_function_origin(&mut self, origin: ProviderProtocol) {
+        if self.function.is_some() {
+            self.origin_protocol = Some(origin);
+        }
+        for tool in self.tools.iter_mut().flatten() {
+            tool.set_function_origin(origin);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
     pub name: String,
@@ -1727,6 +1741,8 @@ pub fn remove_downstream_only_reasoning_for_responses(nodes: &mut Vec<Node>) {
 
 #[cfg(test)]
 mod chat_feature_tests;
+#[cfg(test)]
+mod cross_protocol_tool_strict_tests;
 #[cfg(test)]
 mod gemini_feature_tests;
 #[cfg(test)]

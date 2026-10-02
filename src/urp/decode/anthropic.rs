@@ -398,6 +398,7 @@ pub fn decode_request(value: &Value) -> Result<UrpRequest, String> {
         arr.iter()
             .filter_map(|value| {
                 let mut tool = parse_tool_definition(value)?;
+                tool.set_function_origin(ProviderProtocol::Messages);
                 if tool.function.is_none() && tool.custom.is_none() {
                     tool.origin_protocol = Some(ProviderProtocol::Messages);
                     if tool.config.is_none() {

@@ -6,6 +6,7 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod anthropic_cache;
 pub mod cache_anthropic_auto;
 pub mod cache_anthropic_system;
 pub mod cache_anthropic_tool_use;
@@ -797,6 +798,9 @@ mod registry_tests {
 
 #[cfg(test)]
 mod upstream_sync_tests;
+
+#[cfg(test)]
+mod anthropic_cache_tests;
 
 #[cfg(test)]
 mod test_fixtures {
