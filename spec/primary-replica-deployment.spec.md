@@ -64,6 +64,8 @@ PX6. Per-Channel egress proxy resolution: for one upstream request issued for Ch
 
 PX7. The application MUST cache one HTTP client per distinct effective proxy URL (including the direct case) instead of constructing a client per request. Cache entries are immutable after construction; channel `proxy_url` changes take effect by resolving a different cached client on the next request.
 
+PX7a. Before inserting an uncached custom URL, if the custom-proxy cache currently contains at least 64 entries, the application MUST select one arbitrary cached key and attempt to remove it before publishing the new client. Eviction MUST release the iterator's shard read lock before removing its selected key. Concurrent insertions MAY temporarily exceed 64 entries. Eviction MUST NOT terminate requests that already hold a clone of the evicted client.
+
 PX8. The metering shipment of section 6 always resolves to the no-proxy internal client regardless of any Channel `proxy_url`.
 
 ## 3. Startup behavior

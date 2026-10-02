@@ -1292,9 +1292,10 @@ impl MonoizeRoutingStore {
         })
     }
 
-    /// DPT-RR2/RR4: serve the installed snapshot when it is younger than the TTL
-    /// and was built at the current generation; otherwise rebuild it once while
-    /// waiters keep being served by the previous snapshot.
+    /// DPT-RR2/RR4/RR5: reuse only a fresh snapshot at the current generation.
+    /// Refreshing readers wait for the rebuild mutex, then recheck before rebuilding.
+    /// A failed rebuild preserves the installed snapshot but returns its error;
+    /// the next reader retries instead of receiving that snapshot as a fallback.
     async fn registry_snapshot(&self) -> Result<std::sync::Arc<RegistrySnapshot>, String> {
         let ttl = registry_snapshot_ttl();
         if let Some(inst) = Self::snapshot_is_current(&self.snapshot, ttl) {
@@ -3717,6 +3718,13 @@ mod tests {
             .await
             .expect("provider creates");
 
+        let installed = store
+            .snapshot
+            .installed
+            .read()
+            .expect("registry snapshot lock")
+            .clone()
+            .expect("provider creation installs a snapshot");
         db.write()
             .await
             .execute(db.stmt(
@@ -3725,7 +3733,54 @@ mod tests {
             ))
             .await
             .expect("provider boolean becomes malformed");
-        assert!(store.get_provider(&provider.id).await.is_err());
+        bump_registry_generation();
+        for _ in 0..2 {
+            assert!(
+                store
+                    .get_provider(&provider.id)
+                    .await
+                    .expect_err("invalid boolean must fail every rebuild")
+                    .contains("invalid enabled boolean: expected 0 or 1, got 2")
+            );
+            assert!(std::sync::Arc::ptr_eq(
+                store
+                    .snapshot
+                    .installed
+                    .read()
+                    .expect("registry snapshot lock")
+                    .as_ref()
+                    .expect("failed rebuild preserves the installed snapshot"),
+                &installed,
+            ));
+        }
+
+        db.write()
+            .await
+            .execute(db.stmt(
+                "UPDATE monoize_providers SET enabled = 1 WHERE id = $1",
+                vec![provider.id.clone().into()],
+            ))
+            .await
+            .expect("provider boolean is repaired");
+        bump_registry_generation();
+        assert!(
+            store
+                .get_provider(&provider.id)
+                .await
+                .expect("repaired registry rebuilds")
+                .expect("provider remains present")
+                .enabled
+        );
+        assert!(!std::sync::Arc::ptr_eq(
+            store
+                .snapshot
+                .installed
+                .read()
+                .expect("registry snapshot lock")
+                .as_ref()
+                .expect("successful rebuild installs a snapshot"),
+            &installed,
+        ));
     }
 
     #[tokio::test]
@@ -3899,6 +3954,7 @@ mod tests {
             ))
             .await
             .expect("corrupt whitelist writes");
+        bump_registry_generation();
         assert!(
             store
                 .get_provider(&created.id)

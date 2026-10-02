@@ -66,7 +66,9 @@ impl DashboardAggCache {
             return;
         }
         if self.entries.len() >= self.capacity {
-            if let Some(victim) = self.entries.iter().next().map(|e| e.key().clone()) {
+            // End the iterator's shard read lock before removal takes its write lock.
+            let victim = self.entries.iter().next().map(|e| e.key().clone());
+            if let Some(victim) = victim {
                 self.entries.remove(&victim);
             }
         }
@@ -108,12 +110,21 @@ mod tests {
     }
 
     #[test]
-    fn capacity_evicts_oldest_insertion_batch() {
-        let cache = cache_with_ttl(Some(Duration::from_secs(10)));
-        for index in 0..4 {
-            cache.put(&format!("k{index}"), serde_json::json!(index));
-        }
-        cache.put("k4", serde_json::json!(4));
-        assert_eq!(cache.entries.len(), 4);
+    fn capacity_eviction_completes_and_retains_new_entry() {
+        let (completed, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let cache = cache_with_ttl(Some(Duration::from_secs(10)));
+            for index in 0..4 {
+                cache.put(&format!("k{index}"), serde_json::json!(index));
+            }
+            cache.put("k4", serde_json::json!(4));
+            assert_eq!(cache.entries.len(), 4);
+            assert_eq!(cache.get("k4"), Some(serde_json::json!(4)));
+            completed.send(()).unwrap();
+        });
+        completion
+            .recv_timeout(Duration::from_secs(5))
+            .expect("capacity eviction must not retain its own shard read lock");
+        worker.join().unwrap();
     }
 }

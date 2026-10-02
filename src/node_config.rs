@@ -325,16 +325,17 @@ impl HttpClients {
         if let Some(entry) = self.per_proxy.get(proxy_url) {
             return Ok(entry.value().as_ref().clone());
         }
-        // RRB-R1: the proxy-client cache is bounded; overflow evicts one stale entry.
+        // PX7a: eviction drops only the cached handle; in-flight requests retain theirs.
         const PER_PROXY_CLIENT_CAP: usize = 64;
         if self.per_proxy.len() >= PER_PROXY_CLIENT_CAP {
-            if let Some(oldest_key) = self
+            // End the iterator's shard read lock before removal takes its write lock.
+            let eviction_key = self
                 .per_proxy
                 .iter()
                 .next()
-                .map(|entry| entry.key().clone())
-            {
-                self.per_proxy.remove(&oldest_key);
+                .map(|entry| entry.key().clone());
+            if let Some(eviction_key) = eviction_key {
+                self.per_proxy.remove(&eviction_key);
             }
         }
         let client = build_client(Some(proxy_url))?;
@@ -475,6 +476,29 @@ mod tests {
             .expect_err("invalid custom proxy must fail closed");
         assert!(!err.is_empty(), "{err}");
         assert_eq!(clients.cached_custom_proxy_count(), 1);
+    }
+
+    #[test]
+    fn channel_proxy_cache_capacity_eviction_completes() {
+        let (completed, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let clients = HttpClients::new(None).unwrap();
+            for port in 9000..9064 {
+                clients
+                    .for_channel_proxy(Some(&format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            }
+            clients
+                .for_channel_proxy(Some("http://127.0.0.1:9064"))
+                .unwrap();
+            assert_eq!(clients.cached_custom_proxy_count(), 64);
+            assert!(clients.custom_proxy_arc("http://127.0.0.1:9064").is_some());
+            completed.send(()).unwrap();
+        });
+        completion
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("proxy client eviction must not retain its own shard read lock");
+        worker.join().unwrap();
     }
 
     fn env_err(pairs: &[(&str, &str)]) -> &'static str {

@@ -388,15 +388,19 @@ create/update/delete/reorder) and every write to `monoize_groups` (group
 create/update/reorder/delete) MUST increment the registry generation after the write
 commits. The generation counter is process-wide.
 
-DPT-RR4. Snapshot rebuild MUST single-flight per DPT-SW4. While a rebuild is in
-flight, readers MUST continue to be served by the previous snapshot. A rebuild that
-fails MUST leave the previous snapshot installed and MUST propagate the error to the
-triggering reader; the next reader retries the rebuild.
+DPT-RR4. Snapshot rebuilds MUST serialize on one mutex per shared snapshot state.
+A reader MAY reuse an installed snapshot only when its generation equals the
+process-wide generation observed at the check and its age does not exceed the TTL.
+TTL `0` MUST prevent reuse. A reader that requires refresh MUST wait for the rebuild
+mutex and repeat this check after acquiring it. If no installed snapshot passes the
+second check, that reader MUST rebuild and install a new snapshot before releasing
+the mutex.
 
-DPT-RR5. A reader whose snapshot is older than the generation it observed MUST NOT
-serve registry data newer than its snapshot: the reader either waits for the rebuild
-(single-flight) or serves the previous snapshot. Staleness is bounded by the TTL in
-DPT-RR2.
+DPT-RR5. A failed rebuild MUST return its error to the calling reader and leave the
+previous snapshot installed. The reader MUST NOT return the previous snapshot as a
+substitute for that error. The next reader MUST retry the failed rebuild. A generation
+change during a rebuild MUST make the resulting snapshot require refresh on the next
+read; it MUST NOT be recorded as a generation already incorporated by that rebuild.
 
 DPT-RR6. The snapshot holds whole tables whose row counts are bounded by admin input
 (thousands). No per-request allocation growth is permitted.
@@ -405,6 +409,16 @@ DPT-RR6. The snapshot holds whole tables whose row counts are bounded by admin i
 
 DPT-RR7. The snapshot MUST live in the routing store layer (`MonoizeRoutingStore`) so
 every caller of the covered read functions shares one snapshot.
+
+### 8.4 Validation
+
+DPT-RR8. Tests that mutate registry rows through direct SQL MUST increment the
+registry generation after the write commits and before asserting refreshed read
+results. Validation MUST include a corruption test that starts with an installed
+valid snapshot, requires each attempted rebuild to return its decoding error, and
+verifies that the installed snapshot remains unchanged. After a valid repair commits
+and increments the generation, the next read MUST rebuild successfully and replace
+that snapshot.
 
 ## 9. Dashboard Aggregate Cache
 
@@ -428,8 +442,10 @@ re-run the aggregate query.
 
 ## 10. Concurrency Properties
 
-DPT-C1. `LastUsedBatcher` and `ApiKeyCache` use `DashMap` for lock-free concurrent reads and sharded writes. No contention between readers and writers except on the same shard.
+DPT-C1. `LastUsedBatcher` and `ApiKeyCache` use `DashMap` with one read/write lock per shard. Reads may proceed concurrently; a write excludes reads and writes on the same shard.
 
 DPT-C2. `RequestLogBatcher` uses `tokio::sync::Mutex` for the buffer. The `push` operation holds the lock only for the duration of `Vec::push`. The `flush` operation holds the lock only for the duration of `std::mem::replace` (buffer swap), then releases it before executing DB writes.
 
 DPT-C3. `BalanceCache` uses `DashMap` with the same concurrency properties as DPT-C1.
+
+DPT-C4. Capacity eviction in `LastUsedBatcher`, `ApiKeyCache`, `BalanceCache`, `SpendWindowCache`, and `DashboardAggCache` MUST copy the selected key and release every iterator and entry guard before removing that key. With no other caller holding a shard lock, insertion or retry at capacity MUST complete without waiting for a lock held by that same operation.

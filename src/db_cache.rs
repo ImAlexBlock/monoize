@@ -162,14 +162,16 @@ impl LastUsedBatcher {
             }
             return;
         }
-        if self.buffer.len() >= self.capacity
-            && let Some(eviction_key) = self.buffer.iter().next().map(|entry| entry.key().clone())
-        {
-            self.buffer.remove(&eviction_key);
-            tracing::warn!(
-                api_key_id = %eviction_key,
-                "last_used buffer evicted metadata to retain a failed write for retry"
-            );
+        if self.buffer.len() >= self.capacity {
+            // End the iterator's shard read lock before removal takes its write lock.
+            let eviction_key = self.buffer.iter().next().map(|entry| entry.key().clone());
+            if let Some(eviction_key) = eviction_key {
+                self.buffer.remove(&eviction_key);
+                tracing::warn!(
+                    api_key_id = %eviction_key,
+                    "last_used buffer evicted metadata to retain a failed write for retry"
+                );
+            }
         }
         self.buffer.insert(api_key_id, timestamp);
     }
@@ -1885,7 +1887,9 @@ impl<T: Clone> SpendWindowCache<T> {
             if self.cache.len() >= self.capacity {
                 // Bound the map by recycling one arbitrary entry; the window data
                 // is advisory for preflight, so eviction order is irrelevant.
-                if let Some(victim) = self.cache.iter().next().map(|e| e.key().clone()) {
+                // A separate statement releases the iterator's shard read lock.
+                let victim = self.cache.iter().next().map(|e| e.key().clone());
+                if let Some(victim) = victim {
                     self.cache.remove(&victim);
                 }
             }
@@ -2494,6 +2498,25 @@ mod tests {
         batcher.record("key-1".to_string(), later);
         assert_eq!(batcher.buffer.len(), 1);
         assert_eq!(*batcher.buffer.get("key-1").unwrap(), later);
+    }
+
+    #[test]
+    fn last_used_retry_at_capacity_completes_and_retains_failed_write() {
+        let (completed, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let batcher = LastUsedBatcher::with_capacity(1);
+            let first = Utc::now();
+            let later = first + chrono::Duration::seconds(1);
+            batcher.record("key-new".to_string(), later);
+            batcher.record_retry("key-retry".to_string(), first);
+            assert_eq!(batcher.buffer.len(), 1);
+            assert_eq!(*batcher.buffer.get("key-retry").unwrap(), first);
+            completed.send(()).unwrap();
+        });
+        completion
+            .recv_timeout(Duration::from_secs(5))
+            .expect("retry eviction must not retain its own shard read lock");
+        worker.join().unwrap();
     }
 
     #[test]
@@ -3262,6 +3285,41 @@ mod tests {
         cache.invalidate_for_api_key("k1");
         let reloaded = cache.get_or_load("key:k1", || async { Ok(11u64) }).await;
         assert_eq!(reloaded.unwrap(), 11, "after invalidation the load runs again");
+    }
+
+    #[test]
+    fn spend_window_cache_capacity_eviction_completes_and_retains_new_value() {
+        let (completed, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let cache = SpendWindowCache::with_ttl(Some(Duration::from_secs(30)), 1);
+                cache
+                    .get_or_load("first", || async { Ok(1u64) })
+                    .await
+                    .unwrap();
+                cache
+                    .get_or_load("second", || async { Ok(2u64) })
+                    .await
+                    .unwrap();
+                assert_eq!(cache.cache.len(), 1);
+                assert_eq!(
+                    cache
+                        .get_or_load("second", || async { Ok(99u64) })
+                        .await
+                        .unwrap(),
+                    2
+                );
+                assert_eq!(cache.fresh("first", Duration::from_secs(30)), None);
+                completed.send(()).unwrap();
+            });
+        });
+        completion
+            .recv_timeout(Duration::from_secs(5))
+            .expect("spend window eviction must not retain its own shard read lock");
+        worker.join().unwrap();
     }
 
     #[tokio::test]
