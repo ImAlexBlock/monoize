@@ -52,6 +52,8 @@ NCD-L5. If the selected optional dependency or its executable is missing, the la
 
 NCD-L6. The launcher MUST pass all user arguments to the native executable in their original order. It MUST inherit the parent working directory, environment, standard input, standard output, and standard error.
 
+NCD-L5a. When package-manager environment metadata is absent, a canonical launcher path containing a `.pnpm` directory MUST select the pnpm reinstall command. Path matching MUST accept both `/` and `\` separators. A directory whose name only contains `.pnpm` as a substring MUST NOT match.
+
 NCD-L7. On `SIGINT`, `SIGTERM`, or `SIGHUP`, the launcher MUST forward the same signal to the running native process and wait for it to exit.
 
 NCD-L8. If the native process exits with a numeric status, the launcher MUST exit with that status. If the native process exits because of a signal, the launcher MUST terminate itself with the same signal.

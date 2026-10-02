@@ -52,6 +52,16 @@ describe("package manager errors", () => {
     expect(reinstallCommand("pnpm")).toBe("pnpm add -g monoize@latest");
   });
 
+  test("detects pnpm paths with either separator without matching directory substrings", () => {
+    for (const installedPath of [
+      "/project/node_modules/.pnpm/monoize/bin/monoize.js",
+      String.raw`C:\project\node_modules\.pnpm\monoize\bin\monoize.js`,
+    ]) {
+      expect(detectPackageManager({}, "monoize.js", installedPath)).toBe("pnpm");
+    }
+    expect(detectPackageManager({}, "monoize.js", "/project/.pnpm-backup/monoize.js")).toBe("npm");
+  });
+
   test("formats a missing optional dependency without a stack trace", () => {
     expect(formatLauncherError(new Error("missing optional dependency monoize-linux-x64"))).toContain(
       "Reinstall with:",

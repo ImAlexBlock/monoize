@@ -27,7 +27,7 @@ export function detectPackageManager(
   if (
     /\bpnpm\//.test(userAgent) ||
     npmExecPath.includes("pnpm") ||
-    installedPath.includes(`${path.sep}.pnpm${path.sep}`)
+    /[\\/]\.pnpm[\\/]/.test(installedPath)
   ) {
     return "pnpm";
   }
