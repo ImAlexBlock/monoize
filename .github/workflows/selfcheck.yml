@@ -45,9 +45,6 @@ jobs:
           cache-on-failure: true
       - name: Compile all Rust test targets
         run: cargo test --locked --all-targets --no-run
-      - name: Test Rust targets with SQLite
-        timeout-minutes: 25
-        run: cargo test --locked --all-targets -- --skip postgres_
       - name: Test PostgreSQL SQL construction without a live database
         run: cargo test --locked --lib postgres_ -- --skip postgres_request_log_semantics_match_sqlite_when_test_dsn_is_configured
       - name: Create isolated PostgreSQL databases
@@ -57,14 +54,10 @@ jobs:
           for database in migration dashboard org_endpoint request_logs org_aggregate replica; do
             createdb -h 127.0.0.1 -U postgres "selfcheck_$database"
           done
-      - name: Prepare PostgreSQL regression schemas
+      - name: Prepare PostgreSQL request-log schema
         env:
-          MONOIZE_TEST_POSTGRES_PASSWORD: selfcheck-only
-        run: |
-          for database in dashboard org_endpoint request_logs replica; do
-            MONOIZE_TEST_POSTGRES_DSN="postgres://postgres:${MONOIZE_TEST_POSTGRES_PASSWORD}@127.0.0.1:5432/selfcheck_${database}" \
-              cargo test --locked --test pg_migration_smoke -- --nocapture
-          done
+          MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_request_logs
+        run: cargo test --locked --test pg_migration_smoke -- --nocapture
       - name: Test PostgreSQL migration chain
         env:
           MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_migration
@@ -89,6 +82,9 @@ jobs:
         env:
           MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_replica
         run: cargo test --locked --test primary_replica t8_postgres_ingest_parity_when_configured -- --nocapture
+      - name: Test Rust targets with SQLite
+        timeout-minutes: 25
+        run: cargo test --locked --all-targets -- --skip postgres_
 
   frontend:
     runs-on: ubuntu-24.04

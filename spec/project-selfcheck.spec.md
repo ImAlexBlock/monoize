@@ -4,15 +4,15 @@ PSC1. `.github/workflows/selfcheck.yml` MUST run on pushes to `Monoize-Claude` a
 
 PSC2. The workflow MUST run with read-only repository permissions. It MUST NOT publish packages, change production data, or deploy an application.
 
-PSC3. The backend job MUST run locked Rust tests for all targets. The initial run MUST omit tests whose names contain `postgres_` and MUST NOT set a PostgreSQL test DSN.
+PSC3. The backend job MUST run locked Rust tests for all targets. The ordinary all-target run MUST omit tests whose names contain `postgres_` and MUST NOT set a PostgreSQL test DSN.
 
-PSC3a. A second library test run MUST include `postgres_` SQL-construction tests without a test DSN. It MUST omit the request-log test that requires that DSN. The ignored organization database test runs separately under PSC4.
+PSC3a. A separate library test run MUST include `postgres_` SQL-construction tests without a test DSN. It MUST omit the request-log test that requires that DSN. The ignored organization database test runs separately under PSC4.
 
-PSC4. The backend job MUST create six separate disposable PostgreSQL databases named for migration, dashboard, organization endpoint, request logs, organization aggregates, and Replica ingest. It MUST apply the complete embedded migration chain before running the dashboard, organization endpoint, request-log, and Replica regressions. The organization aggregate test MUST receive an empty database, verify that it contains no public tables, and apply the complete migration chain itself before its assertions. The workflow MUST run the migration regression against the migration database. Production credentials MUST NOT be supplied to this job.
+PSC4. The backend job MUST create six separate disposable PostgreSQL databases named for migration, dashboard, organization endpoint, request logs, organization aggregates, and Replica ingest. Only the request-log database MUST receive the complete migration chain from a separate preparation step. The migration regression owns its database initialization. The dashboard, organization endpoint, and organization aggregate tests MUST receive empty databases and preserve their existing empty-database assertions. The dashboard test applies historical migrations before testing the final repair migration. The organization tests apply migrations through their existing fixtures. Replica initialization applies migrations through application startup. Production credentials MUST NOT be supplied to this job.
 
 PSC4a. The PostgreSQL request-log semantics test MUST supply every column used by the analytics query in its temporary `request_logs` table, including nullable `provider_id`, `input_tokens`, `cache_read_tokens`, and `output_tokens`. Provider and Group joins MUST use the migrated registry tables. The test MUST verify that rows with null token counts aggregate to zero and rows without a Provider use the `unknown` Group fallback.
 
-PSC5. PostgreSQL regressions MUST run after the ordinary Rust tests. A failed test MUST fail the job. Ignored capacity and image benchmarks are outside the default self-check.
+PSC5. PostgreSQL regressions MUST run after compilation and before the ordinary all-target Rust tests, so schema-fixture failures are reported before the longer integration suite. Every regression and the ordinary suite MUST pass before release. A failed test MUST fail the job. Ignored capacity and image benchmarks are outside the default self-check.
 
 PSC6. The frontend job MUST install locked dependencies, run frontend lint and unit tests, run browser fixtures with synthetic loopback data, run type checks through the production build, and run npm launcher tests. Its Node process MUST use a 4096 MiB maximum old-space heap because the default runner heap is insufficient for the current icon imports.
 
