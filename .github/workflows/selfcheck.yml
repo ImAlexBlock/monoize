@@ -1,0 +1,151 @@
+name: Project self-check
+
+on:
+  push:
+    branches: [Monoize-Claude]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: selfcheck-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Select stable Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: selfcheck-linux
+          cache-on-failure: true
+      - name: Test Rust targets with SQLite
+        run: cargo test --locked --all-targets -- --skip postgres_
+      - name: Create isolated PostgreSQL databases
+        env:
+          PGPASSWORD: selfcheck-only
+        run: |
+          for database in migration dashboard org_endpoint request_logs org_aggregate replica; do
+            createdb -h 127.0.0.1 -U postgres "selfcheck_$database"
+          done
+      - name: Test PostgreSQL migration chain
+        env:
+          MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_migration
+        run: cargo test --locked --test pg_migration_smoke -- --nocapture
+      - name: Test PostgreSQL dashboard reads
+        env:
+          MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_dashboard
+        run: cargo test --locked --test dashboard_pg_regression -- --nocapture
+      - name: Test PostgreSQL organization endpoint
+        env:
+          MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_org_endpoint
+        run: cargo test --locked --test org_member_usage_pg postgres_ -- --nocapture
+      - name: Test PostgreSQL request-log semantics
+        env:
+          MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_request_logs
+        run: cargo test --locked --lib postgres_request_log_semantics_match_sqlite_when_test_dsn_is_configured -- --nocapture
+      - name: Test PostgreSQL organization aggregates
+        env:
+          MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_org_aggregate
+        run: cargo test --locked --lib postgres_member_usage_preserves_tokens_and_membership -- --ignored --nocapture
+      - name: Test PostgreSQL Replica ingest
+        env:
+          MONOIZE_TEST_POSTGRES_DSN: postgres://postgres:selfcheck-only@127.0.0.1:5432/selfcheck_replica
+        run: cargo test --locked --test primary_replica t8_postgres_ingest_parity_when_configured -- --nocapture
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+        working-directory: frontend
+      - run: bun test tests
+        working-directory: frontend
+      - run: bun run build
+        working-directory: frontend
+      - run: bun test npm/tests
+
+  deployment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -p '*_test.py'
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - run: bash tests/blue_green_drain.sh
+      - run: sudo unshare --net python3 tests/blue_green_route.py
+
+  docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+        working-directory: docs
+      - run: bun run build
+        working-directory: docs
+
+  apeiron:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile && bun run build
+        working-directory: apeiron/web
+      - run: rustup update stable --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: apeiron/server -> target
+          cache-on-failure: true
+      - run: cargo test --locked
+        working-directory: apeiron/server
+      - run: go test ./...
+        working-directory: apeiron/worker
+      - run: go test ./...
+        working-directory: apeiron/server
