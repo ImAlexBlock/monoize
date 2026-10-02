@@ -12,6 +12,17 @@ FD-B2. Build pipeline MUST run frontend install/build before Rust compile when f
 
 FD-B3. If frontend build fails, Rust build MUST fail.
 
+FD-B4. `cd frontend && bun run test` MUST execute every `tests/*.test.ts` and
+`tests/*.test.tsx` file with the Bun test runner. `bun run test:ui` MUST execute the
+browser fixture suite through `test:browser`. The browser suite MUST run the users-load-errors,
+org-spend-limits, and playground-composer fixtures with Bun and Playwright Chromium.
+Browser fixture entrypoints MUST convert file URLs with `fileURLToPath` so Windows drive
+letters and escaped path characters resolve to filesystem paths.
+
+FD-B5. The frontend dependency tree MUST pin `@swc/core` to `1.15.18` until the
+compressed native addon loader supports the Windows workspace cache permissions.
+The build MUST NOT require changing permissions outside the project directory.
+
 ## 3. Runtime Routing
 
 FD-R1. `GET /` MUST return embedded `index.html`.

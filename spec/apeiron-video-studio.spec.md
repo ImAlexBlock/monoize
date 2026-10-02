@@ -30,6 +30,10 @@ AP-3. Components:
 | `apeiron/worker` | Go | Claimed jobs: TTS synthesis, stock material fetch, subtitle build, ffmpeg assembly |
 | `apeiron/web` | React 19 + Vite | All pages, the node canvas (`@xyflow/react`) |
 
+AP-4. `apeiron/web` MUST expose `typecheck` and `build` scripts that use its declared
+TypeScript and Vite dependencies. It MUST NOT expose a lint script unless the package
+declares the linter dependency and contains its configuration.
+
 ## 2. Authentication
 
 AP-A1. `POST /api/auth/exchange` body `{"token": <handoff token>}` → server calls the

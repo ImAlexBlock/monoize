@@ -28,6 +28,22 @@ DC9. A successful billing-rate create, update, delete, or catalog sync MUST reva
 
 DC9a. `BILLING_RATE_PROFILES` MUST be the canonical SWR key for the profile-summary resource served by `GET /api/dashboard/billing-rates/profiles`. `BILLING_RATES_FOR_PROFILE(profile)` MUST be the canonical SWR key for the filtered rate list served by `GET /api/dashboard/billing-rates?pricing_profile={profile}`. A page MUST NOT derive profile names or counts from the unfiltered `BILLING_RATES` key when it does not otherwise need rate rows.
 
+DC9b. An optimistic billing-rate upsert MUST insert or replace the row only in populated
+`BILLING_RATES` and `BILLING_RATES_FOR_PROFILE(row.pricing_profile)` cache entries. It MUST
+remove the same row ID from every other populated profile entry. It MUST NOT insert the
+row into another profile or initialize an absent catalog with a partial list. Omitted
+update fields MUST retain their stored values, except `source`, which defaults to `manual`.
+
+DC9b1. A rejected billing-rate upsert MUST restore every populated rate-cache array
+that still equals the optimistic array produced by that upsert, without requiring a
+successful follow-up GET. It MUST NOT restore an array replaced by a later cache write.
+The client MUST also revalidate populated rate views after rejection.
+
+DC9c. A successful pricing-profile copy, pricing-profile delete, or profile-model rename
+MUST revalidate `BILLING_RATES`, `BILLING_RATE_PROFILES`, every present
+`BILLING_RATES_FOR_PROFILE(profile)` key, and `PROVIDERS`. Every page that performs these
+mutations MUST use the shared mutation helper.
+
 DC10. A successful pricing-pattern mutation MUST publish the returned `PRICING_PROFILE_PATTERNS` value and revalidate `SETTINGS` and `PROVIDERS`.
 
 DC11. A successful user create MUST revalidate `USERS` and `STATS`. A successful user update MUST revalidate those keys plus `ME`. A successful user delete MUST revalidate `USERS` and `STATS`. User mutations MUST NOT revalidate `DASHBOARD_GROUPS`.

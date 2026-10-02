@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { chromium, expect } from "@playwright/test";
 
 const build = await Bun.build({
-  entrypoints: [new URL("./fixtures/playground-composer.tsx", import.meta.url).pathname],
+  entrypoints: [fileURLToPath(new URL("./fixtures/playground-composer.tsx", import.meta.url))],
   target: "browser",
   define: { "process.env.NODE_ENV": '"production"' },
 });

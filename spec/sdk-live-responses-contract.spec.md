@@ -190,6 +190,11 @@ SDK50. For Chat Completions, `sdk-tests/live-protocol-suite.ts` MUST use `create
 
 SDK51. For Responses, `sdk-tests/live-protocol-suite.ts` MUST use `createOpenResponses` from `@ai-sdk/open-responses` and MUST pass the endpoint from SDK49 as the provider `url`.
 
+SDK51a. `sdk-tests/package.json` MUST declare `@ai-sdk/open-responses` as a runtime
+dependency compatible with its installed AI SDK major version. A frozen Bun install
+MUST provide every provider imported by the live suite. `bun run live-protocol-suite --help`
+MUST exit zero without contacting an upstream endpoint.
+
 SDK52. For Messages, `sdk-tests/live-protocol-suite.ts` MUST use `createAnthropic` from `@ai-sdk/anthropic` and MUST create the model with `messages(model)`.
 
 SDK53. `sdk-tests/live-protocol-suite.ts` MUST run one non-streaming text generation check for each protocol in SDK50-SDK52.

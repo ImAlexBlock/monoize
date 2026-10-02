@@ -41,6 +41,9 @@ DOC-5. Content pages MUST be MDX files under `docs/content/docs`.
 
 DOC-6. The Vercel Git build MUST continue when the current commit changes at least one path under `docs/`. The build MUST be ignored when the current commit changes no path under `docs/`.
 
+DOC-7. The static export MUST contain `/llms.txt` with the resolved Fumadocs page index.
+The route MUST await index generation before constructing its response body.
+
 ## 2. Locales
 
 DOC-10. The site MUST support exactly these locales: `en` (default), `zh`, `zh-TW`, `ja`. They match the frontend locale set in `frontend/src/locales`.

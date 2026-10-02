@@ -24,10 +24,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { api } from "@/lib/api";
 import type { BillingRateProfileSummary } from "@/lib/api";
-import { mutate } from "swr";
-import { deletePricingProfileOptimistic, SWR_KEYS } from "@/lib/swr";
+import { copyPricingProfile, deletePricingProfileOptimistic } from "@/lib/swr";
 
 /**
  * UI25: profile lifecycle in one dialog — copy (MB-A7) and delete (MB-A11).
@@ -57,8 +55,7 @@ export function ManageProfilesDialog({
     if (!copyTarget) return;
     setCopying(true);
     try {
-      await api.copyPricingProfile(copyTarget, copyName.trim());
-      await mutate(SWR_KEYS.BILLING_RATE_PROFILES);
+      await copyPricingProfile(copyTarget, copyName.trim());
       toast.success(
         t("modelMetadata.profiles.copied", { target: copyName.trim(), source: copyTarget })
       );

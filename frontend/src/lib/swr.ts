@@ -150,6 +150,38 @@ function mutateCachedBillingRates(
   );
 }
 
+async function upsertCachedBillingRate(record: BillingRateRecord) {
+  const profileKey = billingRatesForProfileSWRKey(record.pricing_profile);
+  const snapshots = new Map<BillingRateRecord[], BillingRateRecord[]>();
+  const remember = (before: BillingRateRecord[], after: BillingRateRecord[]) => {
+    snapshots.set(after, before);
+    return after;
+  };
+  await Promise.all([
+    mutate(
+      (key) => key === SWR_KEYS.BILLING_RATES || key === profileKey,
+      (records?: BillingRateRecord[]) => {
+        if (!records) return records;
+        const updated = records.some((row) => row.id === record.id)
+          ? records.map((row) => (row.id === record.id ? record : row))
+          : [...records, record];
+        return remember(records, updated);
+      },
+      false
+    ),
+    mutate(
+      (key) => isBillingRateCacheKey(key) && key !== SWR_KEYS.BILLING_RATES && key !== profileKey,
+      (records?: BillingRateRecord[]) => {
+        if (!records?.some((row) => row.id === record.id)) return records;
+        return remember(records, records.filter((row) => row.id !== record.id));
+      },
+      false
+    ),
+  ]);
+  // Restore only our exact arrays; a later writer owns any replacement array.
+  return () => mutateCachedBillingRates((records) => snapshots.get(records) ?? records);
+}
+
 // Default SWR config
 const defaultConfig: SWRConfiguration = {
   revalidateOnFocus: true,
@@ -1289,9 +1321,11 @@ export async function deletePricingProfileOptimistic(
   );
   try {
     const result = await api.deletePricingProfile(profile);
+    mutate(SWR_KEYS.BILLING_RATES);
     mutate(SWR_KEYS.BILLING_RATE_PROFILES);
     // The per-profile rate cache may hold the deleted profile's rows.
     revalidateBillingRateKeys();
+    mutate(SWR_KEYS.PROVIDERS);
     return result;
   } catch (error) {
     mutate(SWR_KEYS.BILLING_RATE_PROFILES, currentProfiles, false);
@@ -1327,9 +1361,12 @@ export async function upsertBillingRateOptimistic(
   currentRecords: BillingRateRecord[],
   onError?: (error: Error) => void
 ) {
+  const existing = currentRecords.find((record) => record.id === id);
+  const updates = Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined)
+  );
   const tempRecord: BillingRateRecord = {
     id,
-    source: input.source ?? "manual",
     pricing_profile: input.pricing_profile ?? "",
     model_pattern: input.model_pattern ?? null,
     provider_type: input.provider_type ?? null,
@@ -1349,23 +1386,23 @@ export async function upsertBillingRateOptimistic(
     priority: input.priority ?? 0,
     enabled: input.enabled ?? true,
     raw_json: input.raw_json ?? {},
+    ...existing,
+    ...updates,
+    source: input.source ?? "manual",
     updated_at: new Date().toISOString(),
   };
-  const exists = currentRecords.some((r) => r.id === id);
-  const applyTo = (records: BillingRateRecord[]) =>
-    exists
-      ? records.map((r) => (r.id === id ? { ...r, ...tempRecord } : r))
-      : [...records, tempRecord];
-  mutateCachedBillingRates(applyTo);
+  const rollback = await upsertCachedBillingRate(tempRecord);
 
   try {
     const result = await api.upsertBillingRate(id, input);
+    await upsertCachedBillingRate(result);
     mutate(SWR_KEYS.BILLING_RATES);
     mutate(SWR_KEYS.BILLING_RATE_PROFILES);
     revalidateBillingRateKeys();
     mutate(SWR_KEYS.PROVIDERS);
     return result;
   } catch (error) {
+    await rollback();
     revalidateBillingRateKeys();
     mutate(SWR_KEYS.BILLING_RATES);
     if (onError && error instanceof Error) {
@@ -1412,6 +1449,7 @@ export async function copyPricingProfile(
     const result = await api.copyPricingProfile(profile, targetProfile);
     await mutate(SWR_KEYS.BILLING_RATES);
     mutate(SWR_KEYS.BILLING_RATE_PROFILES);
+    revalidateBillingRateKeys();
     mutate(SWR_KEYS.PROVIDERS);
     return result;
   } catch (error) {
@@ -1438,6 +1476,8 @@ export async function renamePricingProfileModel(
     const result = await api.renamePricingProfileModel(profile, model, targetModel);
     await mutate(SWR_KEYS.BILLING_RATES);
     mutate(SWR_KEYS.BILLING_RATE_PROFILES);
+    revalidateBillingRateKeys();
+    mutate(SWR_KEYS.PROVIDERS);
     return result;
   } catch (error) {
     if (onError && error instanceof Error) {
