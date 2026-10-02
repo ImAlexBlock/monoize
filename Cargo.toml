@@ -12,7 +12,7 @@ aho-corasick = "1.1.4"
 async-trait = "0.1.89"
 axum = { version = "0.8.8", features = ["macros", "multipart", "ws"] }
 base64 = "0.22.1"
-bytes = "1.11.0"
+bytes = "1.11.1"
 chrono = { version = "0.4.42", features = ["serde"] }
 eventsource-stream = "0.2.3"
 futures-util = "0.3.31"
@@ -21,12 +21,11 @@ metrics = "0.24.3"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
 mime = "0.3.17"
 mime_guess = "2.0.5"
-pdf-extract = "0.10.0"
 regex = "1.12.2"
 reqwest = { version = "0.13.1", features = ["json", "stream", "rustls-native-certs", "query", "multipart", "rustls-no-provider", "charset", "http2", "system-proxy", "form"], default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision", "raw_value"] }
-rust_decimal = "1.39.0"
+rust_decimal = "1.43.0"
 sea-orm = { version = "1.1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-json", "with-chrono", "with-uuid", "with-rust_decimal"] }
 sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "with-chrono", "with-rust_decimal"] }
 sea-query = "0.32"
