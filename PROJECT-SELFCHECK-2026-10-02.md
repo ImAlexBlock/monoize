@@ -109,7 +109,8 @@ The final fix invalidates after commit and checks a second routing store's indep
 The corruption fixture also invalidates explicitly and verifies failed-rebuild recovery.
 The following run then exposed a workflow fixture defect: the request-log database had
 no schema before a query that joins Provider tables. The workflow now applies the full
-migration chain to each of the five non-migration regression databases before testing them.
+migration chain before the request-log query and supplies its four missing temporary columns.
+The organization aggregate regression retains its empty-database guard and applies migrations itself.
 Run the full workflow on these final changes before accepting the release.
 
 | Check | Known result | Limit |

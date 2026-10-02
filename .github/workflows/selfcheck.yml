@@ -57,11 +57,11 @@ jobs:
           for database in migration dashboard org_endpoint request_logs org_aggregate replica; do
             createdb -h 127.0.0.1 -U postgres "selfcheck_$database"
           done
-      - name: Apply migrations to every PostgreSQL regression database
+      - name: Prepare PostgreSQL regression schemas
         env:
           MONOIZE_TEST_POSTGRES_PASSWORD: selfcheck-only
         run: |
-          for database in dashboard org_endpoint request_logs org_aggregate replica; do
+          for database in dashboard org_endpoint request_logs replica; do
             MONOIZE_TEST_POSTGRES_DSN="postgres://postgres:${MONOIZE_TEST_POSTGRES_PASSWORD}@127.0.0.1:5432/selfcheck_${database}" \
               cargo test --locked --test pg_migration_smoke -- --nocapture
           done
