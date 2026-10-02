@@ -4312,6 +4312,52 @@ fn affinity_test_attempt(
 }
 
 #[test]
+fn empty_cross_family_encoding_preserves_native_responses_continuation() {
+    let native = affinity_test_attempt(
+        "native-provider",
+        "native-channel",
+        crate::monoize_routing::AffinityFailbackMode::Sticky,
+        0,
+    );
+    let mut cross = native.clone();
+    cross.provider_type = ProviderType::ChatCompletion;
+
+    for reference in [
+        json!({"previous_response_id": "resp_prior"}),
+        json!({"conversation": "conv_prior"}),
+    ] {
+        let mut body = reference.clone();
+        body["model"] = json!("gpt-affinity");
+        body["input"] = json!([{
+            "type": "function_call_output",
+            "call_id": "call_prior",
+            "output": "result"
+        }]);
+        let original = urp::decode::openai_responses::decode_request(&body).expect("decode");
+        let error = nonstream::encode_request_for_provider(
+            &mut original.clone(),
+            &cross,
+            DownstreamProtocol::Responses,
+        )
+        .expect_err("a cross-family result without its call must become empty");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "empty_input_after_conversion");
+        assert!(!error.routing_exhausted);
+
+        let encoded = nonstream::encode_request_for_provider(
+            &mut original.clone(),
+            &native,
+            DownstreamProtocol::Responses,
+        )
+        .expect("the original stateful request remains encodable for Responses");
+        assert_eq!(encoded["input"], body["input"]);
+        for (key, value) in reference.as_object().unwrap() {
+            assert_eq!(&encoded[key], value);
+        }
+    }
+}
+
+#[test]
 fn session_affinity_resolution_priority_matches_spec() {
     let body = serde_json::json!({
         "prompt_cache_key": "from-cache-key",
