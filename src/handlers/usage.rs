@@ -522,8 +522,8 @@ pub(crate) fn parse_usage_from_chat_object(obj: &Value) -> Option<urp::Usage> {
         usage.get("cache_read_input_tokens"),
     ]
     .into_iter()
-    .find_map(|value| value.and_then(crate::urp::decode::value_to_u64))
-    .filter(|&value| value > 0)
+    .filter_map(|value| value.and_then(crate::urp::decode::value_to_u64))
+    .find(|&value| value > 0)
     .unwrap_or(0);
     let cache_creation_tokens = usage
         .get("prompt_tokens_details")

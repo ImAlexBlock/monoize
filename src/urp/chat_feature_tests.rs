@@ -1481,6 +1481,109 @@ async fn chat_finish_reason_matrix_preserves_partial_output_and_usage_all_modes(
     }
 }
 
+#[tokio::test]
+async fn chat_cache_read_aliases_match_stream_and_nonstream() {
+    for (fields, expected_cached) in [
+        (json!({"prompt_tokens_details": {"cached_tokens": 7}}), 7),
+        (json!({"input_tokens_details": {"cached_tokens": 30}}), 30),
+        (json!({"prompt_cache_hit_tokens": 60}), 60),
+        (json!({"input_cache_read": 50}), 50),
+        (json!({"cache_read_input_tokens": 40}), 40),
+        (
+            json!({"prompt_tokens_details": {"cached_tokens": 0}, "input_tokens_details": {"cached_tokens": 30}}),
+            30,
+        ),
+        (
+            json!({"prompt_tokens_details": {}, "input_tokens_details": {"cached_tokens": 30}}),
+            30,
+        ),
+        (
+            json!({"prompt_tokens_details": {"cached_tokens": 0, "future_detail": "preserved"}, "input_tokens_details": {"cached_tokens": 0}, "prompt_cache_hit_tokens": 60}),
+            60,
+        ),
+        (
+            json!({"prompt_cache_hit_tokens": 0, "input_cache_read": 50, "cache_read_input_tokens": 40}),
+            50,
+        ),
+        (
+            json!({"prompt_tokens_details": {"cached_tokens": 7}, "input_tokens_details": {"cached_tokens": 30}, "prompt_cache_hit_tokens": 60}),
+            7,
+        ),
+        (
+            json!({"prompt_tokens_details": {"cached_tokens": null}, "input_tokens_details": {"cached_tokens": "30"}}),
+            30,
+        ),
+        (
+            json!({"prompt_cache_hit_tokens": "invalid", "input_cache_read": "50"}),
+            50,
+        ),
+        (
+            json!({"prompt_cache_hit_tokens": -1, "input_cache_read": 1.5, "cache_read_input_tokens": 40}),
+            40,
+        ),
+        (
+            json!({"prompt_tokens_details": {"cached_tokens": 0}, "prompt_cache_hit_tokens": 0}),
+            0,
+        ),
+        (json!({}), 0),
+    ] {
+        let mut wire_usage = fields.clone();
+        let usage_object = wire_usage.as_object_mut().unwrap();
+        usage_object.insert("prompt_tokens".into(), json!(100));
+        usage_object.insert("completion_tokens".into(), json!(7));
+        usage_object.insert(
+            "future_cache_metadata".into(),
+            json!({"marker": "preserved"}),
+        );
+        let mut native = response(json!({"role": "assistant", "content": "ok"}), "stop");
+        native["usage"] = wire_usage.clone();
+        let decoded = decode::decode_response(&native).unwrap();
+        let events = decode_stream(vec![
+            json!({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}),
+            json!({"choices": [], "usage": wire_usage}),
+        ])
+        .await;
+
+        for actual in [decoded.clone(), terminal(&events)] {
+            let usage = actual.usage.as_ref().unwrap();
+            assert_eq!(usage.input_tokens, 100, "{fields}");
+            assert_eq!(usage.output_tokens, 7, "{fields}");
+            assert_eq!(
+                usage.cached_tokens().unwrap_or(0),
+                expected_cached,
+                "{fields}"
+            );
+            assert_eq!(
+                usage.extra_body["future_cache_metadata"],
+                json!({"marker": "preserved"})
+            );
+            let encoded = encode::encode_response(&actual, "chat-test");
+            assert_eq!(
+                encoded["usage"]["prompt_tokens_details"]["cached_tokens"], expected_cached,
+                "{fields}"
+            );
+            for alias in [
+                "prompt_cache_hit_tokens",
+                "input_cache_read",
+                "cache_read_input_tokens",
+            ] {
+                if let Some(value) = fields.get(alias) {
+                    assert_eq!(&encoded["usage"][alias], value, "{fields}");
+                }
+            }
+            if fields["prompt_tokens_details"]
+                .get("future_detail")
+                .is_some()
+            {
+                assert_eq!(
+                    encoded["usage"]["prompt_tokens_details"]["future_detail"],
+                    "preserved"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn chat_malformed_requests_and_nonstream_errors_are_rejected() {
     for stream in [false, true] {

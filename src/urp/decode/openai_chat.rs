@@ -107,14 +107,35 @@ impl From<OpenAiChatUsage> for Usage {
             retain_wire_extra_fields(&mut details.extra);
         }
 
-        let input_details = prompt_tokens_details
+        let cache_read_tokens = [
+            prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            input_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            extra
+                .get("prompt_cache_hit_tokens")
+                .and_then(crate::urp::decode::value_to_u64),
+            extra
+                .get("input_cache_read")
+                .and_then(crate::urp::decode::value_to_u64),
+            extra
+                .get("cache_read_input_tokens")
+                .and_then(crate::urp::decode::value_to_u64),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|&value| value > 0)
+        .unwrap_or(0);
+        let mut input_details = prompt_tokens_details
             .as_ref()
             .or(input_tokens_details.as_ref())
             .and_then(|details| {
                 let cache_creation_tokens = details
                     .cache_creation_tokens
                     .max(details.cache_write_tokens);
-                if details.cached_tokens > 0
+                if cache_read_tokens > 0
                     || cache_creation_tokens > 0
                     || details.tool_prompt_tokens > 0
                     || crate::urp::usage::modality(&details.extra).is_some()
@@ -122,7 +143,7 @@ impl From<OpenAiChatUsage> for Usage {
                     Some(InputDetails {
                         tool_prompt_modality_breakdown: None,
                         standard_tokens: 0,
-                        cache_read_tokens: details.cached_tokens,
+                        cache_read_tokens,
                         cache_read_modality_breakdown: None,
                         cache_creation_tokens,
                         cache_creation_5m_tokens: 0,
@@ -134,6 +155,12 @@ impl From<OpenAiChatUsage> for Usage {
                     None
                 }
             });
+        if input_details.is_none() && cache_read_tokens > 0 {
+            input_details = Some(InputDetails {
+                cache_read_tokens,
+                ..InputDetails::default()
+            });
+        }
 
         let output_details = completion_tokens_details
             .as_ref()
