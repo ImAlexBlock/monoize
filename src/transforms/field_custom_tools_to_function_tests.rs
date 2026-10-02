@@ -443,7 +443,7 @@ fn unnamed_function_header_is_buffered_until_completion_identifies_owned_tool() 
     let output = stream(done(3, unnamed), &cfg, &conversions, &mut state);
     assert_eq!(output.len(), 3);
     assert_eq!(value(&output[0])["header"]["tool_type"], "custom");
-    assert_eq!(value(&output[0])["extra_body"]["trace"], 1);
+    assert_eq!(value(&output[0])["trace"], 1);
     assert_eq!(value(&output[2])["node"]["tool_type"], "custom");
     assert_eq!(value(&output[2])["node"]["arguments"], "text");
 }
