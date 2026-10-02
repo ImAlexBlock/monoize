@@ -15,6 +15,7 @@ async fn context(provider: ProviderType, path: &std::path::Path) -> TransformRun
         ),
         http_client: reqwest::Client::new(),
         upstream_provider_type: Some(provider),
+        custom_tool_conversions: Default::default(),
     }
 }
 

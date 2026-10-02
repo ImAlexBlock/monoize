@@ -1,16 +1,16 @@
 use crate::transforms::{
-    NoState, Phase, Transform, TransformConfig, TransformEntry, TransformError,
-    TransformRuntimeContext, TransformScope, TransformState, UrpData,
+    Phase, Transform, TransformConfig, TransformEntry, TransformError, TransformRuntimeContext,
+    TransformScope, TransformState, UrpData,
 };
 use crate::urp::{
-    FunctionDefinition, Node, NodeHeader, ToolCallType, ToolChoice, ToolDefinition, UrpRequest,
-    UrpResponse, UrpStreamEvent,
+    FunctionDefinition, Node, NodeDelta, NodeHeader, ToolCallType, ToolChoice, ToolDefinition,
+    UrpRequest, UrpResponse, UrpStreamEvent,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const DEFAULT_NAMES: &[&str] = &["apply_patch"];
 const INPUT_KEYS: &[&str] = &["input", "patch", "command", "content"];
@@ -25,6 +25,74 @@ struct RawConfig {
 struct Config {
     names: HashSet<String>,
     convert_all: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ToolKey {
+    namespace: Option<String>,
+    name: String,
+}
+
+impl ToolKey {
+    fn new(namespace: Option<&str>, name: &str) -> Self {
+        Self {
+            namespace: namespace.map(str::to_string),
+            name: name.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct CustomToolConversions {
+    converted: HashSet<ToolKey>,
+    known: HashSet<ToolKey>,
+    native: HashSet<ToolKey>,
+    request_calls: HashMap<String, ToolKey>,
+}
+
+impl CustomToolConversions {
+    fn resolve(&self, namespace: Option<&str>, name: &str, cfg: &Config) -> Option<ToolKey> {
+        if !should_convert(cfg, name) {
+            return None;
+        }
+        let key = ToolKey::new(namespace, name);
+        if namespace.is_some() {
+            return self.converted.contains(&key).then_some(key);
+        }
+        let mut candidates = self.known.iter().filter(|key| key.name == name);
+        let candidate = candidates.next()?;
+        if candidates.next().is_none() && self.converted.contains(candidate) {
+            Some(candidate.clone())
+        } else {
+            None
+        }
+    }
+}
+
+struct BufferedCall {
+    header: NodeHeader,
+    arguments: String,
+}
+
+#[derive(Default)]
+struct StreamState {
+    replacement: Option<Vec<UrpStreamEvent>>,
+    calls: BTreeMap<u32, BufferedCall>,
+    restored_calls: HashMap<String, ToolKey>,
+    completed: HashMap<String, Node>,
+    used_indices: HashSet<u32>,
+    failed: bool,
+    pending: BTreeMap<u32, Vec<UrpStreamEvent>>,
+}
+
+impl TransformState for StreamState {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn finalize_stream_event(&mut self, event: UrpStreamEvent) -> Vec<UrpStreamEvent> {
+        self.replacement.take().unwrap_or_else(|| vec![event])
+    }
 }
 
 impl TransformConfig for Config {
@@ -76,12 +144,6 @@ fn should_convert(cfg: &Config, name: &str) -> bool {
 }
 
 fn wrap_input(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(trimmed) {
-        if map.contains_key("input") {
-            return raw.to_string();
-        }
-    }
     json!({ "input": raw }).to_string()
 }
 
@@ -263,44 +325,92 @@ fn hunk_is_noop(hunk: &[&str]) -> bool {
     has_change_op && minus == plus
 }
 
-fn function_parameters() -> Value {
+fn function_parameters(name: &str) -> Value {
+    let description = if name == "apply_patch" {
+        "The entire apply_patch document. First line must be exactly `*** Begin Patch`. Last line must be exactly `*** End Patch`. New files use `*** Add File: path` and each content line starts with `+`. Existing files use `*** Update File: path` with `@@` hunks: unchanged lines start with one space, `-` deletes, `+` inserts. Do not copy an unchanged line as both `-` and `+`. Do not rewrite an existing file as Add File."
+    } else {
+        "The complete input string for this custom tool."
+    };
     json!({
         "type": "object",
         "properties": {
             "input": {
                 "type": "string",
-                "description": "The entire apply_patch document. First line must be exactly `*** Begin Patch`. Last line must be exactly `*** End Patch`. New files use `*** Add File: path` and each content line starts with `+`. Existing files use `*** Update File: path` with `@@` hunks: unchanged lines start with one space, `-` deletes, `+` inserts. Do not copy an unchanged line as both `-` and `+`. Do not rewrite an existing file as Add File."
+                "description": description
             }
         },
         "required": ["input"]
     })
 }
 
-fn convert_tool_to_function(tool: &mut ToolDefinition, cfg: &Config) {
+fn collect_identities(
+    tools: &[ToolDefinition],
+    inherited_namespace: Option<&str>,
+    conversions: &mut CustomToolConversions,
+) {
+    for tool in tools {
+        let namespace = tool.namespace.as_deref().or(inherited_namespace);
+        if tool.tool_type == "namespace" {
+            if let Some(children) = &tool.tools {
+                collect_identities(children, tool.name.as_deref().or(namespace), conversions);
+            }
+        } else if let Some(name) = custom_name(tool) {
+            conversions.known.insert(ToolKey::new(namespace, name));
+        } else if let Some(function) = &tool.function {
+            let key = ToolKey::new(namespace, &function.name);
+            conversions.known.insert(key.clone());
+            if !conversions.converted.contains(&key) {
+                conversions.native.insert(key);
+            }
+        }
+    }
+}
+
+fn convert_tool_to_function(
+    tool: &mut ToolDefinition,
+    inherited_namespace: Option<&str>,
+    cfg: &Config,
+    conversions: &mut CustomToolConversions,
+) {
+    let namespace = tool.namespace.as_deref().or(inherited_namespace);
+    if tool.tool_type == "namespace" {
+        if let Some(children) = tool.tools.as_mut() {
+            let namespace = tool.name.as_deref().or(namespace);
+            for child in children {
+                convert_tool_to_function(child, namespace, cfg, conversions);
+            }
+        }
+        return;
+    }
     let Some(name) = custom_name(tool).map(str::to_string) else {
         return;
     };
     if !should_convert(cfg, &name) {
         return;
     }
+    conversions.converted.insert(ToolKey::new(namespace, &name));
     let custom = tool.custom.take();
-    let description =
-        apply_patch_tool_description(name.as_str(), custom.and_then(|c| c.description));
+    let (description, extra_body) = custom
+        .map(|custom| (custom.description, custom.extra_body))
+        .unwrap_or_default();
+    let description = apply_patch_tool_description(name.as_str(), description);
     tool.tool_type = "function".to_string();
     tool.name = Some(name.clone());
     tool.function = Some(FunctionDefinition {
         response_schema: None,
+        parameters: Some(function_parameters(&name)),
         name,
         description,
-        parameters: Some(function_parameters()),
-        strict: None,
-        extra_body: Default::default(),
+        strict: Some(false),
+        extra_body,
     });
 }
 
-fn convert_node_request(node: &mut Node, cfg: &Config) {
+fn convert_node_request(node: &mut Node, cfg: &Config, conversions: &mut CustomToolConversions) {
     let Node::ToolCall {
         tool_type,
+        namespace,
+        call_id,
         name,
         arguments,
         ..
@@ -311,108 +421,535 @@ fn convert_node_request(node: &mut Node, cfg: &Config) {
     if *tool_type != ToolCallType::Custom || !should_convert(cfg, name) {
         return;
     }
+    let key = ToolKey::new(namespace.as_deref(), name);
+    conversions.converted.insert(key.clone());
+    conversions.request_calls.insert(call_id.clone(), key);
     *tool_type = ToolCallType::Function;
     *arguments = wrap_input(arguments);
 }
 
-fn convert_node_response(node: &mut Node, cfg: &Config) {
+fn convert_node_response(
+    node: &mut Node,
+    cfg: &Config,
+    conversions: &CustomToolConversions,
+    calls: &mut HashMap<String, ToolKey>,
+) -> bool {
     let Node::ToolCall {
         tool_type,
+        namespace,
+        call_id,
         name,
         arguments,
         ..
     } = node
     else {
-        return;
+        return false;
     };
-    if !should_convert(cfg, name) {
-        return;
+    if *tool_type != ToolCallType::Function {
+        return false;
     }
-    if *tool_type == ToolCallType::Function {
-        *tool_type = ToolCallType::Custom;
-        *arguments = unwrap_input(arguments);
-    }
+    let Some(key) = calls
+        .get(call_id)
+        .filter(|key| {
+            key.name == *name
+                && namespace
+                    .as_ref()
+                    .is_none_or(|namespace| Some(namespace) == key.namespace.as_ref())
+        })
+        .cloned()
+        .or_else(|| conversions.resolve(namespace.as_deref(), name, cfg))
+    else {
+        return false;
+    };
+    *namespace = key.namespace.clone();
+    calls.insert(call_id.clone(), key);
+    *tool_type = ToolCallType::Custom;
+    *arguments = unwrap_input(arguments);
     if name == "apply_patch" {
         *arguments = normalize_apply_patch(arguments);
     }
+    true
 }
 
-fn convert_header_response(header: &mut NodeHeader, cfg: &Config) {
+fn convert_header_response(
+    header: &mut NodeHeader,
+    cfg: &Config,
+    conversions: &CustomToolConversions,
+    calls: &mut HashMap<String, ToolKey>,
+) -> bool {
     let NodeHeader::ToolCall {
-        tool_type, name, ..
+        tool_type,
+        namespace,
+        call_id,
+        name,
+        ..
+    } = header
+    else {
+        return false;
+    };
+    if *tool_type != ToolCallType::Function {
+        return false;
+    }
+    let Some(key) = conversions.resolve(namespace.as_deref(), name, cfg) else {
+        return false;
+    };
+    *namespace = key.namespace.clone();
+    calls.insert(call_id.clone(), key);
+    *tool_type = ToolCallType::Custom;
+    true
+}
+
+fn rewrite_tool_choice_request(value: &mut Value, converted: &HashSet<ToolKey>) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    match obj.get("type").and_then(Value::as_str) {
+        Some("custom") => {
+            let nested = obj.get("custom").and_then(Value::as_object);
+            let name = nested
+                .and_then(|custom| custom.get("name"))
+                .or_else(|| obj.get("name"))
+                .and_then(Value::as_str);
+            let namespace = obj.get("namespace").and_then(Value::as_str).or_else(|| {
+                nested
+                    .and_then(|custom| custom.get("namespace"))
+                    .and_then(Value::as_str)
+            });
+            if name.is_some_and(|name| converted.contains(&ToolKey::new(namespace, name))) {
+                obj.insert("type".to_string(), json!("function"));
+                if let Some(custom) = obj.remove("custom") {
+                    obj.insert("function".to_string(), custom);
+                }
+            }
+        }
+        Some("allowed_tools") => {
+            if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+                for tool in tools {
+                    rewrite_tool_choice_request(tool, converted);
+                }
+            }
+            if let Some(tools) = obj
+                .get_mut("allowed_tools")
+                .and_then(Value::as_object_mut)
+                .and_then(|allowed| allowed.get_mut("tools"))
+                .and_then(Value::as_array_mut)
+            {
+                for tool in tools {
+                    rewrite_tool_choice_request(tool, converted);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_request(
+    req: &mut UrpRequest,
+    cfg: &Config,
+    conversions: &mut CustomToolConversions,
+) -> Result<(), TransformError> {
+    if let Some(tools) = &req.tools {
+        collect_identities(tools, None, conversions);
+    }
+    for node in &req.input {
+        if let Node::ToolCall {
+            namespace,
+            name,
+            tool_type,
+            ..
+        } = node
+        {
+            let key = ToolKey::new(namespace.as_deref(), name);
+            conversions.known.insert(key.clone());
+            if *tool_type == ToolCallType::Function && !conversions.converted.contains(&key) {
+                conversions.native.insert(key);
+            }
+        }
+    }
+    let mut candidates = CustomToolConversions::default();
+    if let Some(tools) = &req.tools {
+        let mut tools = tools.clone();
+        for tool in &mut tools {
+            convert_tool_to_function(tool, None, cfg, &mut candidates);
+        }
+    }
+    for node in &req.input {
+        if let Node::ToolCall {
+            namespace,
+            name,
+            tool_type: ToolCallType::Custom,
+            ..
+        } = node
+            && should_convert(cfg, name)
+        {
+            candidates
+                .converted
+                .insert(ToolKey::new(namespace.as_deref(), name));
+        }
+    }
+    if let Some(key) = candidates
+        .converted
+        .intersection(&conversions.native)
+        .next()
+    {
+        return Err(TransformError::Apply(format!(
+            "custom tool conversion conflicts with native function identity: {:?}/{}",
+            key.namespace, key.name,
+        )));
+    }
+    let mut descriptor_keys = CustomToolConversions::default();
+    if let Some(tools) = req.tools.as_mut() {
+        for tool in tools {
+            convert_tool_to_function(tool, None, cfg, &mut descriptor_keys);
+        }
+    }
+    conversions
+        .converted
+        .extend(descriptor_keys.converted.iter().cloned());
+    for node in &req.input {
+        if let Node::ToolCall {
+            tool_type: ToolCallType::Custom,
+            namespace,
+            call_id,
+            name,
+            ..
+        } = node
+            && should_convert(cfg, name)
+        {
+            let key = ToolKey::new(namespace.as_deref(), name);
+            conversions.converted.insert(key.clone());
+            conversions.request_calls.insert(call_id.clone(), key);
+        }
+    }
+    for node in &mut req.input {
+        convert_node_request(node, cfg, conversions);
+    }
+    for node in &mut req.input {
+        if let Node::ToolResult {
+            tool_type,
+            namespace,
+            name,
+            call_id,
+            ..
+        } = node
+            && *tool_type == ToolCallType::Custom
+            && (conversions.request_calls.contains_key(call_id)
+                || name.as_deref().is_some_and(|name| {
+                    descriptor_keys
+                        .converted
+                        .contains(&ToolKey::new(namespace.as_deref(), name))
+                }))
+        {
+            *tool_type = ToolCallType::Function;
+        }
+    }
+    if let Some(ToolChoice::Specific(value)) = req.tool_choice.as_mut() {
+        rewrite_tool_choice_request(value, &descriptor_keys.converted);
+    }
+    Ok(())
+}
+
+fn convert_result_response(
+    node: &mut Node,
+    cfg: &Config,
+    conversions: &CustomToolConversions,
+    calls: &HashMap<String, ToolKey>,
+) {
+    let Node::ToolResult {
+        tool_type,
+        namespace,
+        name,
+        call_id,
+        ..
+    } = node
+    else {
+        return;
+    };
+    if *tool_type != ToolCallType::Function {
+        return;
+    }
+    let key = calls.get(call_id).cloned().or_else(|| {
+        name.as_deref()
+            .and_then(|name| conversions.resolve(namespace.as_deref(), name, cfg))
+    });
+    if let Some(key) = key {
+        *tool_type = ToolCallType::Custom;
+        *namespace = key.namespace;
+    }
+}
+
+fn convert_result_header_response(
+    header: &mut NodeHeader,
+    cfg: &Config,
+    conversions: &CustomToolConversions,
+    calls: &HashMap<String, ToolKey>,
+) {
+    let NodeHeader::ToolResult {
+        tool_type,
+        namespace,
+        name,
+        call_id,
+        ..
     } = header
     else {
         return;
     };
-    if *tool_type != ToolCallType::Function || !should_convert(cfg, name) {
+    if *tool_type != ToolCallType::Function {
         return;
     }
-    *tool_type = ToolCallType::Custom;
-}
-
-fn rewrite_tool_choice_request(value: &mut Value, cfg: &Config) {
-    match value {
-        Value::Object(obj) => {
-            let type_is_custom = obj.get("type").and_then(Value::as_str) == Some("custom");
-            let name = obj.get("name").and_then(Value::as_str).map(str::to_string);
-            if type_is_custom {
-                if let Some(name) = name.as_deref() {
-                    if should_convert(cfg, name) {
-                        obj.insert("type".to_string(), Value::String("function".to_string()));
-                    }
-                }
-            }
-            for nested in obj.values_mut() {
-                rewrite_tool_choice_request(nested, cfg);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                rewrite_tool_choice_request(item, cfg);
-            }
-        }
-        _ => {}
+    let key = calls.get(call_id).cloned().or_else(|| {
+        name.as_deref()
+            .and_then(|name| conversions.resolve(namespace.as_deref(), name, cfg))
+    });
+    if let Some(key) = key {
+        *tool_type = ToolCallType::Custom;
+        *namespace = key.namespace;
     }
 }
 
-fn apply_request(req: &mut UrpRequest, cfg: &Config) {
-    if let Some(tools) = req.tools.as_mut() {
-        for tool in tools {
-            convert_tool_to_function(tool, cfg);
-        }
-    }
-    for node in &mut req.input {
-        convert_node_request(node, cfg);
-    }
-    if let Some(ToolChoice::Specific(value)) = req.tool_choice.as_mut() {
-        rewrite_tool_choice_request(value, cfg);
-    }
-}
-
-fn apply_response(resp: &mut UrpResponse, cfg: &Config) {
+fn apply_response(resp: &mut UrpResponse, cfg: &Config, conversions: &CustomToolConversions) {
+    let mut calls = HashMap::new();
     for node in &mut resp.output {
-        convert_node_response(node, cfg);
+        convert_node_response(node, cfg, conversions, &mut calls);
+    }
+    for node in &mut resp.output {
+        convert_result_response(node, cfg, conversions, &calls);
     }
 }
 
-fn apply_stream(event: &mut UrpStreamEvent, cfg: &Config) {
+fn tool_header(node: &Node) -> Option<NodeHeader> {
+    let Node::ToolCall {
+        namespace,
+        signature,
+        id,
+        tool_type,
+        call_id,
+        name,
+        ..
+    } = node
+    else {
+        return None;
+    };
+    Some(NodeHeader::ToolCall {
+        namespace: namespace.clone(),
+        signature: signature.clone(),
+        id: id.clone(),
+        tool_type: *tool_type,
+        call_id: call_id.clone(),
+        name: name.clone(),
+    })
+}
+
+fn completion_events(node_index: u32, node: &Node, include_start: bool) -> Vec<UrpStreamEvent> {
+    let Node::ToolCall { arguments, .. } = node else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    if include_start && let Some(header) = tool_header(node) {
+        events.push(UrpStreamEvent::NodeStart {
+            node_index,
+            header,
+            extra_body: HashMap::new(),
+        });
+    }
+    events.push(UrpStreamEvent::NodeDelta {
+        node_index,
+        delta: NodeDelta::ToolCallArguments {
+            arguments: arguments.clone(),
+        },
+        usage: None,
+        extra_body: HashMap::new(),
+    });
+    events
+}
+
+fn reuse_completed_arguments(node: &mut Node, completed: &HashMap<String, Node>) -> bool {
+    let Node::ToolCall {
+        namespace,
+        tool_type,
+        call_id,
+        name,
+        arguments,
+        ..
+    } = node
+    else {
+        return false;
+    };
+    let Some(Node::ToolCall {
+        namespace: original_namespace,
+        name: original_name,
+        arguments: original_arguments,
+        ..
+    }) = completed.get(call_id)
+    else {
+        return false;
+    };
+    if name != original_name {
+        return false;
+    }
+    *namespace = original_namespace.clone();
+    *tool_type = ToolCallType::Custom;
+    *arguments = original_arguments.clone();
+    true
+}
+
+fn supply_buffered_arguments(node: &mut Node, buffered: &BufferedCall) {
+    if let Node::ToolCall { arguments, .. } = node
+        && arguments.is_empty()
+        && !buffered.arguments.is_empty()
+    {
+        *arguments = buffered.arguments.clone();
+    }
+}
+
+fn apply_stream(
+    event: &mut UrpStreamEvent,
+    cfg: &Config,
+    conversions: &CustomToolConversions,
+    state: &mut StreamState,
+) {
+    if state.failed {
+        state.replacement = Some(Vec::new());
+        return;
+    }
+    if let UrpStreamEvent::NodeStart { node_index, .. }
+    | UrpStreamEvent::NodeDelta { node_index, .. }
+    | UrpStreamEvent::NodeDone { node_index, .. } = event
+    {
+        state.used_indices.insert(*node_index);
+    }
+    let mut before = Vec::new();
     match event {
-        UrpStreamEvent::NodeStart { header, .. } => convert_header_response(header, cfg),
-        UrpStreamEvent::NodeDelta { delta, .. } => {
-            if let crate::urp::NodeDelta::ToolCallArguments { arguments } = delta {
-                let unwrapped = normalize_apply_patch(&unwrap_input(arguments));
-                if unwrapped != *arguments {
-                    *arguments = unwrapped;
+        UrpStreamEvent::NodeStart {
+            node_index, header, ..
+        } => {
+            state.used_indices.insert(*node_index);
+            let unnamed_function = matches!(header, NodeHeader::ToolCall {
+                tool_type: ToolCallType::Function,
+                name,
+                ..
+            } if name.is_empty());
+            if unnamed_function && (!conversions.converted.is_empty() || cfg.convert_all) {
+                state.pending.insert(*node_index, vec![event.clone()]);
+                state.replacement = Some(Vec::new());
+                return;
+            }
+            if convert_header_response(header, cfg, conversions, &mut state.restored_calls) {
+                state.calls.insert(
+                    *node_index,
+                    BufferedCall {
+                        header: header.clone(),
+                        arguments: String::new(),
+                    },
+                );
+            }
+            convert_result_header_response(header, cfg, conversions, &state.restored_calls);
+        }
+        UrpStreamEvent::NodeDelta {
+            node_index,
+            delta: NodeDelta::ToolCallArguments { arguments },
+            usage,
+            extra_body,
+        } => {
+            if let Some(pending) = state.pending.get_mut(node_index) {
+                pending.push(event.clone());
+                state.replacement = Some(Vec::new());
+                return;
+            }
+            if let Some(buffered) = state.calls.get_mut(node_index) {
+                buffered.arguments.push_str(arguments);
+                arguments.clear();
+                if usage.is_none() && extra_body.is_empty() {
+                    state.replacement = Some(Vec::new());
                 }
             }
         }
-        UrpStreamEvent::NodeDone { node, .. } => convert_node_response(node, cfg),
-        UrpStreamEvent::ResponseDone { output, .. } => {
-            for node in output {
-                convert_node_response(node, cfg);
+        UrpStreamEvent::NodeDone {
+            node_index, node, ..
+        } => {
+            let pending = state.pending.remove(node_index);
+            let buffered = state.calls.remove(node_index);
+            if let Some(buffered) = &buffered {
+                supply_buffered_arguments(node, buffered);
             }
+            if convert_node_response(node, cfg, conversions, &mut state.restored_calls) {
+                before =
+                    completion_events(*node_index, node, pending.is_some() || buffered.is_none());
+                if let (Some(pending), Some(UrpStreamEvent::NodeStart { extra_body, .. })) =
+                    (pending.as_ref(), before.first_mut())
+                    && let Some(UrpStreamEvent::NodeStart {
+                        extra_body: original_extra,
+                        ..
+                    }) = pending.first()
+                {
+                    *extra_body = original_extra.clone();
+                }
+                if let Node::ToolCall { call_id, .. } = node {
+                    state.completed.insert(call_id.clone(), node.clone());
+                }
+                state.used_indices.insert(*node_index);
+            } else if let Some(mut pending) = pending {
+                before.append(&mut pending);
+            }
+            convert_result_response(node, cfg, conversions, &state.restored_calls);
+        }
+        UrpStreamEvent::ResponseDone { output, .. } => {
+            for node in output.iter_mut() {
+                if reuse_completed_arguments(node, &state.completed) {
+                    continue;
+                }
+                let node_index = if let Node::ToolCall { call_id, .. } = node {
+                    state
+                        .calls
+                        .iter()
+                        .find_map(|(index, buffered)| match &buffered.header {
+                            NodeHeader::ToolCall {
+                                call_id: candidate, ..
+                            } if candidate == call_id => Some(*index),
+                            _ => None,
+                        })
+                } else {
+                    None
+                };
+                if let Some(buffered) = node_index.and_then(|index| state.calls.get(&index)) {
+                    supply_buffered_arguments(node, buffered);
+                }
+                if !convert_node_response(node, cfg, conversions, &mut state.restored_calls) {
+                    continue;
+                }
+                let index = node_index.unwrap_or_else(|| {
+                    (0..=u32::MAX)
+                        .find(|index| !state.used_indices.contains(index))
+                        .expect("stream node index available")
+                });
+                state.used_indices.insert(index);
+                state.calls.remove(&index);
+                before.extend(completion_events(index, node, node_index.is_none()));
+                before.push(UrpStreamEvent::NodeDone {
+                    node_index: index,
+                    node: node.clone(),
+                    usage: None,
+                    extra_body: HashMap::new(),
+                });
+                if let Node::ToolCall { call_id, .. } = node {
+                    state.completed.insert(call_id.clone(), node.clone());
+                }
+            }
+            for node in output {
+                convert_result_response(node, cfg, conversions, &state.restored_calls);
+            }
+            state.calls.clear();
+        }
+        UrpStreamEvent::Error { .. } => {
+            state.calls.clear();
+            state.restored_calls.clear();
+            state.failed = true;
         }
         _ => {}
+    }
+    if !before.is_empty() {
+        before.push(event.clone());
+        state.replacement = Some(before);
     }
 }
 
@@ -478,16 +1015,16 @@ impl Transform for FieldCustomToolsToFunctionTransform {
     }
 
     fn init_state(&self) -> Box<dyn TransformState> {
-        Box::new(NoState)
+        Box::new(StreamState::default())
     }
 
     async fn apply(
         &self,
         data: UrpData<'_>,
         phase: Phase,
-        _context: &TransformRuntimeContext,
+        context: &TransformRuntimeContext,
         config: &dyn TransformConfig,
-        _state: &mut dyn TransformState,
+        state: &mut dyn TransformState,
     ) -> Result<(), TransformError> {
         let cfg = config
             .as_any()
@@ -496,10 +1033,20 @@ impl Transform for FieldCustomToolsToFunctionTransform {
         if !cfg.convert_all && cfg.names.is_empty() {
             return Ok(());
         }
+        let state = state
+            .as_any_mut()
+            .downcast_mut::<StreamState>()
+            .ok_or_else(|| TransformError::Apply("internal state type mismatch".into()))?;
+        let mut conversions = context
+            .custom_tool_conversions
+            .lock()
+            .map_err(|_| TransformError::Apply("custom tool conversion state poisoned".into()))?;
         match (phase, data) {
-            (Phase::Request, UrpData::Request(req)) => apply_request(req, cfg),
-            (Phase::Response, UrpData::Response(resp)) => apply_response(resp, cfg),
-            (Phase::Response, UrpData::Stream(event)) => apply_stream(event, cfg),
+            (Phase::Request, UrpData::Request(req)) => apply_request(req, cfg, &mut conversions)?,
+            (Phase::Response, UrpData::Response(resp)) => apply_response(resp, cfg, &conversions),
+            (Phase::Response, UrpData::Stream(event)) => {
+                apply_stream(event, cfg, &conversions, state)
+            }
             _ => {}
         }
         Ok(())
@@ -509,3 +1056,7 @@ impl Transform for FieldCustomToolsToFunctionTransform {
 inventory::submit!(TransformEntry {
     factory: || Box::new(FieldCustomToolsToFunctionTransform),
 });
+
+#[cfg(test)]
+#[path = "field_custom_tools_to_function_tests.rs"]
+mod tests;

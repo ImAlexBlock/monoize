@@ -14,6 +14,8 @@ PSC4a. The PostgreSQL request-log semantics test MUST supply every column used b
 
 PSC5. PostgreSQL regressions MUST run after compilation and before the ordinary all-target Rust tests, so schema-fixture failures are reported before the longer integration suite. Every regression and the ordinary suite MUST pass before release. A failed test MUST fail the job. Ignored capacity and image benchmarks are outside the default self-check.
 
+PSC5a. After the ordinary Rust suite, the self-check MUST run `benchmark_disabled_capture_frame_construction` with `--ignored --nocapture`. This isolated microbenchmark MUST report eager and lazy construction counts and elapsed time. The result MUST NOT be presented as gateway throughput or production latency.
+
 PSC6. The frontend job MUST install locked dependencies, run frontend lint and unit tests, run browser fixtures with synthetic loopback data, run type checks through the production build, and run npm launcher tests. Its Node process MUST use a 4096 MiB maximum old-space heap because the default runner heap is insufficient for the current icon imports.
 
 PSC7. The deployment job MUST run Python deployment and release-package tests and the Bash drain tests. Network routing tests MUST run in an isolated Linux network namespace.

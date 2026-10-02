@@ -292,6 +292,7 @@ mod tests {
             image_transform_cache: std::sync::Arc::new(cache),
             http_client: reqwest::Client::new(),
             upstream_provider_type: provider_type,
+            custom_tool_conversions: Default::default(),
         }
     }
 

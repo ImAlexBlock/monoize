@@ -58,6 +58,12 @@ Each positive integer environment value replaces its default, except `MONOIZE_RE
 
 RCD-C15. The captured top-level `request_id` and every identifying string retained in an oversized-attempt placeholder MUST contain at most `256` UTF-8 bytes. Truncation MUST occur on a valid UTF-8 boundary and MUST increase `capture_truncation.omitted_bytes` for the top-level request id.
 
+RCD-C16. The SSE helpers MUST construct capture-only frame strings only when the current task has an active `SseFrameCapture`. They MUST use that task's capture state, including state inherited by `spawn_with_sse_capture`, rather than global settings. With active capture, the recorded frame bytes, ordering, and truncation rules MUST remain unchanged. This rule applies equally to `capture-all` and `capture-only-abnormal` sessions.
+
+RCD-C17. A pass-through streaming attempt MUST clone its transformed URP request and upstream JSON body for later capture only when its request has a capture session. If a session exists, every existing success or error dump path MUST receive the same snapshot taken before the streaming task starts. Capture optimization MUST NOT change downstream bytes, terminal events, settlement, logging, or task completion order.
+
+RCD-C18. Regression coverage MUST compare captured and uncaptured downstream SSE bytes and verify the captured frame sequence. An isolated benchmark MAY compare eager and lazy capture-frame construction with capture disabled. It MUST report frame-construction counts and bytes separately from elapsed time. These measurements MUST NOT be reported as gateway throughput or production latency.
+
 ## 2. Directory and filename
 
 RCD-S1. Dumps MUST be written under a directory named `dumps` inside the Monoize data directory.

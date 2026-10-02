@@ -20,6 +20,7 @@ async fn context(path: &std::path::Path) -> TransformRuntimeContext {
         ),
         http_client: reqwest::Client::new(),
         upstream_provider_type: Some(ProviderType::Messages),
+        custom_tool_conversions: Default::default(),
     }
 }
 

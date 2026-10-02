@@ -6,6 +6,22 @@ fn dumps_dir(ctx: &TestContext) -> std::path::PathBuf {
     db_path.parent().expect("db parent exists").join("dumps")
 }
 
+fn assert_stream_request_snapshots(ctx: &TestContext, dump: &Value, input: &str) {
+    let attempt = &dump["attempts"][0];
+    let transformed = &attempt["transformed_urp_request"];
+    assert_eq!(transformed["model"], "gpt-5-mini");
+    assert_eq!(transformed["stream"], true);
+    assert_eq!(transformed["input"][0]["type"], "text");
+    assert_eq!(transformed["input"][0]["content"], input);
+
+    let upstream_requests = ctx.captured_bodies.lock().expect("upstream requests lock");
+    let (_, sent_body) = upstream_requests
+        .iter()
+        .find(|(protocol, _)| protocol == "responses")
+        .expect("Responses request reached upstream");
+    assert_eq!(&attempt["upstream_request"], sent_body);
+}
+
 async fn enable_request_capture(ctx: &TestContext) {
     let settings = ctx
         .state
@@ -149,6 +165,7 @@ async fn streaming_request_capture_records_downstream_sse_frames() {
         &fs::read(entries.last().expect("dump path")).expect("dump readable"),
     )
     .expect("dump json");
+    assert_stream_request_snapshots(&ctx, &dump, "stream capture");
     let frames = dump["attempts"][0]["downstream_sse_frames"]
         .as_array()
         .expect("frames array");
@@ -205,6 +222,7 @@ async fn streaming_request_capture_records_downstream_error_sse_frames() {
         &fs::read(entries.last().expect("dump path")).expect("dump readable"),
     )
     .expect("dump json");
+    assert_stream_request_snapshots(&ctx, &dump, "stream capture error");
     let frames = dump["attempts"][0]["downstream_sse_frames"]
         .as_array()
         .expect("frames array");

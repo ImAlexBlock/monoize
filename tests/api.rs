@@ -12,6 +12,9 @@ mod balance_compatibility;
 #[path = "api/codex_dual_mode.rs"]
 mod codex_dual_mode;
 
+#[path = "api/custom_tool_adapter.rs"]
+mod custom_tool_adapter;
+
 #[path = "api/routing_models.rs"]
 mod routing_models;
 

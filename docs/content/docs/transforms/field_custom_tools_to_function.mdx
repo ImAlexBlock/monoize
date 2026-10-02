@@ -1,21 +1,55 @@
 ---
 title: "Field: custom tools to function"
-description: Convert Codex freeform/custom tools such as apply_patch into JSON function tools for Grok/CPA-style upstreams, then restore custom calls on the response.
+description: Convert selected custom tools to JSON functions for an upstream that does not support custom tools. Restore converted calls in the response.
 ---
 
-## What it does
+## When to use
 
-Codex 0.15x ships `apply_patch` only as a Responses **custom/freeform** tool (`type: custom` plus a Lark grammar). Grok and CPA-style adapters drop or ignore custom tools, so the model only sees JSON `function` tools such as `exec_command`.
+Enable this transform when an upstream rejects `type: custom` but accepts JSON `function` tools.
+For example, convert a client's freeform `apply_patch` tool for that upstream.
+Keep the Channel protocol setting consistent with the upstream endpoint.
+This transform changes tool definitions; it does not change the selected protocol or URL.
 
-This transform rewrites matching custom tool descriptors to JSON functions on the request, including history `ToolCall` nodes and `tool_choice`, then restores `tool_type = custom` on the response so Codex still receives `custom_tool_call`.
+Add two rules with the same model filter and configuration: one `request` rule and one `response` rule.
+The response rule restores only tools converted during the current upstream attempt.
+A response rule alone does not convert ordinary function calls.
 
-The function schema uses a single required string field `input` holding the full `*** Begin Patch` document. Lark grammar enforcement is not preserved.
+## Behavior
 
-Grok often emits `*** Begin Patch ***` / `*** End Patch ***`. Codex requires the first line to be exactly `*** Begin Patch`. The response phase rewrites those headers (and strips `*** End of File ***` / `<invoke>` wrappers) before Codex parses the patch.
+The request rule converts selected custom tools, including tools inside `namespace.tools`, to JSON functions.
+It wraps each original custom input string in a required string field named `input`.
+It preserves that entire string, even when the string contains JSON.
+It also updates matching tool history, correlated results, and `tool_choice`, including selections inside `allowed_tools`.
 
-Grok also emits Add File bodies as raw file lines. Codex requires each Add File content line to start with `+`. The response phase prefixes `+` on those raw lines. It does not prefix lines that already start with `+`, `-`, or `\`, and it stops prefixing at `@@` hunk headers. Update File hunks keep `-` deletions.
+The response rule restores the converted calls and unwraps their `input` strings.
+It tracks the namespace and name for each conversion.
+Ordinary function tools remain function tools, including when `names` contains `"*"`.
+Declaring a function and a selected custom tool with the same namespace and name rejects the request before forwarding.
+If an upstream omits a namespace, Monoize restores it only when the tool name identifies one distinct tool in the request.
 
-The request schema tells the model to insert with a leading-space context line plus `+` new lines. Do not clone an unchanged line as both `-` and `+`. The response phase drops those identical `-`/`+` hunks so Codex does not accept an empty edit.
+The converted function does not retain custom grammar enforcement, including Lark constraints.
+Use this transform only when a string argument is acceptable for the selected tool.
+
+### Streaming
+
+Arguments for converted calls are buffered until each call completes.
+Monoize then emits the complete custom input string.
+Split JSON escapes and wrapper fragments do not appear as custom input fragments.
+Ordinary function arguments, text, and reasoning continue to stream normally.
+A stream error discards incomplete buffered arguments.
+
+### apply_patch formatting
+
+For a converted `apply_patch` call, the response rule normalizes the complete patch text:
+
+- Normalize patch markers to `*** Begin Patch` and `*** End Patch`.
+- Remove `*** End of File` markers and an outer `<invoke>` wrapper.
+- Prefix raw Add File content lines with `+`. Preserve lines already starting with `+`, `-`, or `\`.
+- Stop Add File prefixing at `@@` headers or a different patch section. Preserve Update File deletions.
+- Remove Update File hunks with identical deleted and inserted lines when the hunk has no context line.
+
+The request schema includes these patch instructions only for `apply_patch`.
+Other tools receive a general string-input schema.
 
 ## Reference
 
@@ -25,28 +59,35 @@ The request schema tells the model to insert with a leading-space context line p
 | Phase | `request`, `response` |
 | Scopes | Provider, Global, API key |
 
-## When to use
-
-- Codex talks to Grok through CPA or another adapter that strips `type: custom`.
-- Add **two** rules with the same config: one `request` rule and one `response` rule.
-- Place the request rule before the upstream encode. Place the response rule so it runs on the decoded Grok stream.
-
 ## Configuration
 
 | Option | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `names` | string[] | No | `["apply_patch"]` | Custom tool names to convert. An empty array disables conversion. Include `"*"` to convert every custom tool. |
+| `names` | string[] | No | `["apply_patch"]` | Exact custom tool names to convert. An empty array disables conversion. `"*"` selects every custom tool. Empty strings are invalid. |
 
-### Example rule
+### Example rules
+
+Replace `target-model` with the model that needs this conversion.
+Use both rules together.
 
 ```json
-{
-  "transform": "field_custom_tools_to_function",
-  "enabled": true,
-  "phase": "request",
-  "models": ["grok-*"],
-  "config": {}
-}
+[
+  {
+    "transform": "field_custom_tools_to_function",
+    "enabled": true,
+    "phase": "request",
+    "models": ["target-model"],
+    "config": { "names": ["apply_patch"] }
+  },
+  {
+    "transform": "field_custom_tools_to_function",
+    "enabled": true,
+    "phase": "response",
+    "models": ["target-model"],
+    "config": { "names": ["apply_patch"] }
+  }
+]
 ```
 
-Use the same config with `"phase": "response"`.
+To convert every custom tool, set `"names": ["*"]` in both rules.
+This setting preserves ordinary function tools.

@@ -129,9 +129,9 @@ tokio::task_local! {
     static CURRENT_SSE_CAPTURE: SseFrameCapture;
 }
 
-pub(crate) async fn capture_sse_frame(frame: String) {
+pub(crate) async fn capture_sse_frame(make_frame: impl FnOnce() -> String) {
     if let Ok(capture) = CURRENT_SSE_CAPTURE.try_with(Clone::clone) {
-        capture.record(frame).await;
+        capture.record(make_frame()).await;
     }
 }
 
@@ -1262,6 +1262,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sse_frame_construction_requires_an_active_task_capture() {
+        capture_sse_frame(|| panic!("uncaptured tasks must not construct capture frames")).await;
+
+        let active = SseFrameCapture::new();
+        let mut constructions = 0;
+        with_sse_capture(active.clone(), async {
+            capture_sse_frame(|| {
+                constructions += 1;
+                "event: delta\ndata: {\"text\":\"你好\\nworld\"}\n\n".to_string()
+            })
+            .await;
+            tokio::spawn(async {
+                capture_sse_frame(|| panic!("unscoped child tasks have no active capture")).await;
+            })
+            .await
+            .expect("unscoped child joins");
+        })
+        .await;
+
+        assert_eq!(constructions, 1);
+        assert_eq!(
+            active.captured_frames().await,
+            vec!["event: delta\ndata: {\"text\":\"你好\\nworld\"}\n\n"]
+        );
+        capture_sse_frame(|| panic!("capture must end with its task-local scope")).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "isolated capture-frame construction benchmark; run with --ignored --nocapture"]
+    async fn benchmark_disabled_capture_frame_construction() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const FRAME_COUNT: usize = 100_000;
+        let payload = "x".repeat(1024);
+        let mut eager_frames = 0;
+        let mut eager_bytes = 0;
+        let eager_started = Instant::now();
+        for _ in 0..FRAME_COUNT {
+            let frame = black_box(format!("event: delta\ndata: {}\n\n", black_box(&payload)));
+            eager_frames += 1;
+            eager_bytes += frame.len();
+            capture_sse_frame(|| frame).await;
+        }
+        let eager_elapsed = eager_started.elapsed();
+
+        let mut lazy_frames = 0;
+        let mut lazy_bytes = 0;
+        let lazy_started = Instant::now();
+        for _ in 0..FRAME_COUNT {
+            capture_sse_frame(|| {
+                let frame = format!("event: delta\ndata: {}\n\n", black_box(&payload));
+                lazy_frames += 1;
+                lazy_bytes += frame.len();
+                black_box(frame)
+            })
+            .await;
+        }
+        let lazy_elapsed = lazy_started.elapsed();
+
+        assert_eq!(eager_frames, FRAME_COUNT);
+        assert_eq!(eager_bytes, FRAME_COUNT * (payload.len() + 21));
+        assert_eq!((lazy_frames, lazy_bytes), (0, 0));
+        println!(
+            "capture_disabled_benchmark {}",
+            json!({
+                "iterations": FRAME_COUNT,
+                "payload_bytes": payload.len(),
+                "eager": {
+                    "constructed_frames": eager_frames,
+                    "constructed_frame_bytes": eager_bytes,
+                    "elapsed_ns": eager_elapsed.as_nanos(),
+                },
+                "lazy": {
+                    "constructed_frames": lazy_frames,
+                    "constructed_frame_bytes": lazy_bytes,
+                    "elapsed_ns": lazy_elapsed.as_nanos(),
+                },
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn spawned_children_share_one_sse_byte_quota() {
         let active = SseFrameCapture::with_limits(RequestCaptureLimits {
             max_attempts: 1,
@@ -1273,10 +1356,10 @@ mod tests {
         CURRENT_SSE_CAPTURE
             .scope(active.clone(), async {
                 let first = spawn_with_sse_capture(async {
-                    capture_sse_frame("aaaaaaaa".to_string()).await;
+                    capture_sse_frame(|| "aaaaaaaa".to_string()).await;
                 });
                 let second = spawn_with_sse_capture(async {
-                    capture_sse_frame("bbbbbbbb".to_string()).await;
+                    capture_sse_frame(|| "bbbbbbbb".to_string()).await;
                 });
                 first.await.unwrap();
                 second.await.unwrap();

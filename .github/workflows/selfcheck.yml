@@ -85,6 +85,8 @@ jobs:
       - name: Test Rust targets with SQLite
         timeout-minutes: 25
         run: cargo test --locked --all-targets -- --skip postgres_
+      - name: Measure disabled capture frame construction
+        run: cargo test --locked --lib benchmark_disabled_capture_frame_construction -- --ignored --nocapture
 
   frontend:
     runs-on: ubuntu-24.04

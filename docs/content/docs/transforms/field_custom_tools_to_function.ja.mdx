@@ -1,21 +1,55 @@
 ---
 title: "フィールド: カスタムツールを function に変換"
-description: Codex の apply_patch などの custom/freeform ツールを JSON function に変換し、Grok/CPA 上流向けに通したうえで、応答では custom 呼び出しに戻します。
+description: 選択した custom ツールを JSON function に変換し、custom 非対応の上流で使用します。応答では変換した呼び出しを元に戻します。
 ---
+
+## 使用する条件
+
+上流が `type: custom` を拒否し、JSON `function` ツールを受け付ける場合に有効にしてください。
+たとえば、クライアントの自由形式の `apply_patch` ツールを上流が受け付ける関数に変換できます。
+Channel のプロトコル設定を上流のエンドポイントに合わせてください。
+この変換はツール定義を変更します。選択したプロトコルや URL は変更しません。
+
+同じモデルフィルターと設定で、`request` と `response` のルールを 1 件ずつ追加してください。
+応答ルールは、現在の上流への試行で実際に変換したツールだけを元に戻します。
+応答ルールだけを有効にしても、通常の関数呼び出しは変換されません。
 
 ## 動作
 
-Codex 0.15x の `apply_patch` は Responses の **custom/freeform** ツール（`type: custom` と Lark 文法）としてだけ送出されます。Grok や CPA 系アダプタは custom ツールを落とすか無視するため、モデル側には `exec_command` のような JSON `function` しか見えません。
+リクエストルールは、選択した custom ツールを JSON function に変換します。`namespace.tools` 内のツールも対象です。
+元の custom 入力文字列を、必須の文字列フィールド `input` で包みます。
+元の文字列が JSON を含む場合も、その文字列全体を保持します。
+対応するツール履歴、関連する結果、`tool_choice` も更新します。`allowed_tools` 内の選択も対象です。
 
-この変換はリクエストで一致する custom ツール記述子を JSON function に書き換え（履歴の `ToolCall` と `tool_choice` を含む）、応答では `tool_type = custom` に戻して Codex が `custom_tool_call` を受け取れるようにします。
+応答ルールは変換した呼び出しを元に戻し、`input` の文字列を取り出します。
+各変換は namespace とツール名で識別します。
+`names` に `"*"` を指定しても、通常の function ツールはそのままです。
+function と変換対象の custom ツールが同じ namespace と名前を持つ場合、転送前にリクエストを拒否します。
+上流が namespace を省略した場合、Monoize は名前からリクエスト内のツールを一意に識別できる場合だけ namespace を復元します。
 
-function のスキーマは必須文字列フィールド `input` のみで、値は `*** Begin Patch` 文書全体です。Lark 制約は保持しません。
+変換後の関数は custom の文法制約を保持しません。Lark の制約も対象外です。
+選択したツールが文字列引数を受け付ける場合だけ使用してください。
 
-Grok は `*** Begin Patch ***` / `*** End Patch ***` を出すことがあります。Codex は先頭行が正確に `*** Begin Patch` であることを要求します。応答フェーズでこれらのヘッダを直し、`*** End of File ***` と `<invoke>` ラッパを取り除きます。
+### ストリーミング
 
-Grok は Add File 本文を生のファイル行として出すこともあります。Codex は Add File の各内容行が `+` で始まることを要求します。応答フェーズではその生の行にだけ `+` を付けます。すでに `+`、`-`、`\` で始まる行は変えません。`@@` hunk ヘッダ以降は付与を止めます。Update File の `-` 削除行は残します。
+変換した呼び出しの引数は、呼び出しが完了するまでバッファに保持します。
+その後、Monoize は custom 入力の文字列全体を送信します。
+JSON のエスケープシーケンスやラッパーが複数の断片に分かれていても、custom 入力の断片には出力しません。
+通常の関数引数、テキスト、推論内容は通常どおりストリーミングされます。
+ストリームでエラーが発生した場合、未完了の引数を破棄します。
 
-リクエストのスキーマは、挿入時に先頭スペースのコンテキスト行と `+` の新規行を使うよう指示します。変更しない行を `-` と `+` の両方に複製しないでください。応答フェーズは同一の `-`/`+` hunk を捨て、Codex が空の編集を成功扱いにしないようにします。
+### apply_patch の形式
+
+変換した `apply_patch` 呼び出しでは、応答ルールが完成したパッチの文字列を整形します。
+
+- パッチのマーカーを `*** Begin Patch` と `*** End Patch` に統一します。
+- `*** End of File` マーカーと外側の `<invoke>` ラッパーを除去します。
+- Add File の接頭辞がない内容行に `+` を付けます。すでに `+`、`-`、`\` で始まる行は保持します。
+- `@@` ヘッダーや別のパッチ区間で Add File の接頭辞付与を止めます。Update File の削除行は保持します。
+- Update File のハンクにコンテキスト行がなく、削除内容と追加内容が同一の場合、そのハンクを除去します。
+
+リクエストのスキーマには、`apply_patch` に限ってこれらのパッチ指示を追加します。
+他のツールには汎用の文字列入力スキーマを使用します。
 
 ## リファレンス
 
@@ -25,27 +59,35 @@ Grok は Add File 本文を生のファイル行として出すこともあり�
 | フェーズ | `request`、`response` |
 | スコープ | Provider、Global、API key |
 
-## 使うとき
-
-- Codex が CPA など `type: custom` を落とすアダプタ経由で Grok に接続している。
-- 同じ config で **2 件** のルールを追加する。`request` と `response`。
-
 ## 設定
 
 | オプション | 型 | 必須 | デフォルト | 説明 |
 | --- | --- | --- | --- | --- |
-| `names` | string[] | いいえ | `["apply_patch"]` | 変換する custom ツール名。空配列は無変換。`"*"` を含めるとすべての custom ツールを変換する。 |
+| `names` | string[] | いいえ | `["apply_patch"]` | custom ツール名を完全一致で選択します。空配列は変換を無効にします。`"*"` はすべての custom ツールを選択します。空文字列は指定できません。 |
 
-### ルール例
+### ルールの例
+
+`target-model` を変換が必要なモデル名に置き換えてください。
+以下の 2 件のルールを一緒に使用してください。
 
 ```json
-{
-  "transform": "field_custom_tools_to_function",
-  "enabled": true,
-  "phase": "request",
-  "models": ["grok-*"],
-  "config": {}
-}
+[
+  {
+    "transform": "field_custom_tools_to_function",
+    "enabled": true,
+    "phase": "request",
+    "models": ["target-model"],
+    "config": { "names": ["apply_patch"] }
+  },
+  {
+    "transform": "field_custom_tools_to_function",
+    "enabled": true,
+    "phase": "response",
+    "models": ["target-model"],
+    "config": { "names": ["apply_patch"] }
+  }
+]
 ```
 
-応答側は同じ config で `"phase": "response"` にする。
+すべての custom ツールを変換するには、両方のルールに `"names": ["*"]` を指定してください。
+この設定でも通常の function ツールは変換されません。

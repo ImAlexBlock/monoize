@@ -1252,6 +1252,7 @@ mod mime_regression_tests {
             ),
             http_client: reqwest::Client::new(),
             upstream_provider_type: None,
+            custom_tool_conversions: Default::default(),
         }
     }
 
@@ -1615,6 +1616,7 @@ mod tests {
             image_transform_cache: std::sync::Arc::new(cache),
             http_client: reqwest::Client::new(),
             upstream_provider_type: None,
+            custom_tool_conversions: Default::default(),
         };
         let input_png = build_png_base64(2048, 128);
         let mut req = UrpRequest {
@@ -1720,6 +1722,7 @@ mod tests {
             image_transform_cache: std::sync::Arc::new(cache),
             http_client: reqwest::Client::new(),
             upstream_provider_type: None,
+            custom_tool_conversions: Default::default(),
         };
         let input_png = build_png_data_url_source();
         let input_data_url = format!("data:image/png;base64,{input_png}");
@@ -1828,6 +1831,7 @@ mod tests {
             image_transform_cache: std::sync::Arc::new(cache),
             http_client: reqwest::Client::new(),
             upstream_provider_type: None,
+            custom_tool_conversions: Default::default(),
         };
         let input_png = build_png_base64(2048, 128);
         let mut resp = UrpResponse {
@@ -1908,6 +1912,7 @@ mod tests {
             image_transform_cache: std::sync::Arc::new(cache),
             http_client: reqwest::Client::new(),
             upstream_provider_type: None,
+            custom_tool_conversions: Default::default(),
         };
         let rules = vec![crate::transforms::TransformRuleConfig {
             transform: "image_compress_output".to_string(),

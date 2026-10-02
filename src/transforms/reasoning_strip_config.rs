@@ -109,6 +109,7 @@ mod tests {
             ),
             http_client: reqwest::Client::new(),
             upstream_provider_type: None,
+            custom_tool_conversions: Default::default(),
         }
     }
 

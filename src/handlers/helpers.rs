@@ -133,6 +133,9 @@ pub(super) async fn apply_transform_rules_request(
     rules: &[TransformRuleConfig],
     match_model: &str,
     upstream_provider_type: Option<ProviderType>,
+    custom_tool_conversions: &Arc<
+        std::sync::Mutex<transforms::field_custom_tools_to_function::CustomToolConversions>,
+    >,
 ) -> AppResult<()> {
     if rules.is_empty() {
         return Ok(());
@@ -149,6 +152,7 @@ pub(super) async fn apply_transform_rules_request(
         image_transform_cache: state.image_transform_cache.clone(),
         http_client: state.http.clone(),
         upstream_provider_type,
+        custom_tool_conversions: custom_tool_conversions.clone(),
     };
     transforms::apply_transforms(
         transforms::UrpData::Request(req),
@@ -175,6 +179,9 @@ pub(super) async fn apply_transform_rules_response(
     rules: &[TransformRuleConfig],
     model: &str,
     upstream_provider_type: Option<ProviderType>,
+    custom_tool_conversions: &Arc<
+        std::sync::Mutex<transforms::field_custom_tools_to_function::CustomToolConversions>,
+    >,
 ) -> AppResult<()> {
     if !rules.is_empty() {
         let mut states =
@@ -191,6 +198,7 @@ pub(super) async fn apply_transform_rules_response(
             image_transform_cache: state.image_transform_cache.clone(),
             http_client: state.http.clone(),
             upstream_provider_type,
+            custom_tool_conversions: custom_tool_conversions.clone(),
         };
         transforms::apply_transforms(
             transforms::UrpData::Response(resp),
@@ -223,6 +231,9 @@ pub(super) async fn transform_urp_stream(
     auth_rules: &[TransformRuleConfig],
     model: &str,
     upstream_provider_type: Option<ProviderType>,
+    custom_tool_conversions: &Arc<
+        std::sync::Mutex<transforms::field_custom_tools_to_function::CustomToolConversions>,
+    >,
     reasoning_envelope: Option<(&str, &str)>,
 ) -> AppResult<()> {
     let mut provider_states =
@@ -257,6 +268,7 @@ pub(super) async fn transform_urp_stream(
         image_transform_cache: state.image_transform_cache.clone(),
         http_client: state.http.clone(),
         upstream_provider_type,
+        custom_tool_conversions: custom_tool_conversions.clone(),
     };
 
     let mut reasoning_envelope_state = urp::ReasoningEnvelopeStreamState::default();
@@ -696,8 +708,13 @@ fn empty_media_metadata(metadata: &urp::MediaMetadata) -> bool {
 
 impl CanonicalAffinityReasoningMetadata<'_> {
     fn is_empty(&self) -> bool {
-        !self.redacted && !self.downstream_only && !self.chat_content && !self.summary_as_thinking
-            && self.item_id.is_none() && self.summary_parts.is_none() && self.content_parts.is_none()
+        !self.redacted
+            && !self.downstream_only
+            && !self.chat_content
+            && !self.summary_as_thinking
+            && self.item_id.is_none()
+            && self.summary_parts.is_none()
+            && self.content_parts.is_none()
     }
 }
 
@@ -1122,7 +1139,12 @@ pub(super) fn media_resource_scope(attempt: &MonoizeAttempt) -> Option<urp::Medi
         protocol,
         provider_id: Some(attempt.provider_id.clone()),
         channel_id: Some(attempt.channel_id.clone()),
-        credential_scope: Some(hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect()),
+        credential_scope: Some(
+            hash.finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        ),
     })
 }
 
@@ -1190,8 +1212,8 @@ pub(super) fn build_embeddings_routing_stub(
     max_multiplier: Option<Multiplier>,
 ) -> UrpRequest {
     UrpRequest {
-            audio_output_format: Default::default(),
-            messages_custom_tool_names: Default::default(),
+        audio_output_format: Default::default(),
+        messages_custom_tool_names: Default::default(),
         model: model.to_string(),
         max_multiplier,
         server_tool_usage_classes: Vec::new(),
@@ -2466,9 +2488,9 @@ mod tests {
             created_at: None,
             output: vec![
                 urp::Node::Text {
-            citations: Default::default(),
-            logprobs: Default::default(),
-            signature: Default::default(),
+                    citations: Default::default(),
+                    logprobs: Default::default(),
+                    signature: Default::default(),
                     id: None,
                     role: urp::OrdinaryRole::Assistant,
                     content: "Here you go".to_string(),
@@ -2476,7 +2498,7 @@ mod tests {
                     extra_body: std::collections::HashMap::new(),
                 },
                 urp::Node::Image {
-            metadata: Default::default(),
+                    metadata: Default::default(),
                     id: None,
                     role: urp::OrdinaryRole::Assistant,
                     source: urp::ImageSource::Base64 {
@@ -2486,7 +2508,7 @@ mod tests {
                     extra_body: std::collections::HashMap::new(),
                 },
                 urp::Node::Image {
-            metadata: Default::default(),
+                    metadata: Default::default(),
                     id: None,
                     role: urp::OrdinaryRole::Assistant,
                     source: urp::ImageSource::Url {
@@ -2520,7 +2542,7 @@ mod tests {
             created_at: None,
             output: vec![
                 urp::Node::Image {
-            metadata: Default::default(),
+                    metadata: Default::default(),
                     id: None,
                     role: urp::OrdinaryRole::Assistant,
                     source: urp::ImageSource::Url {
@@ -2530,7 +2552,7 @@ mod tests {
                     extra_body: std::collections::HashMap::new(),
                 },
                 urp::Node::Image {
-            metadata: Default::default(),
+                    metadata: Default::default(),
                     id: None,
                     role: urp::OrdinaryRole::Assistant,
                     source: urp::ImageSource::FileId {

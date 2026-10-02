@@ -53,9 +53,9 @@ pub async fn create_image_generation(
     let extra_body = build_extra_body(obj, &["prompt", "model", "n", "max_multiplier"]);
 
     let inputs = vec![urp::Node::Text {
-            citations: Default::default(),
-            logprobs: Default::default(),
-            signature: Default::default(),
+        citations: Default::default(),
+        logprobs: Default::default(),
+        signature: Default::default(),
         id: None,
         role: urp::OrdinaryRole::User,
         content: prompt,
@@ -213,9 +213,9 @@ pub async fn create_image_edit(
 
     let mut inputs = Vec::new();
     inputs.push(urp::Node::Text {
-            citations: Default::default(),
-            logprobs: Default::default(),
-            signature: Default::default(),
+        citations: Default::default(),
+        logprobs: Default::default(),
+        signature: Default::default(),
         id: None,
         role: urp::OrdinaryRole::User,
         content: prompt,
@@ -223,7 +223,7 @@ pub async fn create_image_edit(
         extra_body: HashMap::new(),
     });
     inputs.push(urp::Node::Image {
-            metadata: Default::default(),
+        metadata: Default::default(),
         id: None,
         role: urp::OrdinaryRole::User,
         source: urp::ImageSource::Base64 {
@@ -246,7 +246,10 @@ pub async fn create_image_edit(
     }
     if let Some((mask_media_type, mask_b64)) = mask_data {
         inputs.push(urp::Node::Image {
-            metadata: urp::MediaMetadata { image_mask: true, ..Default::default() },
+            metadata: urp::MediaMetadata {
+                image_mask: true,
+                ..Default::default()
+            },
             id: None,
             role: urp::OrdinaryRole::User,
             source: urp::ImageSource::Base64 {
@@ -389,7 +392,13 @@ async fn fan_out_subrequests(
     extra_body.remove("context");
     let image_generation = match urp::ImageGenerationOptions::take_from_extra(&mut extra_body) {
         Ok(options) => options,
-        Err(message) => return vec![Err(AppError::new(StatusCode::BAD_REQUEST, "invalid_request", message))],
+        Err(message) => {
+            return vec![Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                message,
+            ))];
+        }
     };
     let mut join_set = tokio::task::JoinSet::new();
     let mut task_contexts = HashMap::new();
@@ -644,6 +653,9 @@ async fn execute_stream_collected_image_typed(
                 let attempt_number = execution_state.record_upstream_attempt(&attempt);
                 task_state.set_attempt(&attempt);
                 let mut req_attempt = original_req.clone();
+                let custom_tool_conversions = Arc::new(std::sync::Mutex::new(
+                    crate::transforms::field_custom_tools_to_function::CustomToolConversions::default(),
+                ));
                 if let Some(target_protocol) = super::provider_type_protocol(attempt.provider_type)
                 {
                     urp::retain_provider_items_for_protocol(
@@ -667,6 +679,7 @@ async fn execute_stream_collected_image_typed(
                     &attempt.provider_transforms,
                     &transform_match_model,
                     Some(attempt.provider_type),
+                    &custom_tool_conversions,
                 )
                 .await
                 {
@@ -691,6 +704,7 @@ async fn execute_stream_collected_image_typed(
                     &global_transforms,
                     &transform_match_model,
                     Some(attempt.provider_type),
+                    &custom_tool_conversions,
                 )
                 .await
                 {
@@ -713,6 +727,7 @@ async fn execute_stream_collected_image_typed(
                     &auth.transforms,
                     &transform_match_model,
                     Some(attempt.provider_type),
+                    &custom_tool_conversions,
                 )
                 .await
                 {
@@ -854,6 +869,7 @@ async fn execute_stream_collected_image_typed(
                                 &auth_rules,
                                 &model_for_transform,
                                 Some(transform_provider_type),
+                                &custom_tool_conversions,
                                 None,
                             )
                             .await

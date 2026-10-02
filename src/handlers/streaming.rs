@@ -68,16 +68,25 @@ async fn emit_stream_error_if_needed(
 fn combine_stream_stage_results(results: [AppResult<()>; 4]) -> AppResult<()> {
     // Channel closure may be caused by an earlier stage; preserve its diagnostic once the
     // encoder has sent the fallback terminal, while preventing any duplicate terminal frames.
-    if let Some(marked) = results.iter().filter_map(|result| result.as_ref().err())
-        .find(|err| err.downstream_stream_terminal_sent) {
+    if let Some(marked) = results
+        .iter()
+        .filter_map(|result| result.as_ref().err())
+        .find(|err| err.downstream_stream_terminal_sent)
+    {
         if marked.code == "upstream_stream_incomplete" {
-            if let Some(original) = results.iter().filter_map(|result| result.as_ref().err()).next() {
+            if let Some(original) = results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .next()
+            {
                 return Err(original.clone().with_downstream_stream_terminal_sent(true));
             }
         }
         return Err(marked.clone());
     }
-    for result in results { result?; }
+    for result in results {
+        result?;
+    }
     Ok(())
 }
 
@@ -479,6 +488,9 @@ async fn forward_stream_typed_once(
             // that the cross-family strip runs BEFORE provider, global, and
             // API-key transforms; see `execute_nonstream_typed`.
             let mut req_attempt = original_req.clone();
+                let custom_tool_conversions = Arc::new(std::sync::Mutex::new(
+                    crate::transforms::field_custom_tools_to_function::CustomToolConversions::default(),
+                ));
             if matches!(downstream, DownstreamProtocol::Responses) {
                 promote_responses_additional_tools(&mut req_attempt, attempt.provider_type);
             }
@@ -510,6 +522,7 @@ async fn forward_stream_typed_once(
                 &attempt.provider_transforms,
                 &transform_match_model,
                 Some(attempt.provider_type),
+                    &custom_tool_conversions,
             )
             .await
             {
@@ -534,6 +547,7 @@ async fn forward_stream_typed_once(
                 &global_transforms,
                 &transform_match_model,
                 Some(attempt.provider_type),
+                    &custom_tool_conversions,
             )
             .await
             {
@@ -558,6 +572,7 @@ async fn forward_stream_typed_once(
                 &auth.transforms,
                 &transform_match_model,
                 Some(attempt.provider_type),
+                    &custom_tool_conversions,
             )
             .await
             {
@@ -759,6 +774,7 @@ async fn forward_stream_typed_once(
                             &attempt.provider_transforms,
                             &logical_model,
                             Some(attempt.provider_type),
+                    &custom_tool_conversions,
                         )
                         .await
                         {
@@ -786,6 +802,7 @@ async fn forward_stream_typed_once(
                             &global_transforms,
                             &logical_model,
                             Some(attempt.provider_type),
+                    &custom_tool_conversions,
                         )
                         .await
                         {
@@ -813,6 +830,7 @@ async fn forward_stream_typed_once(
                             &auth.transforms,
                             &logical_model,
                             Some(attempt.provider_type),
+                    &custom_tool_conversions,
                         )
                         .await
                         {
@@ -1147,8 +1165,10 @@ async fn forward_stream_typed_once(
                     let capture_session = capture.session.clone();
                     let capture_raw_input = capture.raw_input.clone();
                     let capture_transform_chain_for_task = capture_transform_chain.clone();
-                    let capture_req_attempt = req_attempt.clone();
-                    let capture_upstream_body = upstream_body.clone();
+                    let capture_request = capture
+                        .session
+                        .as_ref()
+                        .map(|_| (req_attempt.clone(), upstream_body.clone()));
                     let capture_path = path.clone();
                     let capture_provider_id = attempt.provider_id.clone();
                     let capture_channel_id = attempt.channel_id.clone();
@@ -1239,6 +1259,7 @@ async fn forward_stream_typed_once(
                                         &auth_rules_for_transform,
                                         &model_for_transform,
                                         Some(transform_provider_type),
+                                &custom_tool_conversions,
                                         reasoning_envelope,
                                     )
                                     .await
@@ -1371,7 +1392,9 @@ async fn forward_stream_typed_once(
                                 tried_providers_for_log,
                                 actual_upstream_usage.clone(),
                             );
-                            if let Some(session) = capture_session.as_ref() {
+                            if let (Some(session), Some((captured_req, captured_upstream))) =
+                                (capture_session.as_ref(), capture_request)
+                            {
                                 let frames = if let Some(frames) = capture_frames_for_task.as_ref()
                                 {
                                     Some(frames.snapshot().await)
@@ -1396,8 +1419,8 @@ async fn forward_stream_typed_once(
                                         &capture_upstream_model,
                                         &capture_path,
                                         capture_raw_input.as_ref().clone(),
-                                        &capture_req_attempt,
-                                        capture_upstream_body,
+                                        &captured_req,
+                                        captured_upstream,
                                         None,
                                         frames,
                                         capture_transform_chain_for_task,
@@ -1437,7 +1460,9 @@ async fn forward_stream_typed_once(
                             );
 
                             emit_stream_error_if_needed(downstream, err, &tx_err, capture_frames_for_task.as_ref()).await;
-                            if let Some(session) = capture_session.as_ref() {
+                            if let (Some(session), Some((captured_req, captured_upstream))) =
+                                (capture_session.as_ref(), capture_request)
+                            {
                                 let frames = if let Some(frames) = capture_frames_for_task.as_ref()
                                 {
                                     Some(frames.snapshot().await)
@@ -1454,8 +1479,8 @@ async fn forward_stream_typed_once(
                                         &capture_upstream_model,
                                         &capture_path,
                                         capture_raw_input.as_ref().clone(),
-                                        &capture_req_attempt,
-                                        capture_upstream_body,
+                                        &captured_req,
+                                        captured_upstream,
                                         None,
                                         frames,
                                         capture_transform_chain_for_task,
@@ -1576,7 +1601,9 @@ async fn forward_stream_typed_once(
                             }),
                         );
 
-                        if let Some(session) = capture_session.as_ref() {
+                        if let (Some(session), Some((captured_req, captured_upstream))) =
+                            (capture_session.as_ref(), capture_request)
+                        {
                             let frames = if let Some(frames) = capture_frames_for_task.as_ref() {
                                 Some(frames.snapshot().await)
                             } else {
@@ -1592,8 +1619,8 @@ async fn forward_stream_typed_once(
                                     &capture_upstream_model,
                                     &capture_path,
                                     capture_raw_input.as_ref().clone(),
-                                    &capture_req_attempt,
-                                    capture_upstream_body,
+                                    &captured_req,
+                                    captured_upstream,
                                     None,
                                     frames,
                                     capture_transform_chain_for_task,
@@ -1899,7 +1926,8 @@ mod tests {
             input_rx,
             output_tx,
             retained.clone(),
-            HashMap::new(),        ));
+            HashMap::new(),
+        ));
         let nodes = vec![urp::Node::Text {
             citations: Default::default(),
             logprobs: Default::default(),
@@ -1913,7 +1941,7 @@ mod tests {
 
         input_tx
             .send(urp::UrpStreamEvent::ResponseDone {
-            outcome: Default::default(),
+                outcome: Default::default(),
                 finish_reason: None,
                 usage: None,
                 output: nodes.clone(),

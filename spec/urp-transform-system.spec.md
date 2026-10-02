@@ -481,35 +481,45 @@ ARTN-8. An empty alias map MUST be a no-op in both phases.
 
 CTF-1. `field_custom_tools_to_function` MUST support request-phase and response-phase execution. Supported scopes are `provider`, `global`, and `api_key`.
 
+CTF-1a. Each Channel attempt MUST create an empty custom-tool conversion context. The Provider, global, and API key request transforms and their response transforms MUST share that context. A retry or different Channel MUST receive a new context. The context MUST NOT be serialized into any upstream request. Both direct streaming and buffered or non-streaming responses MUST use the context of the successful attempt.
+
 CTF-2. Config MAY contain `names` as a JSON array of non-empty strings. If `names` is absent, the transform MUST use `["apply_patch"]`. If `names` is present, including an empty array, the transform MUST use that array and MUST NOT add the default. An empty-string entry MUST fail config parsing as `InvalidConfig`.
 
-CTF-3. If `names` contains the exact string `"*"`, the transform MUST convert every `type = "custom"` tool descriptor. Other `names` entries remain additional exact-name matches.
+CTF-3. If `names` contains the exact string `"*"`, the transform MUST convert every `type = "custom"` tool descriptor. Other `names` entries remain additional exact-name matches. The transform MUST recurse through `namespace.tools` arrays. A leaf's effective namespace is its explicit namespace, otherwise its nearest enclosing namespace descriptor's name, otherwise absent.
 
 CTF-4. An empty `names` array and no `"*"` MUST be a no-op in both phases.
 
 CTF-5. Request-phase application MUST convert each matching tool in `request.tools[]` whose `type` is `custom` into a `type = "function"` descriptor with:
 1. `function.name` equal to the custom tool name;
-2. `function.description` equal to the custom tool description when present, otherwise a non-empty apply_patch instruction string. When the converted tool name is `apply_patch`, the transform MUST append an apply_patch usage suffix if that suffix is not already present. The suffix MUST state that existing files use `*** Update File` with `@@` hunks, unchanged hunk lines start with one space, `-` deletes, `+` inserts, a hunk MUST NOT consist of identical `-` and `+` line bodies with no extra `+` or `-` line, and an existing file MUST NOT be rewritten as `*** Add File`;
+2. `function.description` equal to the custom tool description when present. When the converted tool name is `apply_patch`, the transform MUST append a non-empty apply_patch usage suffix if that suffix is not already present, or use the suffix when the description is absent. The suffix MUST state that existing files use `*** Update File` with `@@` hunks, unchanged hunk lines start with one space, `-` deletes, `+` inserts, a hunk MUST NOT consist of identical `-` and `+` line bodies with no extra `+` or `-` line, and an existing file MUST NOT be rewritten as `*** Add File`;
 3. `function.parameters` equal to a JSON object schema with required string property `input`;
-4. `custom` absent.
+4. `custom` absent;
+5. `function.strict = false`; and
+6. the original namespace and non-format custom extension fields preserved. The transform MUST NOT preserve custom grammar enforcement. The `input` property description MUST describe apply_patch syntax only for a tool named `apply_patch`.
 
-CTF-6. Request-phase application MUST convert each matching `request.input` `ToolCall` node with `tool_type = custom` to `tool_type = function`. If `arguments` is not already a JSON object containing string key `input`, the transform MUST replace `arguments` with the JSON object `{"input": <original arguments string>}`.
+CTF-6. Request-phase application MUST convert each matching `request.input` `ToolCall` node with `tool_type = custom` to `tool_type = function`. The transform MUST encode its entire original `arguments` string as `{"input": <original arguments string>}`, including when that string itself contains JSON. Each custom `ToolResult` with the converted call's `call_id` MUST become a function `ToolResult`, regardless of input ordering. A custom `ToolResult` without a corresponding call MAY be converted only when its explicit namespace and name identify a converted descriptor. Result content, identifiers, namespace, and extension fields MUST remain unchanged.
 
-CTF-7. Request-phase application MUST rewrite `request.tool_choice` JSON so that an object member `type` whose string value is `custom` becomes `function` when the same object has `name` matching CTF-2/CTF-3.
+CTF-7. Request-phase application MUST rewrite a custom `request.tool_choice` selector only when its namespace and name identify an actually converted descriptor. The transform MUST support flat selectors, nested `custom` selectors, and selectors inside either flat or nested `allowed_tools.tools`. A converted nested selector MUST rename the `custom` object to `function`. The transform MUST NOT recursively modify unrelated extension objects.
 
-CTF-8. Response-phase application MUST convert each matching `ToolCall` with `tool_type = function` to `tool_type = custom` on:
+CTF-8. Request-phase application MUST record each actually converted descriptor or history call's `(effective namespace, name)` in trusted request-local state. This state MUST survive the request-to-response transition and MUST NOT serialize into provider or client payloads. Independent requests and upstream attempts MUST NOT share mutable conversion state. Response-phase application MUST convert a `ToolCall` with `tool_type = function` to `tool_type = custom` only when its exact `(namespace, name)` occurs in that state and its name matches the response rule. A response-only rule and a wildcard rule without recorded conversions MUST leave function calls unchanged. This condition applies to:
 1. non-stream `response.output`;
 2. stream `NodeStart` headers of kind `ToolCall`;
 3. stream `NodeDone` nodes of kind `ToolCall`;
 4. stream `ResponseDone.output`.
 
+CTF-8a. For a response call with no namespace, the transform MAY recover an original namespace only if its name identifies exactly one distinct identity among the request's custom and native function descriptors and history calls. It MUST restore that identity's namespace. A function `ToolResult` correlated by `call_id` to a restored response call MUST also become custom. Otherwise, a function `ToolResult` MAY become custom only when its explicit name and namespace identify a recorded conversion. Result content MUST remain unchanged.
+
 CTF-9. When converting a function `ToolCall` back to custom, if `arguments` parses as a JSON object with a string field `input`, `patch`, `command`, or `content`, the transform MUST replace `arguments` with that string. Prefer `input`. Prefer `patch`/`command`/`content` only when the string contains `Begin Patch` or the key is `input`. If `arguments` is not such a JSON object, the transform MUST keep the original string.
 
-CTF-10. On stream `NodeDelta::ToolCallArguments`, if the current `arguments` value unwraps under CTF-9 to a different string, the transform MUST replace that delta's `arguments` with the unwrapped string.
+CTF-10. The response transform MUST buffer argument deltas only for a converted tool call, keyed by `node_index`. It MUST NOT emit JSON wrapper fragments. When that node completes, it MUST emit one argument delta containing the complete string after CTF-9 and CTF-12, followed by a `NodeDone` with the same arguments. If `ResponseDone` supplies the completed node without a preceding `NodeDone`, the transform MUST flush that node before `ResponseDone`. Each completed output node in `ResponseDone` MUST contain the same transformed arguments as its emitted `NodeDone`. Ordinary function arguments, text, reasoning, and unrelated stream events MUST pass through unchanged. A stream error MUST discard buffered incomplete arguments.
 
-CTF-11. Native descriptors whose `type` is neither `custom` nor `function` MUST remain unchanged.
+CTF-10a. When a function `NodeStart` has an empty name and the current response rule has recorded conversions, the transform MUST buffer that node's start and deltas until a completion identifies the tool. For a recorded conversion, it MUST emit a custom start and the completed custom arguments. Otherwise, it MUST replay that node's buffered events unchanged before its completion. Usage and extension metadata on buffered events MUST be preserved; metadata-only argument deltas MAY contain an empty string. Buffering one tool MUST NOT delay events for other nodes.
 
-CTF-12. After CTF-8 and CTF-9, for a matching `apply_patch` `ToolCall` (whether originally custom or converted from function), the transform MUST rewrite `arguments` so that:
+CTF-11. Native descriptor fields MUST remain unchanged, except for recursive conversion of children in `namespace.tools` under CTF-3.
+
+CTF-11a. Native function descriptors and function history calls MUST remain unchanged. If a request declares a native function with the same effective namespace and name as a custom descriptor or history call selected for conversion, the transform MUST reject the request before upstream submission instead of creating an ambiguous function identity.
+
+CTF-12. After CTF-8 and CTF-9, for an `apply_patch` `ToolCall` restored from a recorded conversion, the transform MUST rewrite `arguments` so that:
 1. a first line that starts with `*** Begin Patch` becomes exactly `*** Begin Patch`;
 2. a line that starts with `*** End Patch` becomes exactly `*** End Patch`;
 3. lines equal to `*** End of File` or `*** End of File ***` are removed;

@@ -1,21 +1,55 @@
 ---
 title: "字段：自定义工具转函数"
-description: 将 Codex 的 apply_patch 等 custom/freeform 工具转成 JSON function，供 Grok/CPA 上游使用，并在响应中恢复为 custom 调用。
+description: 将选定的 custom 工具转换为 JSON function，供不支持 custom 的上游使用。在响应中恢复已转换的调用。
 ---
 
-## 作用
+## 何时使用
 
-Codex 0.15x 的 `apply_patch` 只以 Responses **custom/freeform** 工具下发（`type: custom` 加 Lark 语法）。Grok 与 CPA 类适配器会丢弃或忽略 custom 工具，模型侧往往只能看到 `exec_command` 这类 JSON `function`。
+当上游拒绝 `type: custom`，但支持 JSON `function` 工具时，启用此变换。
+例如，将客户端的自由文本 `apply_patch` 工具转换为该上游支持的函数。
+请确保 Channel 的协议设置与上游端点一致。
+此变换修改工具定义，不改变所选协议或 URL。
 
-本变换在请求阶段把匹配的 custom 工具改写成 JSON function（含历史 `ToolCall` 与 `tool_choice`），再在响应阶段把 `tool_type` 恢复为 `custom`，让 Codex 仍收到 `custom_tool_call`。
+使用相同的模型筛选和配置，添加两条规则：一条 `request`，一条 `response`。
+响应规则只恢复当前上游尝试中实际转换的工具。
+单独启用响应规则不会转换普通函数调用。
 
-函数 schema 只有必填字符串字段 `input`，内容为完整的 `*** Begin Patch` 文档。Lark 语法约束不会保留。
+## 行为
 
-Grok 常输出 `*** Begin Patch ***` / `*** End Patch ***`。Codex 要求首行恰好为 `*** Begin Patch`。响应阶段会改写这些头，并去掉 `*** End of File ***` 与 `<invoke>` 包装。
+请求规则将选定的 custom 工具转换为 JSON function，包括 `namespace.tools` 中的工具。
+原始 custom 输入字符串会被包装到必填字符串字段 `input` 中。
+即使原始字符串包含 JSON，也会完整保留。
+规则还会更新对应的工具历史、关联结果和 `tool_choice`，包括 `allowed_tools` 中的选择器。
 
-Grok 还会把 Add File 正文写成原始文件行。Codex 要求 Add File 的每一行内容都以 `+` 开头。响应阶段只给这类原始行补 `+`。已经以 `+`、`-` 或 `\` 开头的行不改。遇到 `@@` hunk 头后停止补前缀。Update File 的 `-` 删除行会保留。
+响应规则恢复已转换的调用，并解包其 `input` 字符串。
+每次转换都通过 namespace 和工具名识别。
+普通 function 工具保持不变，即使 `names` 中包含 `"*"`。
+如果 function 与待转换 custom 工具的 namespace 和名称都相同，请求会在转发前被拒绝。
+如果上游省略 namespace，Monoize 只在工具名能够唯一确定请求中的工具时恢复 namespace。
 
-请求 schema 要求插入时用前导空格上下文行，再用 `+` 写新行。不要把未改动的行同时写成 `-` 和 `+`。响应阶段会丢掉这种相同的 `-`/`+` hunk，避免 Codex 接受空编辑。
+转换后的函数不保留 custom 语法约束，包括 Lark 约束。
+仅在选定工具可以接受字符串参数时使用此变换。
+
+### 流式响应
+
+已转换调用的参数会缓存到该调用完成。
+Monoize 随后发送完整的 custom 输入字符串。
+JSON 转义序列和包装对象即使分散在多个片段中，也不会泄漏到 custom 输入片段。
+普通函数参数、文本和推理内容继续正常流式传输。
+流发生错误时，未完成的参数缓存会被丢弃。
+
+### apply_patch 格式
+
+对于已转换的 `apply_patch` 调用，响应规则会规范化完整补丁文本：
+
+- 将补丁标记规范为 `*** Begin Patch` 和 `*** End Patch`。
+- 移除 `*** End of File` 标记和外层 `<invoke>` 包装。
+- 为 Add File 中无前缀的内容行添加 `+`。保留已经以 `+`、`-` 或 `\` 开头的行。
+- 遇到 `@@` 头或其他补丁区段时，停止添加 Add File 前缀。保留 Update File 的删除行。
+- 如果 Update File hunk 没有上下文行，且删除内容与新增内容完全相同，则移除该 hunk。
+
+请求 schema 只为 `apply_patch` 添加这些补丁说明。
+其他工具使用通用的字符串输入 schema。
 
 ## 参考
 
@@ -25,27 +59,35 @@ Grok 还会把 Add File 正文写成原始文件行。Codex 要求 Add File 的�
 | 阶段 | `request`、`response` |
 | 作用域 | Provider、Global、API key |
 
-## 何时使用
-
-- Codex 经 CPA 或其他会剥掉 `type: custom` 的适配器访问 Grok。
-- 使用同一配置添加 **两条** 规则：一条 `request`，一条 `response`。
-
 ## 配置
 
 | 选项 | 类型 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `names` | string[] | 否 | `["apply_patch"]` | 要转换的 custom 工具名。空数组表示不转换。包含 `"*"` 时转换全部 custom 工具。 |
+| `names` | string[] | 否 | `["apply_patch"]` | 按名称精确匹配 custom 工具。空数组关闭转换。`"*"` 选择全部 custom 工具。不接受空字符串。 |
 
 ### 示例规则
 
+将 `target-model` 替换为需要转换的模型。
+同时使用以下两条规则。
+
 ```json
-{
-  "transform": "field_custom_tools_to_function",
-  "enabled": true,
-  "phase": "request",
-  "models": ["grok-*"],
-  "config": {}
-}
+[
+  {
+    "transform": "field_custom_tools_to_function",
+    "enabled": true,
+    "phase": "request",
+    "models": ["target-model"],
+    "config": { "names": ["apply_patch"] }
+  },
+  {
+    "transform": "field_custom_tools_to_function",
+    "enabled": true,
+    "phase": "response",
+    "models": ["target-model"],
+    "config": { "names": ["apply_patch"] }
+  }
+]
 ```
 
-响应阶段使用相同配置，并把 `"phase"` 设为 `"response"`。
+若需转换全部 custom 工具，请在两条规则中都设置 `"names": ["*"]`。
+此设置不会转换普通 function 工具。

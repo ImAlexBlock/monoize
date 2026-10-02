@@ -15,7 +15,7 @@ async fn send_sse_event(tx: &mpsc::Sender<Event>, event: Event) {
 }
 
 pub(crate) async fn send_plain_sse_data(tx: &mpsc::Sender<Event>, data: String) -> AppResult<()> {
-    crate::request_capture::capture_sse_frame(format!("data: {data}\n\n")).await;
+    crate::request_capture::capture_sse_frame(|| format!("data: {data}\n\n")).await;
     send_sse_event(tx, Event::default().data(data)).await;
     Ok(())
 }
@@ -26,7 +26,7 @@ pub(crate) async fn send_named_sse_json(
     data: Value,
 ) -> AppResult<()> {
     let data = data.to_string();
-    crate::request_capture::capture_sse_frame(format!("event: {name}\ndata: {data}\n\n")).await;
+    crate::request_capture::capture_sse_frame(|| format!("event: {name}\ndata: {data}\n\n")).await;
     send_sse_event(tx, Event::default().event(name).data(data)).await;
     Ok(())
 }
@@ -39,7 +39,8 @@ pub(crate) async fn send_responses_event(
 ) -> AppResult<()> {
     let payload = normalize_responses_payload(*seq, name, data).to_string();
     *seq += 1;
-    crate::request_capture::capture_sse_frame(format!("event: {name}\ndata: {payload}\n\n")).await;
+    crate::request_capture::capture_sse_frame(|| format!("event: {name}\ndata: {payload}\n\n"))
+        .await;
     send_sse_event(tx, Event::default().event(name).data(payload)).await;
     Ok(())
 }
@@ -763,4 +764,64 @@ pub(crate) fn responses_text_delta_payload(
     obj.insert("logprobs".to_string(), Value::Null);
     insert_phase_if_present(&mut obj, phase);
     Value::Object(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::request_capture::{SseFrameCapture, with_sse_capture};
+    use axum::response::IntoResponse;
+
+    async fn emit_test_frames() -> (String, u64) {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut sequence_number = 41;
+        send_plain_sse_data(&tx, json!({"text": "你好\nworld"}).to_string())
+            .await
+            .unwrap();
+        send_named_sse_json(&tx, "delta", json!({"text": "你好\nworld"}))
+            .await
+            .unwrap();
+        send_responses_event(
+            &tx,
+            &mut sequence_number,
+            "response.output_text.delta",
+            json!({"delta": "你好\nworld"}),
+        )
+        .await
+        .unwrap();
+        send_plain_sse_data(&tx, "[DONE]".to_string())
+            .await
+            .unwrap();
+        drop(tx);
+
+        let mut frames = Vec::new();
+        while let Some(event) = rx.recv().await {
+            frames.push(Ok::<_, std::convert::Infallible>(event));
+        }
+        let body = axum::response::Sse::new(futures_util::stream::iter(frames))
+            .into_response()
+            .into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        (String::from_utf8(bytes.to_vec()).unwrap(), sequence_number)
+    }
+
+    #[tokio::test]
+    async fn capture_preserves_helper_wire_bytes_and_frame_order() {
+        let (uncaptured_wire, uncaptured_sequence) = emit_test_frames().await;
+        let capture = SseFrameCapture::new();
+        let (captured_wire, captured_sequence) =
+            with_sse_capture(capture.clone(), emit_test_frames()).await;
+        let expected_frames = vec![
+            "data: {\"text\":\"你好\\nworld\"}\n\n",
+            "event: delta\ndata: {\"text\":\"你好\\nworld\"}\n\n",
+            "event: response.output_text.delta\ndata: {\"delta\":\"你好\\nworld\",\"sequence_number\":41,\"type\":\"response.output_text.delta\"}\n\n",
+            "data: [DONE]\n\n",
+        ];
+
+        assert_eq!(uncaptured_sequence, 42);
+        assert_eq!(captured_sequence, 42);
+        assert_eq!(captured_wire, uncaptured_wire);
+        assert_eq!(captured_wire, expected_frames.concat());
+        assert_eq!(capture.captured_frames().await, expected_frames);
+    }
 }

@@ -282,6 +282,9 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                 // encoded upstream request even when the downstream and upstream
                 // protocol families differ.
                 let mut req_attempt = original_req.clone();
+                let custom_tool_conversions = Arc::new(std::sync::Mutex::new(
+                    crate::transforms::field_custom_tools_to_function::CustomToolConversions::default(),
+                ));
                 if matches!(downstream, DownstreamProtocol::Responses) {
                     promote_responses_additional_tools(&mut req_attempt, attempt.provider_type);
                 }
@@ -320,6 +323,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                     &attempt.provider_transforms,
                     &transform_match_model,
                     Some(attempt.provider_type),
+                    &custom_tool_conversions,
                 )
                 .await
                 {
@@ -347,6 +351,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                     &global_transforms,
                     &transform_match_model,
                     Some(attempt.provider_type),
+                    &custom_tool_conversions,
                 )
                 .await
                 {
@@ -372,6 +377,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                     &auth.transforms,
                     &transform_match_model,
                     Some(attempt.provider_type),
+                    &custom_tool_conversions,
                 )
                 .await
                 {
@@ -787,6 +793,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                             &attempt.provider_transforms,
                             &req.model,
                             Some(attempt.provider_type),
+                    &custom_tool_conversions,
                         )
                         .await
                         {
@@ -812,6 +819,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                             &global_transforms,
                             &req.model,
                             Some(attempt.provider_type),
+                    &custom_tool_conversions,
                         )
                         .await
                         {
@@ -837,6 +845,7 @@ pub(super) async fn execute_nonstream_typed_with_validator(
                             &auth.transforms,
                             &req.model,
                             Some(attempt.provider_type),
+                    &custom_tool_conversions,
                         )
                         .await
                         {
@@ -1102,14 +1111,14 @@ async fn collect_streamed_upstream_response(
     while let Some(event) = decoded_rx.recv().await {
         match event {
             crate::urp::UrpStreamEvent::ResponseDone {
-                                    outcome,
+                outcome,
                 finish_reason,
                 usage,
                 output,
                 extra_body,
             } => {
                 final_response = Some(urp::UrpResponse {
-                                        outcome,
+                    outcome,
                     id: extra_body
                         .get("id")
                         .and_then(|value| value.as_str())
@@ -1284,18 +1293,28 @@ pub(super) fn encode_request_for_provider(
     }
     let model = req.model.clone();
     let value = match attempt.provider_type {
-        ProviderType::Responses => urp::encode::openai_responses::encode_request_checked(req, &model)
-            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
-        ProviderType::ChatCompletion => urp::encode::openai_chat::encode_request_checked(req, &model)
-            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
+        ProviderType::Responses => urp::encode::openai_responses::encode_request_checked(
+            req, &model,
+        )
+        .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
+        ProviderType::ChatCompletion => {
+            urp::encode::openai_chat::encode_request_checked(req, &model).map_err(|message| {
+                AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message)
+            })?
+        }
         ProviderType::Messages => urp::encode::anthropic::encode_request_checked(req, &model)
             .map_err(|message| {
                 AppError::new(StatusCode::BAD_REQUEST, "invalid_request", message)
             })?,
-        ProviderType::Gemini => urp::encode::gemini::encode_request_checked(req, &model)
-            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
+        ProviderType::Gemini => {
+            urp::encode::gemini::encode_request_checked(req, &model).map_err(|message| {
+                AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message)
+            })?
+        }
         ProviderType::OpenaiImage => urp::encode::openai_image::encode_request_checked(req, &model)
-            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message))?,
+            .map_err(|message| {
+                AppError::new(StatusCode::BAD_REQUEST, "unsupported_media", message)
+            })?,
         ProviderType::Replicate => urp::encode::replicate::encode_request(req, &model),
         ProviderType::OpenaiVideo | ProviderType::FalVideo => {
             return Err(AppError::new(
@@ -1354,7 +1373,11 @@ pub(super) fn decode_response_from_provider(
         }
     }
     .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, "invalid_upstream_response", e))?;
-    if let Some(body) = decoded.outcome.as_ref().and_then(|outcome| outcome.failure_body(false)) {
+    if let Some(body) = decoded
+        .outcome
+        .as_ref()
+        .and_then(|outcome| outcome.failure_body(false))
+    {
         return Err(embedded_upstream_error_to_app(
             &body["error"],
             mask_sensitive_info,
@@ -1420,7 +1443,11 @@ fn embedded_chat_completion_error_to_app(error: &Value, mask_sensitive_info: boo
     embedded_upstream_error_to_app(error, mask_sensitive_info, "upstream_chat_error")
 }
 
-fn embedded_upstream_error_to_app(error: &Value, mask_sensitive_info: bool, code: &str) -> AppError {
+fn embedded_upstream_error_to_app(
+    error: &Value,
+    mask_sensitive_info: bool,
+    code: &str,
+) -> AppError {
     let message = error
         .get("message")
         .and_then(Value::as_str)
@@ -1465,19 +1492,15 @@ fn embedded_upstream_error_to_app(error: &Value, mask_sensitive_info: bool, code
     } else {
         crate::error_sanitize::maybe_mask_sensitive_text(message, mask_sensitive_info)
     };
-    AppError::new(
-        StatusCode::BAD_GATEWAY,
-        code,
-        client_message,
-    )
-    .with_internal_message(crate::error_sanitize::truncate_error_detail(message))
-    .with_type("server_error")
-    .with_upstream_error(
-        upstream_status,
-        upstream_code,
-        upstream_type,
-        upstream_param,
-    )
+    AppError::new(StatusCode::BAD_GATEWAY, code, client_message)
+        .with_internal_message(crate::error_sanitize::truncate_error_detail(message))
+        .with_type("server_error")
+        .with_upstream_error(
+            upstream_status,
+            upstream_code,
+            upstream_type,
+            upstream_param,
+        )
 }
 
 fn json_scalar_string(value: &Value) -> Option<String> {

@@ -218,6 +218,8 @@ pub struct TransformRuntimeContext {
     pub image_transform_cache: Arc<crate::image_transform_cache::ImageTransformCache>,
     pub http_client: reqwest::Client,
     pub upstream_provider_type: Option<crate::config::ProviderType>,
+    pub custom_tool_conversions:
+        Arc<std::sync::Mutex<field_custom_tools_to_function::CustomToolConversions>>,
 }
 
 /// Localized display metadata entries as `(language, text)` pairs.
