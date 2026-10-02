@@ -1,4 +1,4 @@
-# Docker Deployment Specification (production host 64.90.22.212)
+# Docker Deployment Specification (hosts 64.90.22.212 and 40.160.141.21)
 
 ## 0. Scope
 
@@ -56,6 +56,26 @@ attempted route switch. On SIGINT or SIGTERM after pause was attempted but befor
 SIGHUP was attempted, attempt authenticated resume before exiting nonzero.
 Cancellation after a SIGHUP attempt MUST NOT resume forwarding to the old primary.
 The BG12 threshold logs an alert and never terminates connections.
+
+PG5. The PostgreSQL adapter MAY select the existing Caddy service, configuration
+file, and admin origin with `MONOIZE_SWAP_CADDY_SERVICE`,
+`MONOIZE_SWAP_CADDYFILE`, and `MONOIZE_SWAP_CADDY_ADMIN_URL`.
+Their defaults are `caddy`, `/etc/caddy/Caddyfile`, and `http://127.0.0.1:2019`.
+Reject empty settings. A service name MUST match
+`[A-Za-z0-9][A-Za-z0-9_-]*(?:@[A-Za-z0-9][A-Za-z0-9_-]*)?(?:\.service)?`
+and contain at most 255 characters. The file MUST be an absolute normalized POSIX
+path without parent components, backslashes, whitespace, or control characters.
+The admin origin MUST use HTTP, a canonical loopback IP literal, and an explicit
+decimal port from 1 through 65535. Reject userinfo, paths, queries, fragments,
+zone identifiers, whitespace, and control characters. IPv6 literals MUST use
+brackets and their compressed representation. Read only
+`/config/apps/http/servers` from that origin, with curl configuration and proxies
+disabled and without following redirects.
+The selected service's configured user and live MainPID MUST have the existing
+`caddy` account UID. The selected file and live admin configuration MUST both
+reference exactly the persisted stable Monoize port. All existing route checks
+and BG9-BG12 gates remain mandatory. The adapter MUST NOT change, reload, or
+restart the selected Caddy service or its configuration.
 
 This specification defines `/opt/monoize/blue-green-swap.sh <rev>` on the
 production host. The repository sources are `scripts/blue-green-*.sh`,

@@ -2470,7 +2470,9 @@ impl MonoizeRoutingStore {
         ))
         .await
         .map_err(|e| e.to_string())?;
-        txn.commit().await.map_err(|e| e.to_string())
+        txn.commit().await.map_err(|e| e.to_string())?;
+        bump_registry_generation();
+        Ok(())
     }
 
     async fn replace_channel_on(
@@ -2595,7 +2597,6 @@ impl MonoizeRoutingStore {
                          now.clone().into()],
                 )).await.map_err(|e| e.to_string())?;
         }
-        bump_registry_generation();
         Ok(())
     }
 }
@@ -3893,6 +3894,19 @@ mod tests {
             .expect("second provider creates");
         assert_eq!(created.priority, 0);
         assert_eq!(second.priority, 1);
+        let reader = MonoizeRoutingStore::new_read_only(db.clone())
+            .await
+            .expect("independent routing store creates");
+        assert_eq!(
+            reader
+                .list_providers()
+                .await
+                .expect("independent snapshot loads")
+                .into_iter()
+                .map(|provider| (provider.id, provider.priority))
+                .collect::<Vec<_>>(),
+            vec![(created.id.clone(), 0), (second.id.clone(), 1)]
+        );
         store
             .reorder_providers(ReorderProvidersInput {
                 group_id: created.group_id.clone(),
@@ -3909,6 +3923,16 @@ mod tests {
                 .map(|provider| provider.id)
                 .collect::<Vec<_>>(),
             vec![second.id.clone(), created.id.clone()]
+        );
+        assert_eq!(
+            reader
+                .list_providers()
+                .await
+                .expect("independent snapshot refreshes after reorder")
+                .into_iter()
+                .map(|provider| (provider.id, provider.priority))
+                .collect::<Vec<_>>(),
+            vec![(second.id.clone(), 0), (created.id.clone(), 1)]
         );
 
         let disabled_provider: CreateMonoizeProviderInput = serde_json::from_value(json!({

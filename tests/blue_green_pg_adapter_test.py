@@ -39,6 +39,112 @@ class ConnectionTests(unittest.TestCase):
                 pgswap.connections(8080)
 
 
+class CaddyConfigurationTests(unittest.TestCase):
+    def test_defaults_preserve_the_original_deployment(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(pgswap.caddy_configuration(),
+                             ("caddy", "/etc/caddy/Caddyfile", "http://127.0.0.1:2019"))
+
+    def test_existing_migration_ingress_can_be_selected(self):
+        with patch.dict(os.environ, {
+            "MONOIZE_SWAP_CADDY_SERVICE": "migration-ingress.service",
+            "MONOIZE_SWAP_CADDYFILE": "/opt/migration-ingress/Caddyfile",
+            "MONOIZE_SWAP_CADDY_ADMIN_URL": "http://127.0.0.1:2020",
+        }, clear=True):
+            self.assertEqual(pgswap.caddy_configuration(),
+                             ("migration-ingress.service", "/opt/migration-ingress/Caddyfile",
+                              "http://127.0.0.1:2020"))
+
+    def test_canonical_loopback_origins_include_ipv6(self):
+        for origin in ["http://127.0.0.2:65535", "http://[::1]:2020"]:
+            with self.subTest(origin=origin), patch.dict(os.environ, {
+                "MONOIZE_SWAP_CADDY_ADMIN_URL": origin,
+            }, clear=True):
+                self.assertEqual(pgswap.caddy_configuration()[2], origin)
+
+    def test_ambiguous_or_nonlocal_configuration_fails_before_commands(self):
+        invalid = {
+            "MONOIZE_SWAP_CADDY_SERVICE": ["", "-caddy", "caddy*", "caddy.socket", "caddy.service\n",
+                                           "a" * 256, "../caddy", "caddy service"],
+            "MONOIZE_SWAP_CADDYFILE": ["", "etc/caddy/Caddyfile", "/etc/../opt/Caddyfile",
+                                       "/etc//caddy/Caddyfile", "/etc/./Caddyfile", "//etc/Caddyfile",
+                                       "/etc/Caddyfile/", "/etc\\Caddyfile", "/etc/Caddyfile\0",
+                                       "/etc/caddy file", "/etc/Caddyfile\x85"],
+            "MONOIZE_SWAP_CADDY_ADMIN_URL": [
+                "", "http://localhost:2019", "http://0.0.0.0:2019", "http://40.160.141.21:2020",
+                "https://127.0.0.1:2019", "http://127.0.0.1", "http://127.0.0.1:0",
+                "http://127.0.0.1:65536", "http://127.0.0.1:02019", "http://127.0.0.1:+2019",
+                "http://user@127.0.0.1:2019", "http://user:password@127.0.0.1:2019",
+                "http://127.0.0.1:2019/", "http://127.0.0.1:2019/config",
+                "http://127.0.0.1:2019?x=1", "http://127.0.0.1:2019?",
+                "http://127.0.0.1:2019#fragment", "http://127.0.0.1:2019#",
+                "http://127.0.0.1:2019\n", "http://127.0.0.1:\t2019", "http://127.0.0.1:2019\0",
+                "http://127.0.0.1:2019\x85",
+                "http://[0:0:0:0:0:0:0:1]:2019", "http://[::1%lo]:2019", "http://[::1:2019",
+            ],
+        }
+        with patch.object(pgswap, "run") as run:
+            for key, values in invalid.items():
+                for value in values:
+                    with self.subTest(key=key, value=value), patch.object(pgswap.os, "environ", {key: value}):
+                        with self.assertRaises(RuntimeError):
+                            pgswap.caddy_configuration()
+            run.assert_not_called()
+
+    def verify(self, static_port=8080, live_ports=(8080,), user_uid=999, process_uid=999,
+               pid=76263, routing_enabled=True):
+        config = ("migration-ingress.service", "/opt/migration-ingress/Caddyfile", "http://127.0.0.1:2020")
+        commands = []
+
+        def run(command, **kwargs):
+            commands.append(command)
+            if command == ["systemctl", "show", config[0], "--property=User", "--value"]:
+                return "caddy\n"
+            if command == ["id", "-u", "caddy"]:
+                return str(user_uid)
+            if command == ["systemctl", "show", config[0], "--property=MainPID", "--value"]:
+                return str(pid)
+            if command == ["systemctl", "is-enabled", "--quiet", "monoize-routing.service"]:
+                if not routing_enabled:
+                    raise subprocess.CalledProcessError(1, command)
+                return ""
+            self.assertEqual(command, ["curl", "--disable", "-fsS", "--noproxy", "*", "--max-time", "5",
+                                       "http://127.0.0.1:2020/config/apps/http/servers"])
+            return json.dumps({"servers": [{"routes": [{"upstreams": [
+                {"dial": f"127.0.0.1:{port}"} for port in live_ports
+            ]}]}]})
+
+        with patch.object(pgswap, "run", side_effect=run), \
+                patch.object(pathlib.Path, "read_text", autospec=True,
+                             return_value=f"reverse_proxy 127.0.0.1:{static_port}") as read, \
+                patch.object(pathlib.Path, "stat", autospec=True, return_value=Mock(st_uid=process_uid)) as stat:
+            pgswap.verify_caddy(8080, 999, config)
+            self.assertEqual(read.call_args.args[0], pathlib.Path(config[1]))
+            self.assertEqual(stat.call_args.args[0], pathlib.Path(f"/proc/{pid}"))
+        return commands
+
+    def test_selected_ingress_is_verified_without_reload_or_write(self):
+        commands = self.verify()
+        self.assertEqual(len(commands), 5)
+        self.assertFalse(any(value in {"reload", "restart", "-X", "--data", "--location", "-L"}
+                             for command in commands for value in command))
+
+    def test_selected_ingress_preserves_every_existing_route_and_identity_gate(self):
+        for arguments, error in [
+            ({"static_port": 8081}, "Caddyfile disagrees"),
+            ({"user_uid": 1000}, "Caddy service UID mismatch"),
+            ({"process_uid": 1000}, "Caddy process UID mismatch"),
+            ({"pid": 0}, "Caddy process UID mismatch"),
+            ({"live_ports": (8081,)}, "Live Caddy configuration disagrees"),
+            ({"live_ports": (8080, 8081)}, "Live Caddy configuration disagrees"),
+            ({"live_ports": ()}, "Live Caddy configuration disagrees"),
+        ]:
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(RuntimeError, error):
+                self.verify(**arguments)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.verify(routing_enabled=False)
+
+
 class ConfigurationTests(unittest.TestCase):
     def setUp(self):
         (PROJECT / "local-test").mkdir(exist_ok=True)

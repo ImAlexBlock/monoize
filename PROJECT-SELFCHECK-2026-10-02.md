@@ -71,6 +71,8 @@ Do not replace the protocol directories wholesale with upstream files.
 | Deployment credentials | Remove the historical PostgreSQL password from tracked handoff text and the cutover script. Require an operator-supplied DSN. | Keep credentials out of tracked operational instructions and script defaults. |
 | Cache capacity | Release DashMap iterator guards before removal in dashboard aggregates, spend windows, last-used retries, and custom-proxy clients. | Insertion at capacity must not acquire a write lock while retaining its own shard read lock. Preserve clients held by active requests. |
 | Routing regression fixtures | Increment the registry generation after direct SQL corruption or repair. | Exercise decoding through a fresh snapshot. Preserve the installed snapshot on consecutive failed rebuilds and recover after repair. |
+| Provider reorder | Increment the registry generation after committing new priorities. | Refresh order and priorities in every routing store in the same process on its next read. |
+| Migrated ingress | Select the existing Caddy service, configuration file, and loopback admin origin through explicit settings. | Preserve UID, static/live route, and routing-unit checks without restarting or reloading ingress. |
 
 The frontend dependency audit decreased from 112 advisory entries to zero.
 The documentation dependency audit decreased from 34 entries to zero.
@@ -100,7 +102,11 @@ Apeiron's frontend build and Go worker tests passed. Its Rust server compiled, b
 The baseline Rust suite exposed a capacity-eviction deadlock and two stale registry fixtures.
 An iterator retained its DashMap shard read lock while removal requested that shard's write lock.
 Source review found four instances of this pattern. Each fix has a bounded capacity regression test.
-The routing fixtures now explicitly invalidate the registry and verify failed-rebuild recovery.
+Run `36985587061` at `b9c50e08` passed all four capacity tests without hanging.
+Its library run passed 1128 tests, failed one, ignored one, and filtered 16 PostgreSQL tests.
+The remaining failure exposed a missing cache invalidation after Provider reorder.
+The final fix invalidates after commit and checks a second routing store's independent snapshot.
+The corruption fixture also invalidates explicitly and verifies failed-rebuild recovery.
 Run the full workflow on these final changes before accepting the release.
 
 | Check | Known result | Limit |
@@ -133,9 +139,19 @@ Do not report production capacity, paid inference, payment processing, or long-s
 ## Deployment pending
 
 The requested deployment target is `40.160.141.21`.
-An SSH attempt as `root` with `BatchMode=yes` was rejected.
-The user has received the access request but has not yet supplied working authentication.
-Deployment therefore remains pending.
+The initial SSH attempt as `root` was rejected.
+The supplied `debian` access and sudo escalation succeeded during this check.
+Read-only inspection confirmed the running PostgreSQL application and host routing.
+Deployment remains pending final test and release gates.
+
+The target uses `migration-ingress.service`, `/opt/migration-ingress/Caddyfile`,
+and the loopback admin origin `http://127.0.0.1:2020`.
+The standard `caddy.service` is not the serving ingress.
+The serving image is `monoize:20261002-dashboard-read-recovery` with image ID
+`sha256:71023c43bc3a808ca9d43ee97cb11112fd3701f14f8e4b5e6933709181d7d6d9`.
+Its PostgreSQL connection is configured, and its application UID/GID is `1000:1000`.
+The active and stable ports are `8080`; the ingress UID is `999`.
+Use the target-specific settings in `DEPLOYMENT-READINESS-2026-10-02.md`.
 
 The current public homepage returned HTTP 200.
 Direct TLS probes used curl `--resolve` to target the requested server through two configured public domain names.

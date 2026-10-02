@@ -4,6 +4,7 @@
 import datetime
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import pathlib
@@ -237,17 +238,46 @@ def connections(port):
     return [line for line in lines if line.split()[0] not in {"LISTEN", "TIME-WAIT", "CLOSED"}]
 
 
-def verify_caddy(stable, uid):
-    config = pathlib.Path("/etc/caddy/Caddyfile").read_text()
+def caddy_configuration():
+    service = os.environ.get("MONOIZE_SWAP_CADDY_SERVICE", "caddy")
+    filename = os.environ.get("MONOIZE_SWAP_CADDYFILE", "/etc/caddy/Caddyfile")
+    admin = os.environ.get("MONOIZE_SWAP_CADDY_ADMIN_URL", "http://127.0.0.1:2019")
+    require(len(service) <= 255 and re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]*(?:@[A-Za-z0-9][A-Za-z0-9_-]*)?(?:\.service)?", service),
+        "Invalid Caddy service name")
+    path = pathlib.PurePosixPath(filename)
+    require(filename.startswith("/") and not filename.startswith("//")
+            and str(path) == filename and ".." not in path.parts and "\\" not in filename
+            and not any(c.isspace() or not c.isprintable() for c in filename),
+            "Caddyfile must be a normalized absolute POSIX path")
+    require(not any(c.isspace() or not c.isprintable() for c in admin),
+            "Invalid Caddy admin origin")
+    try:
+        parsed = urllib.parse.urlsplit(admin)
+        address = ipaddress.ip_address(parsed.hostname or "")
+        port = parsed.port
+    except ValueError as error:
+        raise RuntimeError("Caddy admin origin requires a loopback IP and explicit port") from error
+    host = f"[{address.compressed}]" if address.version == 6 else str(address)
+    require(parsed.scheme == "http" and address.is_loopback and "%" not in str(address)
+            and port is not None and 1 <= port <= 65535 and parsed.username is None
+            and parsed.password is None and not parsed.path and not parsed.query and not parsed.fragment
+            and admin == f"http://{host}:{port}", "Invalid Caddy admin origin")
+    return service, filename, admin
+
+
+def verify_caddy(stable, uid, caddy_config):
+    service, filename, admin = caddy_config
+    config = pathlib.Path(filename).read_text()
     require(set(re.findall(r"127\.0\.0\.1:(808[01])", config)) == {str(stable)},
             "Caddyfile disagrees with the stable route")
-    user = run(["systemctl", "show", "caddy", "--property=User", "--value"], text=True).strip()
+    user = run(["systemctl", "show", service, "--property=User", "--value"], text=True).strip()
     require(user and int(run(["id", "-u", user], text=True)) == uid, "Caddy service UID mismatch")
-    pid = int(run(["systemctl", "show", "caddy", "--property=MainPID", "--value"], text=True))
+    pid = int(run(["systemctl", "show", service, "--property=MainPID", "--value"], text=True))
     require(pid > 0 and pathlib.Path(f"/proc/{pid}").stat().st_uid == uid, "Caddy process UID mismatch")
     run(["systemctl", "is-enabled", "--quiet", "monoize-routing.service"])
     config = json.loads(run(["curl", "--disable", "-fsS", "--noproxy", "*", "--max-time", "5",
-                             "http://127.0.0.1:2019/config/apps/http/servers"]))
+                             admin + "/config/apps/http/servers"]))
     ports = set()
 
     def visit(value):
@@ -335,6 +365,7 @@ def main():
     if len(sys.argv) != 2 or not re.fullmatch(r"[A-Za-z0-9_.-]+", sys.argv[1]):
         raise SystemExit("usage: blue-green-swap.sh <image-revision>")
     revision = sys.argv[1]
+    caddy_config = caddy_configuration()
     with (ROOT / "blue-green-swap.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         old = inspect("monoize")
@@ -364,7 +395,7 @@ def main():
         state = ROOT / "blue-green-route.state"
         stable, recorded, recorded_uid = map(int, state.read_text().split())
         require(stable in {8080, 8081} and recorded == active and recorded_uid == uid, "Route state mismatch")
-        verify_caddy(stable, uid)
+        verify_caddy(stable, uid, caddy_config)
         run([str(ROOT / "blue-green-route.sh"), "--check", str(stable), str(active), str(uid)])
         data = pathlib.Path(next(m["Source"] for m in old["Mounts"] if m["Destination"] == "/app/data"))
         backup = ROOT / "backups" / ("pg-" + revision + "-" + str(time.time_ns()))

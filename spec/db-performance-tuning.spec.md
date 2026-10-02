@@ -388,6 +388,12 @@ create/update/delete/reorder) and every write to `monoize_groups` (group
 create/update/reorder/delete) MUST increment the registry generation after the write
 commits. The generation counter is process-wide.
 
+DPT-RR3a. A successful nonempty Provider reorder MUST increment the registry
+generation after committing the priority updates and before returning success.
+The next Provider list read from any store in that process MUST refresh its cached
+order and priorities. An empty reorder performs no registry write and need not
+increment the generation.
+
 DPT-RR4. Snapshot rebuilds MUST serialize on one mutex per shared snapshot state.
 A reader MAY reuse an installed snapshot only when its generation equals the
 process-wide generation observed at the check and its age does not exceed the TTL.

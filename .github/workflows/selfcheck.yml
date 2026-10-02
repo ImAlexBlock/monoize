@@ -190,6 +190,9 @@ jobs:
           git rev-parse HEAD > local-test/release/REVISION
           cd local-test/release
           sha256sum monoize > monoize.sha256
+      - name: Verify isolated release runtime
+        timeout-minutes: 10
+        run: python3 scripts/smoke_release_image.py --artifact-dir local-test/release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: monoize-linux-x64-${{ github.sha }}
