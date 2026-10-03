@@ -519,12 +519,15 @@ def main():
         private_file(backup / "candidate-lease-owner.txt", owner + "\n")
         run(["docker", "update", "--restart=no", "monoize-prev"])
         run(["docker", "kill", "--signal=SIGTERM", "monoize-prev"])
-        for _ in range(120):
+        shutdown_started = time.monotonic()
+        shutdown_alerted = False
+        while True:
             if not inspect("monoize-prev")["State"]["Running"]:
                 break
+            if not shutdown_alerted and time.monotonic() - shutdown_started >= 120:
+                log("ALERT: graceful shutdown still pending after 120 seconds; continuing to wait")
+                shutdown_alerted = True
             time.sleep(1)
-        else:
-            raise RuntimeError("Graceful shutdown pending; retain both instances")
         require(inspect("monoize-prev")["State"]["ExitCode"] == 0, "Previous container did not exit cleanly")
         run(["docker", "rename", "monoize-prev", "monoize-before-" + revision + "-" + str(time.time_ns())])
         run(["docker", "rename", "monoize-next", "monoize"])

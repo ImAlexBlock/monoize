@@ -152,6 +152,9 @@ with image `monoize:<rev>`; no `monoize-next` or `monoize-prev`; persisted and
 live routing target the candidate port; public `/readyz` returns 200; and the
 candidate owns the Store lease. Stop the old instance with SIGTERM only after
 its accepted connection count is zero. Use a grace period of at least 15 seconds.
+After SIGTERM, the swap MUST wait until the old container exits cleanly. Any
+post-signal duration such as 120 seconds MAY produce an alert, but MUST NOT
+fail the swap or impose a stop deadline.
 
 BG9. Candidate startup MUST set `MONOIZE_BOOT_STANDBY_LEASE=1` and configure
 the temporary forwarding mode defined in `standby-deployment.spec.md`.
@@ -187,6 +190,10 @@ BG12. Poll old accepted connections every 15 seconds. The default
 `MONOIZE_SWAP_DRAIN_MAX_SECONDS=14400` is an alert threshold only. Crossing it
 MUST log the remaining connections and continue waiting without a stop signal.
 A failed socket query MUST NOT be interpreted as an empty result.
+
+BG12a. A zero accepted-connection count does not prove that detached upstream
+work, request-log settlement, or an active probe has completed. The old runtime
+MUST remain retained until its graceful shutdown reports a clean exit.
 
 BG13. Hold exclusive `/opt/monoize/blue-green-swap.lock` throughout the swap.
 Run under a host supervisor that survives SSH disconnection. Do not launch

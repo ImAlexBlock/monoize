@@ -537,6 +537,11 @@ class DeploymentFlowTests(unittest.TestCase):
         self.assertNotIn(["docker", "rename", "monoize", "monoize-prev"], events)
         probe.start.assert_not_called()
 
+    def test_shutdown_wait_has_no_finite_failure_deadline(self):
+        events, database, probe = self.exercise()
+        self.assertIn(["docker", "kill", "--signal=SIGTERM", "monoize-prev"], events)
+        self.assertNotIn("Graceful shutdown pending; retain both instances", events)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,7 +45,7 @@ The first substantive content times were:
 
 Responses emitted an initial SSE event in about `0.75–0.88 s`, but substantive content still arrived around `11.3 s`.
 The remaining wait occurs after CPA has accepted the upstream stream.
-These two samples per cell do not establish a stable protocol or effort ranking.
+One cold request and one warm request per protocol/effort pair do not establish a stable ranking.
 
 The benchmark connected directly to CPA's loopback listener.
 It validates CPA cache and stream timing, but it does not prove that Monoize Channel affinity is active for every client.
@@ -59,3 +59,34 @@ The queue waits for the natural drain, revalidates the Caddy and lease baselines
 It does not force-stop the old process or reload Caddy.
 
 The measured bottleneck is upstream generation or scheduling after the first event, rather than CPU, CPA loopback networking, or cache lookup.
+
+## Live first-event timing
+
+Commits `f18a11de` and `dce86455` update the live request-log row when the first complete upstream SSE event arrives.
+The row remains `pending` until the request ends.
+Start, usage, error, and terminal events can set TTFB before visible text arrives.
+Heartbeat comments do not set TTFB.
+The timing update performs no database, spool, or network I/O.
+Final usage and charges remain part of terminal settlement.
+
+The frontend now applies buffered snapshots in reception order.
+A later snapshot with the same row ID replaces earlier timing and status fields.
+This fixes updates lost while a request-log tooltip is open.
+The existing tooltip pause and table layout remain unchanged.
+
+These changes expose timing earlier. They do not reduce the measured upstream generation delay.
+
+## Remaining connection during deployment
+
+At `2026-10-03T05:03:54Z`, one accepted connection remained on the old port 8080.
+Its peer was Caddy, and its incoming byte count had not changed for about 13 hours.
+Two samples, 6,864 seconds apart, showed 3,656 additional outgoing bytes in 457 data segments.
+This equals eight bytes every 15 seconds and matches the default request-log SSE heartbeat.
+The endpoint URL was not inspected, so the connection type is inferred.
+The connection does not match an idle Store-forwarding pool: its peer is Caddy, and forwarding disables idle pooling.
+
+The deployment process waits for this connection to close naturally.
+An open request-log subscription has no maximum lifetime, so the queue has no guaranteed completion time.
+Closing the corresponding log page lets its subscription end.
+The connection closed naturally at `2026-10-03T05:28:13Z`.
+The waiting drain then completed, and the queued `387c29a0` swap started at `2026-10-03T05:28:27Z`.
