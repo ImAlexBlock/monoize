@@ -77,7 +77,7 @@ function Stat({ value, suffix = "", label }: { value: number; suffix?: string; l
 export function WelcomePage() {
   const { t } = useTranslation();
   const { data: site, isLoading } = usePublicSiteSettings();
-  const siteName = resolvePublicBrandName(site?.site_name || "LingShenAI Console");
+  const siteName = resolvePublicBrandName(site?.site_name || "LynShen Console");
   const base = resolvePublicApiBaseUrl(site?.api_base_url || "", window.location.origin);
   const exampleBase = base.baseUrl || "https://lynshen.org/v1";
 

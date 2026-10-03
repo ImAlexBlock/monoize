@@ -24,7 +24,7 @@ export function PublicLayout() {
   const { data: site, isLoading } = usePublicSiteSettings();
   const { resolvedTheme, setTheme } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
-  const siteName = resolvePublicBrandName(site?.site_name || "LingShenAI Console");
+  const siteName = resolvePublicBrandName(site?.site_name || "LynShen Console");
 
   return (
     <div className="public-surface h-dvh overflow-y-auto overflow-x-hidden bg-background text-foreground">
