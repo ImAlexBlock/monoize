@@ -22,6 +22,7 @@ import { PageHeader } from '@/components/ui/page-header'
 import { AnimatePresence } from 'framer-motion'
 import { CaptureViewerDialog } from './request-logs/capture-viewer-dialog'
 import { DateRangePicker } from './request-logs/date-range-picker'
+import { mergeSSELogs } from './request-logs/merge-sse-logs'
 import { RequestLogsTable } from './request-logs/request-logs-table'
 import { asObject } from './request-logs/utils'
 import { useCostFormatter } from '@/hooks/use-cost-formatter'
@@ -238,47 +239,7 @@ export function RequestLogsPage() {
 	const prependSSELogs = useCallback(
 		(logs: RequestLog[]) => {
 			if (logs.length === 0) return
-
-			setLoadedLogs(prev => {
-				const next = [...prev]
-				const existingIds = new Set(prev.map(log => log.id))
-				const incomingIds = new Set<string>()
-				const handledRequestIds = new Set<string>()
-
-				for (const log of logs) {
-					if (incomingIds.has(log.id)) continue
-					incomingIds.add(log.id)
-					const matchesFilters = matchesActiveFilters(log)
-
-					if (log.request_id) {
-						if (handledRequestIds.has(log.request_id)) {
-							const duplicateIndex = next.findIndex(
-								item => item.request_id === log.request_id
-							)
-							if (duplicateIndex >= 0) {
-								if (matchesFilters) next[duplicateIndex] = log
-								else next.splice(duplicateIndex, 1)
-							}
-							continue
-						}
-						handledRequestIds.add(log.request_id)
-						const existingIndex = next.findIndex(
-							item => item.request_id === log.request_id
-						)
-						if (existingIndex >= 0) {
-							next.splice(existingIndex, 1)
-							if (matchesFilters) next.unshift(log)
-							continue
-						}
-					}
-
-					if (!matchesFilters) continue
-					if (existingIds.has(log.id)) continue
-					next.unshift(log)
-				}
-
-				return next
-			})
+			setLoadedLogs(prev => mergeSSELogs(prev, logs, matchesActiveFilters))
 		},
 		[matchesActiveFilters]
 	)
