@@ -54,7 +54,7 @@ A request log row has:
 - `error_message: string?` (error message for failed requests; for upstream-derived failures this is the full internal detail per `upstream-error-sanitization.spec.md` SAN-9 — the truncated raw upstream text, which MAY differ from the downstream client message and MAY contain raw upstream URLs, domains, IPv4 addresses, and `api_key:` values. Read-time disclosure to dashboard viewers follows RL-API14.)
 - `error_http_status: integer?` (HTTP status returned to downstream client for failed requests)
 - `duration_ms: integer?` (wall-clock time from request start to upstream response)
-- `ttfb_ms: integer?` (time from request start to first byte/chunk from upstream; null for non-streaming)
+- `ttfb_ms: integer?` (upstream first-event latency under RL6; upstream body latency for synthetic streams under RL5; null for non-streaming)
 - `request_ip: string?` (the server-generated canonical client IP for the request)
 - `reasoning_effort: string?` (the selected reasoning-effort label when present)
 - `tried_providers_json: object[]?` (array of failed upstream attempts in chronological order; persisted as JSON text in DB; null when no upstream attempt failed). Each object has:
@@ -100,6 +100,8 @@ RL1a. The lifecycle row MUST be accumulated in memory during request processing.
 RL1a-1. The server MUST broadcast an in-memory request-log snapshot with `status = "pending"` to the request-log SSE stream as soon as request processing begins. This SSE-only snapshot MUST NOT create or update any database row.
 
 RL1a-2. When provider/channel metadata for an in-flight request becomes known, the server SHOULD broadcast an updated in-memory `pending` snapshot for the same `request_id`. When the terminal `success`, `client_gone`, or `error` row is later broadcast, clients MUST treat it as replacing any earlier `pending` snapshot with the same `request_id`.
+
+RL1a-2a. For a pass-through streaming request, when the upstream decoder first records `ttfb_ms` under RL6, the server MUST publish that same value in the request's in-memory `pending` snapshot without waiting for a later event or stream completion. The snapshot MUST retain `status = "pending"` and MUST NOT infer usage, billing, or success. Update only the admitted lifecycle that owns the stream. Publish at most one such timing update per lifecycle. If its pending snapshot no longer exists or its terminal row was already scheduled, skip the update. Publishing this snapshot MUST NOT perform database, spool, or network I/O or await persistence. The update and its broadcast MUST precede any terminal snapshot for the same lifecycle.
 
 RL1a-3. The server MUST maintain an in-memory map of current SSE-only `pending` snapshots keyed by `request_id`. Creating or updating a `pending` snapshot MUST upsert that key before broadcasting the snapshot. Enqueuing a terminal `success` or `error` row with the same `request_id` MUST remove that key from the map before broadcasting the terminal row. The map is process-local and starts empty after process startup.
 
@@ -208,7 +210,7 @@ RL4. For non-streaming requests, the log MUST include token usage from the upstr
 
 RL5. For streaming requests where response transforms require buffering (synthetic stream), the log MUST include token usage. `ttfb_ms` MUST record the time from `started_at` to the point where the upstream response body is received.
 
-RL6. For pass-through streaming requests, `ttfb_ms` MUST record the time from `started_at` to the point where the first chunk is received from upstream.
+RL6. For pass-through streaming requests, `ttfb_ms` MUST record the time from `started_at` to the point where the decoder receives the first complete upstream SSE event. SSE comments MUST NOT set this value. A start, usage, error, or terminal event MAY set it without text content. This metric is upstream first-event latency; it MUST NOT be described as time to first visible text. The in-memory pending snapshot and the terminal row MUST use the same observed value.
 
 RL6a. For pass-through streaming requests where usage cannot be extracted from streamed events, token usage fields MAY be omitted (set to null).
 

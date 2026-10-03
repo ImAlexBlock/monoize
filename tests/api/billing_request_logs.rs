@@ -1,5 +1,211 @@
 use super::*;
 
+async fn assert_live_first_event_timing(terminal_error: bool) {
+    use futures_util::StreamExt;
+
+    const MODEL: &str = "live-first-event-test";
+    const REQUEST_ID: &str = "live-first-event-request";
+    let ctx = setup().await;
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(4);
+    let receiver = Arc::new(tokio::sync::Mutex::new(Some(event_rx)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let receiver = receiver.clone();
+            async move {
+                let events = receiver.lock().await.take().expect("one upstream attempt");
+                Sse::new(
+                    tokio_stream::wrappers::ReceiverStream::new(events).map(Ok::<_, Infallible>),
+                )
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    ctx.state
+        .monoize_store
+        .create_provider(
+            serde_json::from_value(json!({
+                "name": "live-first-event", "confirm_public_exposure": true,
+                "pricing_profile": "default", "transforms": [],
+                "channel": {"name": "live-first-event-channel", "provider_type": "responses",
+                    "base_url": format!("http://{address}"), "api_key": "mock-key",
+                    "models": {(MODEL): {"redirect": null}}}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    seed_test_model_pricing(&ctx.state, &[MODEL]).await;
+    let user = ctx
+        .state
+        .user_store
+        .get_user_by_username("tenant-1")
+        .await
+        .unwrap()
+        .unwrap();
+    ctx.state
+        .user_store
+        .update_user(
+            &user.id,
+            None,
+            None,
+            None,
+            None,
+            Some("1000000000"),
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut updates = ctx.state.log_broadcast.subscribe();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, ctx.auth_header.clone())
+        .header("x-request-id", REQUEST_ID)
+        .body(Body::from(
+            json!({"model": MODEL, "input": "hello", "stream": true}).to_string(),
+        ))
+        .unwrap();
+    let response = ctx.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    event_tx.send(Event::default().event("response.created").data(json!({
+        "type": "response.created", "response": {"id": "resp_live", "object": "response",
+            "model": MODEL, "status": "in_progress", "output": []}
+    }).to_string())).await.unwrap();
+    // The open sender gates every later upstream event, including the terminal.
+    let live = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            for row in updates.recv().await.unwrap() {
+                if row.request_id.as_deref() == Some(REQUEST_ID) && row.ttfb_ms.is_some() {
+                    return row;
+                }
+            }
+        }
+    })
+    .await
+    .expect("first-event timing must not wait for text or completion");
+    assert_eq!(live.status, "pending");
+    assert!(live.input_tokens.is_none() && live.output_tokens.is_none());
+    assert!(live.charge_nano_usd.is_none());
+    assert_eq!(
+        ctx.state
+            .pending_request_logs
+            .get(REQUEST_ID)
+            .unwrap()
+            .ttfb_ms,
+        live.ttfb_ms
+    );
+    ctx.state.user_store.flush_all_batchers().await;
+    let (stored, _, _) = ctx
+        .state
+        .user_store
+        .list_request_logs_by_user(&user.id, 10, 0, Some(MODEL), None, None, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        stored.is_empty(),
+        "first event must not insert a database row"
+    );
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(Duration::from_secs(5), body.frame())
+        .await
+        .expect("start frame must not wait for completion")
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&first)
+            .unwrap()
+            .contains("response.created")
+    );
+    let terminal = if terminal_error {
+        json!({"type": "response.failed", "response": {"id": "resp_live", "model": MODEL,
+            "status": "failed", "output": [], "error": {"code": "server_error", "message": "test failure"}}})
+    } else {
+        json!({"type": "response.completed", "response": {"id": "resp_live", "model": MODEL,
+            "status": "completed", "output": [{"id": "msg_live", "type": "message",
+                "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}],
+            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}})
+    };
+    event_tx
+        .send(
+            Event::default()
+                .event(terminal["type"].as_str().unwrap())
+                .data(terminal.to_string()),
+        )
+        .await
+        .unwrap();
+    drop(event_tx);
+    tokio::time::timeout(Duration::from_secs(10), body.collect())
+        .await
+        .unwrap()
+        .unwrap();
+    let terminal_snapshot = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            for row in updates.recv().await.unwrap() {
+                if row.request_id.as_deref() == Some(REQUEST_ID) {
+                    assert_ne!(row.status, "pending", "no duplicate timing snapshot");
+                    return row;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        terminal_snapshot.status,
+        if terminal_error { "error" } else { "success" }
+    );
+    assert_eq!(terminal_snapshot.ttfb_ms, live.ttfb_ms);
+    assert!(
+        (terminal_snapshot.created_at - live.created_at)
+            .num_milliseconds()
+            .abs()
+            < 50
+    );
+    ctx.state.user_store.flush_all_batchers().await;
+    let (stored, _, _) = ctx
+        .state
+        .user_store
+        .list_request_logs_by_user(&user.id, 10, 0, Some(MODEL), None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].timing.ttfb_ms,
+        live.ttfb_ms.map(|value| value as i64)
+    );
+    assert!(!ctx.state.pending_request_logs.contains_key(REQUEST_ID));
+    let user_after = ctx
+        .state
+        .user_store
+        .get_user_by_username("tenant-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        1_000_000_000 - user_after.balance_nano_usd.parse::<i128>().unwrap(),
+        if terminal_error { 0 } else { 5000 }
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn first_upstream_event_publishes_timing_before_text_and_bills_once() {
+    assert_live_first_event_timing(false).await;
+}
+
+#[tokio::test]
+async fn live_first_event_timing_preserves_later_upstream_error() {
+    assert_live_first_event_timing(true).await;
+}
+
 async fn read_sse_through_terminal(response: axum::response::Response, terminal: &str) -> String {
     let mut body = response.into_body();
     let text = tokio::time::timeout(Duration::from_secs(10), async {

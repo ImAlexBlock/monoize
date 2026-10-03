@@ -1595,6 +1595,7 @@ pub(crate) struct StreamTerminalError {
 #[derive(Default)]
 pub(crate) struct StreamRuntimeMetrics {
     ttfb_ms: Option<u64>,
+    first_event_log: Option<PendingStreamTimingObserver>,
     usage: Option<urp::Usage>,
     response_id: Option<String>,
     response_service_tier: Option<String>,

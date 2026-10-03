@@ -45,6 +45,53 @@ pub(super) struct PendingRequestLogGuard {
         std::sync::Arc<dashmap::DashMap<String, std::sync::Arc<crate::app::RequestLogLifecycle>>>,
 }
 
+pub(super) struct PendingStreamTimingObserver {
+    request_id: String,
+    lifecycle: Arc<crate::app::RequestLogLifecycle>,
+    admissions: Arc<dashmap::DashMap<String, Arc<crate::app::RequestLogLifecycle>>>,
+    pending: Arc<dashmap::DashMap<String, InsertRequestLog>>,
+    broadcast: tokio::sync::broadcast::Sender<Vec<InsertRequestLog>>,
+}
+
+impl PendingRequestLogGuard {
+    pub(super) fn stream_timing_observer(
+        &self,
+        broadcast: tokio::sync::broadcast::Sender<Vec<InsertRequestLog>>,
+    ) -> PendingStreamTimingObserver {
+        PendingStreamTimingObserver {
+            request_id: self.request_id.clone(),
+            lifecycle: self.lifecycle.clone(),
+            admissions: self.request_log_admissions.clone(),
+            pending: self.pending_request_logs.clone(),
+            broadcast,
+        }
+    }
+}
+
+impl PendingStreamTimingObserver {
+    pub(super) fn publish(self, ttfb_ms: u64) {
+        let Some(admission) = self.admissions.get(&self.request_id) else {
+            return;
+        };
+        if !Arc::ptr_eq(admission.value(), &self.lifecycle) {
+            return;
+        }
+        let Some(mut pending) = self.pending.get_mut(&self.request_id) else {
+            return;
+        };
+        if self.lifecycle.terminal_scheduled()
+            || pending.status != crate::users::REQUEST_LOG_STATUS_PENDING
+            || pending.ttfb_ms.is_some()
+        {
+            return;
+        }
+        pending.ttfb_ms = Some(ttfb_ms);
+        // Terminal enqueue removes this map entry before broadcasting. Keep the
+        // guard through send so a late pending snapshot cannot follow the terminal.
+        let _ = self.broadcast.send(vec![pending.clone()]);
+    }
+}
+
 impl Drop for PendingRequestLogGuard {
     fn drop(&mut self) {
         let Some(reservation) = self.lifecycle.try_schedule_terminal() else {
@@ -998,6 +1045,83 @@ mod admission_tests {
         );
         assert_eq!(canonical_request_id(Some(" \t ")), None);
         assert_eq!(canonical_request_id(None), None);
+    }
+
+    #[tokio::test]
+    async fn stream_first_event_publishes_pending_timing_once() {
+        let (_temp, _batcher, reservation, _other) = reservations();
+        let admissions = Arc::new(dashmap::DashMap::new());
+        let lifecycle = publish_request_log_admission(
+            &admissions,
+            "live",
+            reservation,
+            crate::app::RequestLogTaskTracker::default(),
+        )
+        .unwrap();
+        let pending = Arc::new(dashmap::DashMap::new());
+        pending.insert("live".to_string(), pending_log("live"));
+        let (broadcast, mut updates) = tokio::sync::broadcast::channel(8);
+        let metrics = Arc::new(tokio::sync::Mutex::new(StreamRuntimeMetrics {
+            first_event_log: Some(PendingStreamTimingObserver {
+                request_id: "live".to_string(),
+                lifecycle,
+                admissions,
+                pending: pending.clone(),
+                broadcast,
+            }),
+            ..Default::default()
+        }));
+        let started = std::time::Instant::now();
+        mark_stream_ttfb_if_needed(Some(started), &Some(metrics.clone())).await;
+        let observed = metrics.lock().await.ttfb_ms.unwrap();
+        mark_stream_ttfb_if_needed(Some(started), &Some(metrics)).await;
+        let snapshot = updates.try_recv().unwrap().remove(0);
+        assert_eq!(snapshot.ttfb_ms, Some(observed));
+        assert_eq!(pending.get("live").unwrap().ttfb_ms, Some(observed));
+        assert_eq!(snapshot.status, "pending");
+        assert_eq!(snapshot.input_tokens, None);
+        assert_eq!(snapshot.charge_nano_usd, None);
+        assert!(updates.try_recv().is_err(), "one update per stream");
+    }
+
+    #[test]
+    fn stream_timing_skips_terminal_missing_and_reused_lifecycles() {
+        for scenario in ["terminal", "missing", "reused"] {
+            let (_temp, _batcher, first, second) = reservations();
+            let admissions = Arc::new(dashmap::DashMap::new());
+            let tracker = crate::app::RequestLogTaskTracker::default();
+            let lifecycle =
+                publish_request_log_admission(&admissions, "live", first, tracker.clone()).unwrap();
+            let pending = Arc::new(dashmap::DashMap::new());
+            pending.insert("live".to_string(), pending_log("live"));
+            let (broadcast, mut updates) = tokio::sync::broadcast::channel(8);
+            let observer = PendingStreamTimingObserver {
+                request_id: "live".to_string(),
+                lifecycle: lifecycle.clone(),
+                admissions: admissions.clone(),
+                pending: pending.clone(),
+                broadcast,
+            };
+            match scenario {
+                "terminal" => {
+                    lifecycle.try_schedule_terminal().unwrap();
+                }
+                "missing" => {
+                    pending.remove("live");
+                }
+                "reused" => {
+                    admissions.remove("live");
+                    publish_request_log_admission(&admissions, "live", second, tracker).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            observer.publish(42);
+            assert!(updates.try_recv().is_err(), "{scenario}");
+            assert!(
+                pending.get("live").is_none_or(|log| log.ttfb_ms.is_none()),
+                "{scenario}"
+            );
+        }
     }
 
     #[test]

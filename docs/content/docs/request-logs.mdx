@@ -13,6 +13,11 @@ Open **Logs** in the sidebar. Monoize records one row for every API-key-authenti
 - the status: `pending`, `success`, `error`, or `client_gone`;
 - timing: total duration, time to first byte, and tokens per second for streams.
 
+For pass-through streams, TTFB appears on the live `pending` row when the first complete upstream SSE event arrives.
+Start, usage, and error events can set this value before text arrives. Heartbeat comments do not set it.
+Use TTFB to measure the first upstream event, not the first visible text.
+This update uses memory only. Final usage and billing are saved after the request ends.
+
 `client_gone` means the client disconnected before response completion and the upstream request still completed successfully.
 Monoize continues the upstream request and charges for its recorded usage.
 A client that stops reading after the normal protocol completion frame retains `success`, even before HTTP EOF or billing settlement.

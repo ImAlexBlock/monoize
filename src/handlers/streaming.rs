@@ -1221,6 +1221,9 @@ async fn forward_stream_typed_once(
                         .map(|_| crate::request_capture::SseFrameCapture::new());
                     let runtime_metrics = Arc::new(Mutex::new(StreamRuntimeMetrics {
                         ttfb_ms: None,
+                        first_event_log: pending_request_log_guard.as_ref().map(|guard| {
+                            guard.stream_timing_observer(state.log_broadcast.clone())
+                        }),
                         usage: None,
                         response_id: None,
                         response_service_tier: None,

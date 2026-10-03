@@ -154,7 +154,6 @@ impl RequestLogLifecycle {
             .map(|_| self.reservation.clone())
     }
 
-    #[cfg(test)]
     pub(crate) fn terminal_scheduled(&self) -> bool {
         self.terminal_scheduled.load(Ordering::Acquire)
     }

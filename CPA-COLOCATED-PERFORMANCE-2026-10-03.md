@@ -15,7 +15,7 @@ The checks covered cache accounting, request latency, stream stability, and depl
 2. Enable `session_affinity_auto=true` for the two CPA Channels that did not have it.
    Channel generations changed from `30` to `31` and from `7` to `8`.
    The complete channel snapshots were verified after each update.
-   CPA prunes existing health and affinity entries when a Channel is updated, so those mappings must warm again.
+   Monoize prunes existing health and affinity entries when a Channel is updated, so those mappings must warm again.
    The update did not restart CPA or cancel an in-flight request.
 
 No global proxy, account pinning, service tier, retry budget, or reasoning effort was changed.
@@ -23,7 +23,8 @@ Those changes had no measured benefit and could alter account selection, cost, o
 
 ## Measurements
 
-The production baseline from `2026-10-03T02:29:00Z` to the first configuration change contained 151 successful requests in the sampled usage database.
+The final production sample from `2026-10-03T02:29:00Z` to `2026-10-03T03:32:40Z` contained 151 successful requests.
+The sample excludes the six synthetic benchmark requests.
 For `gpt-6-astra`, 106 of 107 requests had positive cached tokens.
 The cached-token coverage was `7,703,936 / 7,909,122 = 97.41%`.
 Those requests used one account and one normalized session, and they predate both live changes.

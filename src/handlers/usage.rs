@@ -17,7 +17,11 @@ pub(crate) async fn mark_stream_ttfb_if_needed(
     };
     let mut guard = runtime_metrics.lock().await;
     if guard.ttfb_ms.is_none() {
-        guard.ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
+        let ttfb_ms = started_at.elapsed().as_millis() as u64;
+        guard.ttfb_ms = Some(ttfb_ms);
+        if let Some(observer) = guard.first_event_log.take() {
+            observer.publish(ttfb_ms);
+        }
     }
 }
 
