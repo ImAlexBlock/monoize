@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import ExitStack
 import pathlib
 import os
 import json
@@ -493,22 +494,35 @@ class DeploymentFlowTests(unittest.TestCase):
                     raise RuntimeError("cutover probe failed")
 
             probe.finish.side_effect = finish
-            with patch.object(pgswap, "ROOT", root), patch.object(pgswap, "inspect", side_effect=inspect), \
-                    patch.object(pgswap, "run", side_effect=run), patch.object(pgswap.subprocess, "run", side_effect=external), \
-                    patch.object(pgswap, "DatabaseClient", return_value=database), \
-                    patch.object(pgswap, "CutoverProbe", return_value=probe), \
-                    patch.object(pgswap, "verify_migrations", return_value="a" * 64), \
-                    patch.object(pgswap, "verify_caddy"), patch.object(pgswap, "connections", return_value=[]), \
-                    patch.object(pgswap.urllib.request, "build_opener", return_value=client), \
-                    patch.object(pgswap.os, "chown", create=True), patch.object(pgswap.os, "umask"), \
-                    patch.object(pgswap.signal, "signal"), patch.object(pgswap.time, "sleep", side_effect=sleep), \
-                    patch.object(pgswap.time, "monotonic", side_effect=lambda: clock["elapsed"]), \
-                    patch.object(pgswap, "log", side_effect=events.append), \
-                    patch.object(sys, "argv", ["blue-green-swap.sh", "new"]), \
-                    patch.dict(sys.modules, {"fcntl": types.SimpleNamespace(flock=Mock(), LOCK_EX=1, LOCK_NB=2)}), \
-                    patch.dict(os.environ, {"MONOIZE_SWAP_PUBLIC_URL": "https://www.example.com/",
-                                            "MONOIZE_SWAP_READY_URL": "https://api.example.com/readyz",
-                                            "MONOIZE_SWAP_PUBLIC_IP": "40.160.141.21"}):
+            with ExitStack() as stack:
+                for target, name, kwargs in [
+                    (pgswap, "ROOT", {"new": root}),
+                    (pgswap, "inspect", {"side_effect": inspect}),
+                    (pgswap, "run", {"side_effect": run}),
+                    (pgswap.subprocess, "run", {"side_effect": external}),
+                    (pgswap, "DatabaseClient", {"return_value": database}),
+                    (pgswap, "CutoverProbe", {"return_value": probe}),
+                    (pgswap, "verify_migrations", {"return_value": "a" * 64}),
+                    (pgswap, "verify_caddy", {}),
+                    (pgswap, "connections", {"return_value": []}),
+                    (pgswap.urllib.request, "build_opener", {"return_value": client}),
+                    (pgswap.os, "chown", {"create": True}),
+                    (pgswap.os, "umask", {}),
+                    (pgswap.signal, "signal", {}),
+                    (pgswap.time, "sleep", {"side_effect": sleep}),
+                    (pgswap.time, "monotonic", {"side_effect": lambda: clock["elapsed"]}),
+                    (pgswap, "log", {"side_effect": events.append}),
+                ]:
+                    stack.enter_context(patch.object(target, name, **kwargs))
+                stack.enter_context(patch.object(sys, "argv", ["blue-green-swap.sh", "new"]))
+                stack.enter_context(patch.dict(sys.modules, {
+                    "fcntl": types.SimpleNamespace(flock=Mock(), LOCK_EX=1, LOCK_NB=2),
+                }))
+                stack.enter_context(patch.dict(os.environ, {
+                    "MONOIZE_SWAP_PUBLIC_URL": "https://www.example.com/",
+                    "MONOIZE_SWAP_READY_URL": "https://api.example.com/readyz",
+                    "MONOIZE_SWAP_PUBLIC_IP": "40.160.141.21",
+                }))
                 if probe_failure or handover_marker_failure or candidate_get_failure:
                     with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
                         pgswap.main()
