@@ -395,9 +395,15 @@ class CutoverTests(unittest.TestCase):
 
 
 class DeploymentFlowTests(unittest.TestCase):
-    def exercise(self, probe_failure=False, handover_marker_failure=False, candidate_get_failure=False):
+    def exercise(self, probe_failure=False, handover_marker_failure=False, candidate_get_failure=False,
+                 shutdown_seconds=0, shutdown_exit_code=0):
         events = []
         phase = {"handover": False}
+        clock = {"elapsed": 0, "shutdown_started": None}
+
+        def sleep(seconds):
+            clock["elapsed"] += seconds
+
         with tempfile.TemporaryDirectory(dir=PROJECT / "local-test") as directory:
             root = pathlib.Path(directory)
             data = root / "data"
@@ -413,7 +419,11 @@ class DeploymentFlowTests(unittest.TestCase):
 
             def inspect(name):
                 if name == "monoize-prev":
-                    return {"State": {"Running": False, "ExitCode": 0}}
+                    self.assertIsNotNone(clock["shutdown_started"])
+                    elapsed = clock["elapsed"] - clock["shutdown_started"]
+                    running = elapsed < shutdown_seconds
+                    events.append(("shutdown-state", elapsed, running, shutdown_exit_code))
+                    return {"State": {"Running": running, "ExitCode": shutdown_exit_code}}
                 if phase["handover"]:
                     return {"State": {"Running": True}, "Image": "sha256:new"}
                 return old
@@ -431,6 +441,8 @@ class DeploymentFlowTests(unittest.TestCase):
                     return "999\n"
                 if "--signal=SIGHUP" in command:
                     phase["handover"] = True
+                if "--signal=SIGTERM" in command:
+                    clock["shutdown_started"] = clock["elapsed"]
                 return ""
 
             def external(command, **kwargs):
@@ -489,7 +501,9 @@ class DeploymentFlowTests(unittest.TestCase):
                     patch.object(pgswap, "verify_caddy"), patch.object(pgswap, "connections", return_value=[]), \
                     patch.object(pgswap.urllib.request, "build_opener", return_value=client), \
                     patch.object(pgswap.os, "chown", create=True), patch.object(pgswap.os, "umask"), \
-                    patch.object(pgswap.signal, "signal"), patch.object(pgswap.time, "sleep"), patch.object(pgswap, "log"), \
+                    patch.object(pgswap.signal, "signal"), patch.object(pgswap.time, "sleep", side_effect=sleep), \
+                    patch.object(pgswap.time, "monotonic", side_effect=lambda: clock["elapsed"]), \
+                    patch.object(pgswap, "log", side_effect=events.append), \
                     patch.object(sys, "argv", ["blue-green-swap.sh", "new"]), \
                     patch.dict(sys.modules, {"fcntl": types.SimpleNamespace(flock=Mock(), LOCK_EX=1, LOCK_NB=2)}), \
                     patch.dict(os.environ, {"MONOIZE_SWAP_PUBLIC_URL": "https://www.example.com/",
@@ -497,6 +511,9 @@ class DeploymentFlowTests(unittest.TestCase):
                                             "MONOIZE_SWAP_PUBLIC_IP": "40.160.141.21"}):
                 if probe_failure or handover_marker_failure or candidate_get_failure:
                     with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                        pgswap.main()
+                elif shutdown_exit_code != 0:
+                    with self.assertRaisesRegex(RuntimeError, "Previous container did not exit cleanly"):
                         pgswap.main()
                 else:
                     pgswap.main()
@@ -538,9 +555,35 @@ class DeploymentFlowTests(unittest.TestCase):
         probe.start.assert_not_called()
 
     def test_shutdown_wait_has_no_finite_failure_deadline(self):
-        events, database, probe = self.exercise()
-        self.assertIn(["docker", "kill", "--signal=SIGTERM", "monoize-prev"], events)
-        self.assertNotIn("Graceful shutdown pending; retain both instances", events)
+        events, database, probe = self.exercise(shutdown_seconds=301)
+        shutdown_states = [event for event in events if isinstance(event, tuple) and event[0] == "shutdown-state"]
+        self.assertIn(("shutdown-state", 120, True, 0), shutdown_states)
+        self.assertIn(("shutdown-state", 300, True, 0), shutdown_states)
+        self.assertEqual(shutdown_states[-2:], [("shutdown-state", 301, False, 0)] * 2)
+        self.assertEqual(events.count("ALERT: graceful shutdown still pending after 120 seconds; continuing to wait"), 1)
+        self.assertEqual([event for event in events if isinstance(event, list) and event[:2] == ["docker", "kill"]],
+                         [["docker", "kill", "--signal=SIGHUP", "monoize-prev"],
+                          ["docker", "kill", "--signal=SIGTERM", "monoize-prev"]])
+        self.assertFalse(any(isinstance(event, list) and event[:2] in [["docker", "stop"], ["docker", "rm"]]
+                             for event in events))
+        clean_exit = events.index(("shutdown-state", 301, False, 0))
+        retained = next(i for i, event in enumerate(events)
+                        if isinstance(event, list) and event[:3] == ["docker", "rename", "monoize-prev"])
+        finalized = events.index(["docker", "rename", "monoize-next", "monoize"])
+        self.assertLess(clean_exit, retained)
+        self.assertLess(retained, finalized)
+        self.assertEqual(events.count("public-ready"), 2)
+        self.assertIn("SUCCESS: candidate owns Store lease; old instance retained after natural drain", events)
+
+    def test_nonzero_shutdown_exit_retains_instances_without_finalizing(self):
+        events, database, probe = self.exercise(shutdown_seconds=121, shutdown_exit_code=1)
+        self.assertIn(("shutdown-state", 121, False, 1), events)
+        self.assertEqual(events.count(["docker", "kill", "--signal=SIGTERM", "monoize-prev"]), 1)
+        self.assertFalse(any(isinstance(event, list) and event[:3] == ["docker", "rename", "monoize-prev"]
+                             for event in events))
+        self.assertNotIn(["docker", "rename", "monoize-next", "monoize"], events)
+        self.assertNotIn("SUCCESS: candidate owns Store lease; old instance retained after natural drain", events)
+        self.assertEqual(events.count("public-ready"), 1)
 
 
 if __name__ == "__main__":

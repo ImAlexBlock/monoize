@@ -90,3 +90,44 @@ An open request-log subscription has no maximum lifetime, so the queue has no gu
 Closing the corresponding log page lets its subscription end.
 The connection closed naturally at `2026-10-03T05:28:13Z`.
 The waiting drain then completed, and the queued `387c29a0` swap started at `2026-10-03T05:28:27Z`.
+
+The `387c29a0` candidate received new connections at `2026-10-03T05:28:58Z` and acquired the Store lease at `05:31:05Z`.
+The previous instance received SIGTERM after connection drain and lease handover.
+It exited with code zero at `05:38:40Z`, about 7.5 minutes after SIGTERM.
+The old deployment script stopped waiting after 120 seconds and reported a deployment failure.
+The candidate continued serving requests.
+After verifying the clean exit, runtime identity, route, readiness, and lease ownership, finalization completed at `05:40:51Z`.
+
+Commit `4c9da6fb` changes the post-SIGTERM wait to continue until the old instance exits.
+It emits one alert after 120 seconds and sends no additional stop signal.
+This wait accommodates detached upstream work and background tasks after accepted connections reach zero.
+The specific task that delayed this shutdown was not identified.
+
+## Final verification
+
+The final runtime revision is `4c9da6fbd82b69b6ff3fb13cb2634873b331ca6c`.
+Its CI run is [37100536050](https://github.com/Libra1337/monoizeovo/actions/runs/37100536050).
+The backend passed 2,022 ordinary Rust tests and the PostgreSQL checks.
+The frontend, documentation, deployment, Apeiron, and rehearsal jobs passed.
+The first-event tests verify pending timing before text, unchanged terminal timing, one billing settlement, and preserved upstream errors.
+The frontend fix passed 47 request-log tests, type checking, and lint.
+The strengthened local deployment suite passed 37 tests.
+It includes a 301-second graceful shutdown and refusal of a nonzero container exit.
+
+All seven CI jobs, including the release runtime check, passed.
+The verified binary SHA-256 is `d04da07f645671b60fa14588bd9f12e96bb771634fa73d1c9dc2b2b28023ec45`.
+The production image ID is `sha256:22cdc8efd4e9f5230a97c0b75b6657f281c292c189eb04a89371e4becc14e595`.
+The release preserves the migration tree from the preceding runtime.
+The official swap began at `2026-10-03T06:14:34Z`; its candidate started at `06:15:03Z`.
+New connections reached the candidate after its readiness checks passed.
+
+A bounded production log subscription observed seven requests in 5.6 seconds.
+Six pending rows already contained TTFB.
+One observed pending row then reached a terminal state with the same TTFB.
+The check sent no model request and removed its temporary diagnostic session.
+Evidence is stored at `/opt/monoize/build-4c9da6fb/production-live-timing.json`.
+
+At `2026-10-03T06:16:53Z`, both instances were ready, with zero restarts and no OOM kill.
+One connection remained on the old instance.
+The supervised official swap continues waiting for natural drain and clean shutdown.
+Its status is stored at `/opt/monoize/build-4c9da6fb/deployment-status.json`.
