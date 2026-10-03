@@ -408,7 +408,12 @@ fn api_stream_keep_alive() -> KeepAlive {
 /// A buffered stream surfaces client-side as a truncated body after a long
 /// reasoning phase ("error decoding response body"), because the terminal
 /// frame is never flushed.
-fn sse_response<S, E>(stream: S, keep_alive: KeepAlive) -> axum::response::Response
+fn sse_response<S, E>(
+    stream: S,
+    keep_alive: KeepAlive,
+    downstream: DownstreamProtocol,
+    downstream_state: Arc<DownstreamStreamState>,
+) -> axum::response::Response
 where
     S: futures_util::Stream<Item = Result<axum::response::sse::Event, E>> + Send + 'static,
     E: Into<axum::BoxError> + Send + Sync + 'static,
@@ -423,7 +428,7 @@ where
         "x-accel-buffering",
         axum::http::HeaderValue::from_static("no"),
     );
-    response
+    response.map(|body| track_downstream_body(body, downstream, downstream_state))
 }
 
 struct DownstreamGone(std::sync::Arc<AdmittedRequestTaskState>);
@@ -627,7 +632,7 @@ pub async fn create_response(
 
     if req.stream.unwrap_or(false) {
         let downstream = DownstreamProtocol::Responses;
-        let downstream_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let downstream_gone = Arc::new(DownstreamStreamState::default());
         let logical_model_for_prestream_error = req.model.clone();
         let stream = deferred_forward_event_stream(
             downstream,
@@ -643,10 +648,15 @@ pub async fn create_response(
                 capture.clone(),
                 downstream_gone.clone(),
             ),
-            downstream_gone,
+            downstream_gone.clone(),
             logical_model_for_prestream_error,
         );
-        return Ok(sse_response(stream, api_stream_keep_alive()));
+        return Ok(sse_response(
+            stream,
+            api_stream_keep_alive(),
+            downstream,
+            downstream_gone,
+        ));
     }
 
     let session_id = extract_client_session_id(&headers);
@@ -717,7 +727,7 @@ pub async fn create_chat_completions(
     };
     if req.stream.unwrap_or(false) {
         let downstream = DownstreamProtocol::ChatCompletions;
-        let downstream_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let downstream_gone = Arc::new(DownstreamStreamState::default());
         let logical_model_for_prestream_error = req.model.clone();
         let stream = deferred_forward_event_stream(
             downstream,
@@ -733,10 +743,15 @@ pub async fn create_chat_completions(
                 capture.clone(),
                 downstream_gone.clone(),
             ),
-            downstream_gone,
+            downstream_gone.clone(),
             logical_model_for_prestream_error,
         );
-        return Ok(sse_response(stream, api_stream_keep_alive()));
+        return Ok(sse_response(
+            stream,
+            api_stream_keep_alive(),
+            downstream,
+            downstream_gone,
+        ));
     }
     let session_id = extract_client_session_id(&headers);
     let task_state = std::sync::Arc::new(AdmittedRequestTaskState::new(std::time::Instant::now()));
@@ -818,7 +833,7 @@ async fn create_messages_inner(
     };
     if req.stream.unwrap_or(false) {
         let downstream = DownstreamProtocol::AnthropicMessages;
-        let downstream_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let downstream_gone = Arc::new(DownstreamStreamState::default());
         let logical_model_for_prestream_error = req.model.clone();
         let stream = deferred_forward_event_stream(
             downstream,
@@ -834,10 +849,15 @@ async fn create_messages_inner(
                 capture.clone(),
                 downstream_gone.clone(),
             ),
-            downstream_gone,
+            downstream_gone.clone(),
             logical_model_for_prestream_error,
         );
-        return Ok(sse_response(stream, messages_stream_keep_alive()));
+        return Ok(sse_response(
+            stream,
+            messages_stream_keep_alive(),
+            downstream,
+            downstream_gone,
+        ));
     }
     let session_id = extract_client_session_id(&headers);
     let task_state = std::sync::Arc::new(AdmittedRequestTaskState::new(std::time::Instant::now()));

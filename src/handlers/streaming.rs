@@ -3,6 +3,89 @@ use crate::urp::stream_decode::stream_upstream_to_urp_events;
 use crate::urp::stream_encode::encode_urp_stream;
 use futures_util::StreamExt;
 
+#[derive(Default)]
+pub(super) struct DownstreamStreamState {
+    delivery: std::sync::atomic::AtomicU8,
+}
+
+impl DownstreamStreamState {
+    const COMPLETE: u8 = 1;
+    const DISCONNECTED: u8 = 2;
+
+    fn mark_complete(&self) {
+        let _ = self.delivery.compare_exchange(
+            0,
+            Self::COMPLETE,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+
+    fn mark_disconnected(&self) {
+        let _ = self.delivery.compare_exchange(
+            0,
+            Self::DISCONNECTED,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+
+    pub(super) fn client_gone(&self) -> bool {
+        self.delivery.load(std::sync::atomic::Ordering::Acquire) == Self::DISCONNECTED
+    }
+}
+
+struct DownstreamBodyStream {
+    inner: std::pin::Pin<Box<axum::body::BodyDataStream>>,
+    downstream: DownstreamProtocol,
+    state: Arc<DownstreamStreamState>,
+}
+
+impl futures_util::Stream for DownstreamBodyStream {
+    type Item = Result<bytes::Bytes, axum::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let next = futures_util::Stream::poll_next(self.inner.as_mut(), cx);
+        if let std::task::Poll::Ready(Some(Ok(bytes))) = &next {
+            // Axum yields one finalized SSE event per body frame. Inspect that existing
+            // frame only when HTTP polls it; enqueueing a terminal is not delivery.
+            let complete = match self.downstream {
+                DownstreamProtocol::Responses => {
+                    bytes.starts_with(b"event: response.completed\n")
+                        || bytes.starts_with(b"event: response.incomplete\n")
+                }
+                DownstreamProtocol::ChatCompletions => bytes.as_ref() == b"data: [DONE]\n\n",
+                DownstreamProtocol::AnthropicMessages => bytes.starts_with(b"event: message_stop\n"),
+            };
+            if complete {
+                self.state.mark_complete();
+            }
+        }
+        next
+    }
+}
+
+impl Drop for DownstreamBodyStream {
+    fn drop(&mut self) {
+        self.state.mark_disconnected();
+    }
+}
+
+pub(super) fn track_downstream_body(
+    body: axum::body::Body,
+    downstream: DownstreamProtocol,
+    state: Arc<DownstreamStreamState>,
+) -> axum::body::Body {
+    axum::body::Body::from_stream(DownstreamBodyStream {
+        inner: Box::pin(body.into_data_stream()),
+        downstream,
+        state,
+    })
+}
+
 type ForwardEventStream = futures_util::stream::Map<
     tokio_stream::wrappers::ReceiverStream<Event>,
     fn(Event) -> Result<Event, std::convert::Infallible>,
@@ -258,7 +341,7 @@ fn prestream_error_stream(
 pub(super) fn deferred_forward_event_stream<F, S>(
     downstream: DownstreamProtocol,
     forwarding: F,
-    downstream_gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    downstream_gone: std::sync::Arc<DownstreamStreamState>,
     logical_model: String,
 ) -> futures_util::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>
 where
@@ -271,7 +354,7 @@ where
         let forwarding_result = tokio::select! {
             biased;
             _ = tx.closed() => {
-                downstream_gone.store(true, std::sync::atomic::Ordering::Release);
+                downstream_gone.mark_disconnected();
                 forwarding.await
             }
             result = &mut forwarding => result,
@@ -286,10 +369,7 @@ where
                             biased;
                             _ = tx.closed() => {
                                 downstream_open = false;
-                                downstream_gone.store(
-                                    true,
-                                    std::sync::atomic::Ordering::Release,
-                                );
+                                downstream_gone.mark_disconnected();
                                 continue;
                             }
                             next = stream.next() => next,
@@ -302,7 +382,7 @@ where
                     };
                     if downstream_open && tx.send(event).await.is_err() {
                         downstream_open = false;
-                        downstream_gone.store(true, std::sync::atomic::Ordering::Release);
+                        downstream_gone.mark_disconnected();
                     }
                 }
             }
@@ -316,10 +396,7 @@ where
                             biased;
                             _ = tx.closed() => {
                                 downstream_open = false;
-                                downstream_gone.store(
-                                    true,
-                                    std::sync::atomic::Ordering::Release,
-                                );
+                                downstream_gone.mark_disconnected();
                                 continue;
                             }
                             next = err_stream.next() => next,
@@ -332,7 +409,7 @@ where
                     };
                     if downstream_open && tx.send(event).await.is_err() {
                         downstream_open = false;
-                        downstream_gone.store(true, std::sync::atomic::Ordering::Release);
+                        downstream_gone.mark_disconnected();
                     }
                 }
             }
@@ -353,7 +430,7 @@ pub(super) async fn forward_stream_typed(
     request_ip: Option<String>,
     client_session_id: Option<String>,
     capture: RequestCaptureContext,
-    downstream_gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    downstream_gone: std::sync::Arc<DownstreamStreamState>,
 ) -> AppResult<
     impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> + Send + 'static,
 > {
@@ -371,10 +448,7 @@ pub(super) async fn forward_stream_typed(
     )
     .await;
     let error = match first {
-        Err(error)
-            if error.routing_exhausted
-                && !downstream_gone.load(std::sync::atomic::Ordering::Acquire) =>
-        {
+        Err(error) if error.routing_exhausted && !downstream_gone.client_gone() => {
             error
         }
         other => return other,
@@ -414,7 +488,7 @@ async fn forward_stream_typed_once(
     request_ip: Option<String>,
     client_session_id: Option<String>,
     capture: RequestCaptureContext,
-    downstream_gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    downstream_gone: std::sync::Arc<DownstreamStreamState>,
 ) -> AppResult<
     impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> + Send + 'static,
 > {
@@ -922,10 +996,7 @@ async fn forward_stream_typed_once(
                                                 None,
                                                 reasoning_effort_for_log,
                                                 tried_providers_for_log,
-                                                tx_err.is_closed()
-                                                    || downstream_gone_for_log.load(
-                                                        std::sync::atomic::Ordering::Acquire,
-                                                    ),
+                                                downstream_gone_for_log.client_gone(),
                                                 upstream_response_model,
                                             );
                                             true
@@ -1601,10 +1672,7 @@ async fn forward_stream_typed_once(
                             Some(terminal_diagnostics),
                             reasoning_effort_for_log,
                             tried_providers_for_log,
-                            tx_err.is_closed()
-                                || downstream_gone_for_log.load(
-                                    std::sync::atomic::Ordering::Acquire,
-                                ),
+                            downstream_gone_for_log.client_gone(),
                             response_model.as_deref().and_then(|observed| {
                                 mismatched_upstream_response_model(&sent_model_for_log, observed)
                             }),
@@ -1827,12 +1895,170 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn delivered_completion_then_client_close_is_not_a_disconnect() {
+        use http_body_util::BodyExt;
+
+        for (downstream, terminal) in [
+            (
+                DownstreamProtocol::Responses,
+                Event::default().event("response.completed").data("{}"),
+            ),
+            (
+                DownstreamProtocol::Responses,
+                Event::default().event("response.incomplete").data("{}"),
+            ),
+            (
+                DownstreamProtocol::ChatCompletions,
+                Event::default().data("[DONE]"),
+            ),
+            (
+                DownstreamProtocol::AnthropicMessages,
+                Event::default().event("message_stop").data(r#"{"type":"message_stop"}"#),
+            ),
+        ] {
+            let downstream_gone = Arc::new(DownstreamStreamState::default());
+            let (settlement_tx, settlement_rx) = tokio::sync::oneshot::channel::<()>();
+            let (drained_tx, drained_rx) = tokio::sync::oneshot::channel::<()>();
+            let inner = futures_util::stream::once(async move { Ok(terminal) }).chain(
+                futures_util::stream::once(async move {
+                    settlement_rx.await.unwrap();
+                    let _ = drained_tx.send(());
+                    Ok(Event::default().comment("settlement finished"))
+                }),
+            );
+            let stream = deferred_forward_event_stream(
+                downstream,
+                async move { Ok::<_, AppError>(inner) },
+                downstream_gone.clone(),
+                "test-model".to_string(),
+            );
+            let mut body = sse_response(
+                stream,
+                api_stream_keep_alive(),
+                downstream,
+                downstream_gone.clone(),
+            )
+            .into_body();
+            assert!(body.frame().await.unwrap().unwrap().is_data());
+            drop(body);
+            settlement_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), drained_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!downstream_gone.client_gone());
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_completion_without_delivery_still_counts_as_disconnect() {
+        use http_body_util::BodyExt;
+
+        for (downstream, terminal) in [
+            (
+                DownstreamProtocol::Responses,
+                Event::default().event("response.completed").data("{}"),
+            ),
+            (
+                DownstreamProtocol::Responses,
+                Event::default().event("response.incomplete").data("{}"),
+            ),
+            (
+                DownstreamProtocol::ChatCompletions,
+                Event::default().data("[DONE]"),
+            ),
+            (
+                DownstreamProtocol::AnthropicMessages,
+                Event::default().event("message_stop").data("{}"),
+            ),
+        ] {
+            let downstream_gone = Arc::new(DownstreamStreamState::default());
+            let (queued_tx, queued_rx) = tokio::sync::oneshot::channel::<()>();
+            let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+            let inner = futures_util::stream::iter([
+                Ok(Event::default().data("first")),
+                Ok(terminal),
+            ])
+            .chain(futures_util::stream::once(async move {
+                let _ = queued_tx.send(());
+                let _ = drain_rx.await;
+                Ok(Event::default().comment("drained"))
+            }));
+            let stream = deferred_forward_event_stream(
+                downstream,
+                async move { Ok::<_, AppError>(inner) },
+                downstream_gone.clone(),
+                "test-model".to_string(),
+            );
+            let mut body = sse_response(
+                stream,
+                api_stream_keep_alive(),
+                downstream,
+                downstream_gone.clone(),
+            )
+            .into_body();
+            assert!(body.frame().await.unwrap().unwrap().is_data());
+            tokio::time::timeout(Duration::from_secs(2), queued_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(body);
+            assert!(downstream_gone.client_gone());
+            drain_tx.send(()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_comments_and_error_frames_are_not_successful_completion() {
+        use http_body_util::BodyExt;
+
+        for (downstream, event) in [
+            (
+                DownstreamProtocol::Responses,
+                Event::default().event("response.failed").data("{}"),
+            ),
+            (
+                DownstreamProtocol::Responses,
+                Event::default().comment("response.completed"),
+            ),
+            (
+                DownstreamProtocol::Responses,
+                Event::default().event("response.output_text.delta").data("response.completed"),
+            ),
+            (
+                DownstreamProtocol::ChatCompletions,
+                Event::default().comment("[DONE]"),
+            ),
+            (
+                DownstreamProtocol::AnthropicMessages,
+                Event::default().event("error").data("{}"),
+            ),
+            (
+                DownstreamProtocol::AnthropicMessages,
+                Event::default().event("ping").data(r#"{"type":"ping"}"#),
+            ),
+        ] {
+            let state = Arc::new(DownstreamStreamState::default());
+            let mut body = sse_response(
+                futures_util::stream::once(async move { Ok::<_, std::convert::Infallible>(event) }),
+                api_stream_keep_alive(),
+                downstream,
+                state.clone(),
+            )
+            .into_body();
+            assert!(body.frame().await.unwrap().unwrap().is_data());
+            drop(body);
+            assert!(state.client_gone());
+        }
+    }
+
+    #[tokio::test]
     async fn pending_forwarding_allows_sse_keep_alive_before_upstream_headers() {
         let forwarding = std::future::pending::<AppResult<ForwardEventStream>>();
         let stream = deferred_forward_event_stream(
             DownstreamProtocol::Responses,
             forwarding,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(DownstreamStreamState::default()),
             "test-model".to_string(),
         );
         let response = Sse::new(stream)
@@ -1865,7 +2091,7 @@ mod tests {
         let mut stream = deferred_forward_event_stream(
             DownstreamProtocol::Responses,
             async move { Ok::<_, AppError>(inner) },
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(DownstreamStreamState::default()),
             "test-model".to_string(),
         );
         assert!(stream.next().await.is_some());
@@ -1881,7 +2107,7 @@ mod tests {
 
     #[tokio::test]
     async fn deferred_stream_marks_disconnect_without_waiting_for_another_event() {
-        let downstream_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let downstream_gone = Arc::new(DownstreamStreamState::default());
         let inner = futures_util::stream::once(async {
             Ok::<_, std::convert::Infallible>(Event::default().data("first"))
         })
@@ -1896,7 +2122,7 @@ mod tests {
         drop(stream);
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !downstream_gone.load(std::sync::atomic::Ordering::Acquire) {
+            while !downstream_gone.client_gone() {
                 tokio::task::yield_now().await;
             }
         })
@@ -1906,7 +2132,7 @@ mod tests {
 
     #[tokio::test]
     async fn deferred_stream_marks_disconnect_while_forwarding_is_pending() {
-        let downstream_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let downstream_gone = Arc::new(DownstreamStreamState::default());
         let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
         let stream = deferred_forward_event_stream(
             DownstreamProtocol::Responses,
@@ -1920,7 +2146,7 @@ mod tests {
         drop(stream);
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !downstream_gone.load(std::sync::atomic::Ordering::Acquire) {
+            while !downstream_gone.client_gone() {
                 tokio::task::yield_now().await;
             }
         })

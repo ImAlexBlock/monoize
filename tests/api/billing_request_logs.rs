@@ -1,5 +1,25 @@
 use super::*;
 
+async fn read_sse_through_terminal(response: axum::response::Response, terminal: &str) -> String {
+    let mut body = response.into_body();
+    let text = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut text = String::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(bytes) = frame.expect("SSE frame").into_data() {
+                text.push_str(std::str::from_utf8(&bytes).expect("SSE UTF-8"));
+                if text.contains(terminal) {
+                    return text;
+                }
+            }
+        }
+        panic!("stream ended before {terminal}: {text}");
+    })
+    .await
+    .expect("stream terminal deadline");
+    drop(body);
+    text
+}
+
 #[tokio::test]
 async fn chat_streaming_records_ttfb_usage_and_charge_in_request_logs() {
     let ctx = setup().await;
@@ -21,7 +41,7 @@ async fn chat_streaming_records_ttfb_usage_and_charge_in_request_logs() {
 
     let resp = ctx.router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let _ = resp.into_body().collect().await.unwrap().to_bytes();
+    read_sse_through_terminal(resp, "data: [DONE]\n\n").await;
     ctx.state.user_store.flush_all_batchers().await;
 
     let user = ctx
@@ -55,6 +75,7 @@ async fn chat_streaming_records_ttfb_usage_and_charge_in_request_logs() {
     }
 
     let log = matched.expect("request log should be inserted");
+    assert_eq!(log.status, "success");
     assert!(log.is_stream);
     // FL4a TPS inputs: output_tokens plus duration_ms/ttfb_ms; both timings must persist.
     let ttfb_ms = log.timing.ttfb_ms.expect("ttfb_ms should be persisted");
@@ -799,8 +820,7 @@ async fn chat_streaming_openrouter_error_is_logged_as_error_and_not_billed() {
 
     let resp = ctx.router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&bytes).to_string();
+    let text = read_sse_through_terminal(resp, "data: [DONE]\n\n").await;
     assert!(
         text.contains("openrouter choice failure") && text.contains("\"code\":502"),
         "downstream should preserve the OpenRouter error: {text}"
@@ -900,8 +920,7 @@ async fn responses_streaming_response_failed_is_logged_as_error_and_not_billed()
 
     let resp = ctx.router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&bytes).to_string();
+    let text = read_sse_through_terminal(resp, "event: response.failed\n").await;
     assert!(
         text.contains("event: response.failed"),
         "downstream should preserve response.failed: {text}"
@@ -1010,8 +1029,7 @@ async fn messages_streaming_upstream_error_is_logged_as_error_and_not_billed() {
 
     let resp = ctx.router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&bytes).to_string();
+    let text = read_sse_through_terminal(resp, "event: error\n").await;
     assert!(
         text.contains("\"type\":\"error\""),
         "downstream should preserve Messages error event: {text}"
