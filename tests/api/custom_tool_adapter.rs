@@ -344,3 +344,135 @@ async fn custom_tool_adapter_response_only_does_not_reclassify_native_functions(
         "{body}"
     );
 }
+
+async fn verify_custom_history_ids_with_responses_upstream(stream: bool) {
+    async fn upstream(
+        axum::extract::State(captured): axum::extract::State<CapturedBodies>,
+        Json(body): Json<Value>,
+    ) -> axum::response::Response {
+        captured
+            .lock()
+            .unwrap()
+            .push(("responses".into(), body.clone()));
+        for (index, item) in body["input"].as_array().unwrap().iter().enumerate() {
+            if matches!(
+                item["type"].as_str(),
+                Some("function_call" | "function_call_output")
+            ) && let Some(id) = item["id"].as_str()
+                && !id.starts_with("fc")
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"message":format!(
+                        "Invalid 'input[{index}].id': '{id}'. Expected an ID that begins with 'fc'."
+                    )}})),
+                )
+                    .into_response();
+            }
+        }
+        let response = json!({
+            "id":"resp_id_fixture","object":"response","status":"completed","model":MODEL,
+            "output":[{"type":"message","id":"msg_id_fixture","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"History accepted.","annotations":[]}]}],
+            "usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}
+        });
+        if body["stream"] == true {
+            let event = json!({"type":"response.completed","response":response});
+            return (
+                [(CONTENT_TYPE, "text/event-stream")],
+                format!("event: response.completed\ndata: {event}\n\n"),
+            )
+                .into_response();
+        }
+        Json(response).into_response()
+    }
+
+    let ctx = setup().await;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route("/v1/responses", post(upstream))
+        .with_state(captured.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    ctx.state.monoize_store.create_provider(serde_json::from_value(json!({
+        "name":"custom-id-fixture-provider","confirm_public_exposure":true,"pricing_profile":"default",
+        "transforms":[{"transform":"field_custom_tools_to_function","phase":"request","config":{"names":["grammar_tool"]}}],
+        "channel":{"name":"custom-id-fixture-channel","provider_type":"responses",
+            "base_url":format!("http://{address}"),"api_key":"fixture-key","models":{(MODEL):{}}}
+    })).unwrap()).await.unwrap();
+    seed_test_model_pricing(&ctx.state, &[MODEL]).await;
+    let native_call = json!({"type":"function_call","id":"fc_native_history","call_id":"native-history",
+        "name":"native_tool","arguments":"{}"});
+    let native_result = json!({"type":"function_call_output","id":"fco_native_history","call_id":"native-history",
+        "output":"native result"});
+    let untouched_call = json!({"type":"custom_tool_call","id":"ctc_untouched","call_id":"untouched-history",
+        "name":"untouched_tool","input":"exact custom input"});
+    let untouched_result = json!({"type":"custom_tool_call_output","id":"ctco_untouched","call_id":"untouched-history",
+        "output":"untouched result"});
+    let payload = json!({"model":MODEL,"stream":stream,"input":[
+        {"type":"custom_tool_call","id":"ctc_history","call_id":"history-custom","namespace":"tools",
+            "name":"grammar_tool","input":CUSTOM_INPUT,"future_item":{"keep":true}},
+        {"type":"custom_tool_call_output","id":"ctco_01a1011e-2686-7731-aa8f-2dc4d235dee0",
+            "call_id":"history-custom","namespace":"tools","output":"custom result","future_item":{"keep":true}},
+        native_call.clone(),native_result.clone(),untouched_call.clone(),untouched_result.clone(),
+        {"type":"message","role":"user","content":"Continue after these tools."}
+    ],"tools":[
+        {"type":"namespace","name":"tools","tools":[{"type":"custom","name":"grammar_tool","format":{"type":"text"}}]},
+        {"type":"function","name":"native_tool","parameters":{"type":"object"}},
+        {"type":"custom","name":"untouched_tool","format":{"type":"text"}}
+    ]});
+    let (status, body) = json_post(&ctx, "/v1/responses", payload).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response = if stream {
+        let frames = parse_responses_sse_json(&body);
+        assert!(frames.iter().all(|(event, _)| event != "error"), "{body}");
+        frames
+            .iter()
+            .find(|(event, _)| event == "response.completed")
+            .expect(&body)
+            .1["response"]
+            .clone()
+    } else {
+        serde_json::from_str::<Value>(&body).unwrap()
+    };
+    assert_eq!(response["status"], "completed", "{body}");
+    assert_eq!(
+        response["output"][0]["content"][0]["text"],
+        "History accepted."
+    );
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1, "{captured:?}");
+    let upstream = &captured[0].1;
+    assert_eq!(upstream["stream"], stream, "{upstream}");
+    let input = upstream["input"].as_array().unwrap();
+    assert_eq!(input[0]["type"], "function_call");
+    assert_eq!(input[1]["type"], "function_call_output");
+    for item in &input[..2] {
+        assert!(item.get("id").is_none(), "{upstream}");
+        assert_eq!(item["call_id"], "history-custom");
+        assert_eq!(item["namespace"], "tools");
+        assert_eq!(item["future_item"], json!({"keep":true}));
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(input[0]["arguments"].as_str().unwrap()).unwrap(),
+        json!({"input":CUSTOM_INPUT})
+    );
+    assert_eq!(input[1]["output"], "custom result");
+    assert_eq!(input[2], native_call);
+    assert_eq!(input[3], native_result);
+    assert_eq!(input[4], untouched_call);
+    assert_eq!(input[5], untouched_result);
+}
+
+#[tokio::test]
+async fn custom_tool_adapter_history_ids_are_valid_for_responses_upstream_nonstream() {
+    verify_custom_history_ids_with_responses_upstream(false).await;
+}
+
+#[tokio::test]
+async fn custom_tool_adapter_history_ids_are_valid_for_responses_upstream_stream() {
+    verify_custom_history_ids_with_responses_upstream(true).await;
+}

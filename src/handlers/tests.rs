@@ -3729,6 +3729,25 @@ fn midstream_terminal_failure_class_maps_breaker_relevant_signals() {
         routing::midstream_terminal_failure_class(400, Some("overloaded_error"), None),
         Some(routing::RetryableFailureClass::Transient)
     );
+    for signal in ["server_is_overloaded", " SERVICE_UNAVAILABLE_ERROR ", "internal_server_error"] {
+        for (code, error_type) in [(Some(signal), None), (None, Some(signal))] {
+            assert_eq!(
+                routing::midstream_terminal_failure_class(400, code, error_type),
+                Some(routing::RetryableFailureClass::Transient),
+                "{signal}"
+            );
+            assert_eq!(
+                routing::midstream_terminal_failure_class(403, code, error_type),
+                Some(routing::RetryableFailureClass::Persistent),
+                "{signal}"
+            );
+            assert_eq!(
+                routing::midstream_terminal_failure_class(429, code, error_type),
+                Some(routing::RetryableFailureClass::RateLimited),
+                "{signal}"
+            );
+        }
+    }
     assert_eq!(
         routing::midstream_terminal_failure_class(403, Some("rate_limit_exceeded"), None),
         Some(routing::RetryableFailureClass::Persistent)

@@ -299,6 +299,8 @@ FP5. **Decode upstream response:**
 
 FP5a. Streaming decoders MUST emit canonical URP v2 stream events directly. They MUST NOT first regroup upstream protocol objects into canonical message wrappers.
 
+FP5a-1. Responses and Chat Completions streaming decoders MUST derive the internal terminal-error HTTP status from the first valid numeric value in this order: the error object's `status`, its `status_code`, the event object's `status`, and its `status_code`. A valid value is an integer in `400..=599`. Chat Completions MUST next accept a numeric error-object `code` in that range. If no explicit value is valid, compare the structured error `code` and `type` after ASCII lowercase conversion and surrounding whitespace removal. A signal equal to `server_is_overloaded`, `service_unavailable_error`, `overloaded_error`, `service_unavailable`, or `temporarily_unavailable` MUST produce status `503`. Otherwise, a signal equal to `server_error` or `internal_server_error` MUST produce status `502`. Other errors MUST retain the protocol fallback: `400` for Responses and `502` for Chat Completions. These statuses apply to terminal diagnostics, request logs, and Channel health classification. This inference MUST NOT add a status field to downstream SSE payloads, change the downstream HTTP status, alter the source error code or type, inspect free-text messages, or authorize replay after streaming has started.
+
 FP5b. The pass-through streaming decoder entrypoint MUST be `stream_upstream_to_urp_events(urp, provider_type, upstream_resp, tx, started_at, runtime_metrics)`.
 
 FP5c. `stream_upstream_to_urp_events` MUST dispatch by `provider_type` to exactly these decoder families:

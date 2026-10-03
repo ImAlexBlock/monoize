@@ -1058,10 +1058,16 @@ async fn emit_chat_terminal_error(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let http_status = error
-        .and_then(|error| error.get("code"))
-        .and_then(Value::as_u64)
-        .filter(|status| (400..=599).contains(status))
-        .map(|status| status as u16)
+        .and_then(super::explicit_stream_error_status)
+        .or_else(|| original_event.as_ref().and_then(super::explicit_stream_error_status))
+        .or_else(|| {
+            error
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_u64)
+                .filter(|status| (400..=599).contains(status))
+                .map(|status| status as u16)
+        })
+        .or_else(|| super::inferred_stream_error_status(Some(&code), error_type.as_deref()))
         .unwrap_or(StatusCode::BAD_GATEWAY.as_u16());
     let numeric_code = error
         .and_then(|error| {

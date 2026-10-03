@@ -351,12 +351,9 @@ fn responses_stream_error_parts(
         .and_then(|v| v.as_str())
         .or_else(|| data_val.get("param").and_then(|v| v.as_str()))
         .map(|value| value.to_string());
-    let http_status = error_value
-        .get("status")
-        .and_then(|v| v.as_u64())
-        .or_else(|| data_val.get("status").and_then(|v| v.as_u64()))
-        .filter(|status| (400..=599).contains(status))
-        .and_then(|status| u16::try_from(status).ok())
+    let http_status = super::explicit_stream_error_status(&error_value)
+        .or_else(|| super::explicit_stream_error_status(&data_val))
+        .or_else(|| super::inferred_stream_error_status(code.as_deref(), error_type.as_deref()))
         .unwrap_or(StatusCode::BAD_REQUEST.as_u16());
     let terminal_error = StreamTerminalError {
         code: code

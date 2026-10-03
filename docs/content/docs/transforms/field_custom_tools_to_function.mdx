@@ -20,6 +20,8 @@ The request rule converts selected custom tools, including tools inside `namespa
 It wraps each original custom input string in a required string field named `input`.
 It preserves that entire string, even when the string contains JSON.
 It also updates matching tool history, correlated results, and `tool_choice`, including selections inside `allowed_tools`.
+Converted history calls and results omit their optional item `id` because custom item IDs do not identify function items.
+Their correlation `call_id` remains unchanged.
 
 The response rule restores the converted calls and unwraps their `input` strings.
 If the complete arguments are a JSON string, it decodes that string.

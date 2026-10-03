@@ -433,6 +433,7 @@ fn convert_tool_to_function(
 
 fn convert_node_request(node: &mut Node, cfg: &Config, conversions: &mut CustomToolConversions) {
     let Node::ToolCall {
+        id,
         tool_type,
         namespace,
         call_id,
@@ -450,6 +451,7 @@ fn convert_node_request(node: &mut Node, cfg: &Config, conversions: &mut CustomT
     conversions.converted.insert(key.clone());
     conversions.request_calls.insert(call_id.clone(), key);
     *tool_type = ToolCallType::Function;
+    *id = None;
     *arguments = wrap_input(arguments);
 }
 
@@ -652,6 +654,7 @@ fn apply_request(
     }
     for node in &mut req.input {
         if let Node::ToolResult {
+            id,
             tool_type,
             namespace,
             name,
@@ -667,6 +670,7 @@ fn apply_request(
                 }))
         {
             *tool_type = ToolCallType::Function;
+            *id = None;
         }
     }
     if let Some(ToolChoice::Specific(value)) = req.tool_choice.as_mut() {

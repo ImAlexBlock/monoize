@@ -15,6 +15,38 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
+fn explicit_stream_error_status(value: &Value) -> Option<u16> {
+    ["status", "status_code"].into_iter().find_map(|field| {
+        value
+            .get(field)
+            .and_then(Value::as_u64)
+            .filter(|status| (400..=599).contains(status))
+            .map(|status| status as u16)
+    })
+}
+
+fn inferred_stream_error_status(code: Option<&str>, error_type: Option<&str>) -> Option<u16> {
+    let signals = [code, error_type].map(|signal| signal.map(|s| s.trim().to_ascii_lowercase()));
+    if signals.iter().flatten().any(|signal| {
+        matches!(
+            signal.as_str(),
+            "server_is_overloaded"
+                | "service_unavailable_error"
+                | "overloaded_error"
+                | "service_unavailable"
+                | "temporarily_unavailable"
+        )
+    }) {
+        Some(StatusCode::SERVICE_UNAVAILABLE.as_u16())
+    } else if signals.iter().flatten().any(|signal| {
+        matches!(signal.as_str(), "server_error" | "internal_server_error")
+    }) {
+        Some(StatusCode::BAD_GATEWAY.as_u16())
+    } else {
+        None
+    }
+}
+
 pub(crate) async fn stream_upstream_to_urp_events(
     urp: &UrpRequest,
     pending_request_envelope_extra: Option<HashMap<String, Value>>,

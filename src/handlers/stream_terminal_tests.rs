@@ -299,3 +299,91 @@ fn incomplete_encoder_terminal_preserves_original_transport_error_without_repeat
     assert_eq!(result.message, "connection ended");
     assert!(result.downstream_stream_terminal_sent);
 }
+
+#[tokio::test]
+async fn upstream_sse_error_status_preserves_explicit_values_and_classifies_server_failures() {
+    let cases = [
+        (json!({"code":"server_is_overloaded","type":"service_unavailable_error"}), None, 503, 503),
+        (json!({"code":"provider_failure","type":" SERVICE_UNAVAILABLE_ERROR "}), None, 503, 503),
+        (json!({"code":" SERVER_IS_OVERLOADED ","type":"server_error"}), None, 503, 503),
+        (json!({"code":"server_error","type":"server_error"}), None, 502, 502),
+        (json!({"code":"internal_server_error"}), None, 502, 502),
+        (json!({"code":"invalid_value","type":"invalid_request_error","status":400}), None, 400, 400),
+        (json!({"code":"server_error","status":400}), None, 400, 400),
+        (json!({"code":"server_is_overloaded","status":401}), None, 401, 401),
+        (json!({"code":"server_error","status_code":503}), None, 503, 503),
+        (json!({"code":"server_error","status":500,"status_code":503}), Some(504), 500, 500),
+        (json!({"code":"server_error","status":200}), Some(429), 429, 429),
+        (json!({"code":"server_error","status":600}), Some(504), 504, 504),
+        (json!({"code":"server_error","status":"503"}), None, 502, 502),
+        (json!({"code":"invalid_value","type":"invalid_request_error"}), None, 400, 502),
+        (json!({"code":"provider_failure","message":"server_is_overloaded; you can retry your request"}), None, 400, 502),
+        (json!({"code":429}), None, 400, 429),
+        (json!({"code":429,"status":400}), None, 400, 400),
+    ];
+    for (error, event_status, responses_status, chat_status) in cases {
+        for shape in ["responses", "responses_bare", "responses_failed", "chat", "chat_choice"] {
+            let is_responses = shape.starts_with("responses");
+            let mut event = match shape {
+                "responses" => json!({"type":"error","error":error.clone()}),
+                "responses_bare" => json!({"error":error.clone()}),
+                "responses_failed" => json!({
+                    "type":"response.failed",
+                    "response":{"id":"resp_failure","status":"failed","output":[],"error":error.clone()}
+                }),
+                "chat_choice" => json!({"choices":[{"index":0,"delta":{},"finish_reason":"error","error":error.clone()}]}),
+                _ => json!({"error":error.clone()}),
+            };
+            if let Some(status) = event_status {
+                event["status"] = json!(status);
+            }
+            let preamble = if is_responses {
+                json!({"type":"response.created","response":{"id":"resp_failure","status":"in_progress","output":[]}})
+            } else {
+                json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})
+            };
+            let upstream = reqwest::Response::from(
+                axum::http::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(format!("data: {preamble}\n\ndata: {event}\n\n"))
+                    .unwrap(),
+            );
+            let request = UrpRequest {
+                model: "test-model".to_string(),
+                estimated_input_tokens: Default::default(),
+                has_tools: false,
+                max_multiplier: None,
+                audio_output_format: None,
+                server_tool_usage_classes: vec![],
+                messages_custom_tool_names: Default::default(),
+                affinity_explicit: None,
+                affinity_prefix_hash: String::new(),
+            };
+            let metrics = Arc::new(Mutex::new(StreamRuntimeMetrics::default()));
+            let (tx, mut rx) = mpsc::channel(64);
+            crate::urp::stream_decode::stream_upstream_to_urp_events(
+                &request,
+                None,
+                if is_responses { ProviderType::Responses } else { ProviderType::ChatCompletion },
+                upstream,
+                tx,
+                None,
+                Some(metrics.clone()),
+                1000,
+            )
+            .await
+            .unwrap();
+            while rx.recv().await.is_some() {}
+            let terminal = metrics.lock().await.terminal.terminal_error.clone().expect("terminal error");
+            assert_eq!(
+                terminal.http_status,
+                if is_responses { responses_status } else { chat_status },
+                "{shape}: {event}"
+            );
+            if let Some(code) = error["code"].as_str() {
+                assert_eq!(terminal.code, code, "{shape}: {event}");
+            }
+            assert_eq!(terminal.error_type.as_deref(), error["type"].as_str(), "{shape}: {event}");
+        }
+    }
+}

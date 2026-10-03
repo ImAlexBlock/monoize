@@ -1471,7 +1471,10 @@ pub(super) fn classify_channel_health_failure(
         || http_status.is_some_and(|status| (500..600).contains(&status))
         || has_signal(&[
             "overloaded_error",
+            "server_is_overloaded",
+            "service_unavailable_error",
             "server_error",
+            "internal_server_error",
             "service_unavailable",
             "temporarily_unavailable",
         ])

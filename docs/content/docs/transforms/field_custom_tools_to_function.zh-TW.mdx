@@ -20,6 +20,8 @@ description: 將指定的 custom 工具轉換為 JSON function，供不支援 cu
 原始 custom 輸入字串會包裝在必填字串欄位 `input` 中。
 即使原始字串包含 JSON，也會完整保留。
 規則也會更新對應的工具歷史、關聯結果與 `tool_choice`，包括 `allowed_tools` 內的選擇器。
+轉換後的歷史呼叫與結果會省略選填的項目 `id`，因為 custom 項目 ID 不能用於 function 項目。
+用於關聯呼叫與結果的 `call_id` 維持不變。
 
 回應規則會還原已轉換的呼叫，並解開其 `input` 字串。
 如果完整參數是 JSON 字串，則解碼該字串。

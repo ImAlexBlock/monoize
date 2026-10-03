@@ -225,6 +225,92 @@ fn custom_json_history_is_wrapped_once_and_results_follow_call_ids() {
 }
 
 #[test]
+fn converted_history_clears_custom_item_ids_without_changing_correlation_or_metadata() {
+    let cfg = cfg(&["patch"]);
+    let raw = r#"{"input":"literal custom JSON"}"#;
+    let mut req = request(
+        json!([{"type":"namespace","name":"tools","tools":[custom("patch")]}]),
+        json!([
+            {"type":"tool_result","tool_type":"custom","id":"ctco_01a1011e-2686-7731-aa8f-2dc4d235dee0",
+                "call_id":"history-call","namespace":"tools","name":"patch",
+                "content":[{"type":"text","text":"done","future_content":7}],"future_item":{"keep":true}},
+            {"type":"tool_call","tool_type":"custom","id":"ctc_history","call_id":"history-call",
+                "namespace":"tools","name":"patch","arguments":raw,"future_item":{"keep":true}},
+            {"type":"tool_call","tool_type":"function","id":"fc_native","call_id":"native-call",
+                "namespace":"tools","name":"read","arguments":"{}"},
+            {"type":"tool_result","tool_type":"function","id":"fco_native","call_id":"native-call",
+                "content":[{"type":"text","text":"native result"}]},
+            {"type":"tool_call","tool_type":"custom","id":"ctc_unselected","call_id":"unselected-call",
+                "namespace":"tools","name":"unselected","arguments":"unchanged"},
+            {"type":"tool_result","tool_type":"custom","id":"ctco_unselected","call_id":"unselected-call",
+                "content":[{"type":"text","text":"unselected result"}]}
+        ]),
+        Value::Null,
+    );
+    let original = value(&req);
+    let mut conversions = CustomToolConversions::default();
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    let transformed = value(&req);
+    for index in 0..2 {
+        let mut expected = original["input"][index].clone();
+        expected.as_object_mut().unwrap().remove("id");
+        expected["tool_type"] = json!("function");
+        if index == 1 {
+            expected["arguments"] = json!(wrap_input(raw));
+        }
+        assert_eq!(transformed["input"][index], expected);
+    }
+    for index in 2..6 {
+        assert_eq!(transformed["input"][index], original["input"][index]);
+    }
+    let wire = crate::urp::encode::openai_responses::encode_request(&req, "test");
+    for index in 0..2 {
+        assert!(wire["input"][index].get("id").is_none(), "{wire}");
+        assert_eq!(wire["input"][index]["call_id"], "history-call");
+        assert_eq!(wire["input"][index]["namespace"], "tools");
+        assert_eq!(wire["input"][index]["future_item"], json!({"keep":true}));
+    }
+    assert_eq!(wire["input"][0]["type"], "function_call_output");
+    assert_eq!(wire["input"][1]["type"], "function_call");
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    assert_eq!(value(&req), transformed);
+    assert_eq!(
+        crate::urp::encode::openai_responses::encode_request(&req, "test"),
+        wire
+    );
+}
+
+#[test]
+fn only_descriptor_matched_orphan_result_loses_its_custom_item_id() {
+    let cfg = cfg(&["patch"]);
+    let mut req = request(
+        json!([{"type":"namespace","name":"tools","tools":[custom("patch")]}]),
+        json!([
+            {"type":"tool_result","tool_type":"custom","id":"ctco_orphan","call_id":"orphan-call",
+                "namespace":"tools","name":"patch","content":[{"type":"text","text":"done"}],"trace":8},
+            {"type":"tool_result","tool_type":"custom","id":"ctco_other","call_id":"other-call",
+                "namespace":"other","name":"patch","content":[],"trace":9},
+            {"type":"tool_result","tool_type":"custom","id":"ctco_unnamed","call_id":"unnamed-call",
+                "content":[]}
+        ]),
+        Value::Null,
+    );
+    let original = value(&req);
+    let mut conversions = CustomToolConversions::default();
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    let transformed = value(&req);
+    let mut expected = original["input"][0].clone();
+    expected.as_object_mut().unwrap().remove("id");
+    expected["tool_type"] = json!("function");
+    assert_eq!(transformed["input"][0], expected);
+    for index in 1..3 {
+        assert_eq!(transformed["input"][index], original["input"][index]);
+    }
+    apply_request(&mut req, &cfg, &mut conversions).unwrap();
+    assert_eq!(value(&req), transformed);
+}
+
+#[test]
 fn selectors_convert_supported_shapes_without_touching_extension_payloads() {
     let cfg = cfg(&["*"]);
     let extension = json!({"type":"custom","name":"patch","custom":{"name":"patch"}});
